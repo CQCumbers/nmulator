@@ -1,0 +1,14 @@
+# based on Makefile clean command
+decoder
+*~
+*.out
+*.dSYM
+*.stackdump
+
+# macOS stuff
+.DS_Store
+frame_boy.xcodeproj/
+gdb-entitlement.xml
+
+# test roms
+roms/
