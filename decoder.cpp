@@ -210,6 +210,19 @@ struct MipsJit {
     } else if (rt(instr) == 0) {
       // ADD RD, RS, $0
       move(rd(instr), rs(instr));
+    } else if (rd(instr) == rs(instr)) {
+      uint8_t rtx = x86_reg(rt(instr));
+      // ADD RD, RD, RT
+      if (rdx) {
+        if (rtx) as.add(x86::gpd(rdx), x86::gpd(rtx));
+        else as.add(x86::gpd(rdx), x86_spill(rt(instr)));
+      } else {
+        if (rtx) as.add(x86_spill(rd(instr)), x86::gpd(rtx));
+        else {
+          as.mov(x86::eax, x86_spill(rt(instr)));
+          as.add(x86_spill(rd(instr)), x86::eax);
+        }
+      }
     } else {
       uint8_t rsx = x86_reg(rs(instr));
       // ADD RD, RS, RT
@@ -259,6 +272,19 @@ struct MipsJit {
     } else if (rt(instr) == 0) {
       // OR RD, RS, $0
       move(rd(instr), rs(instr));
+    } else if (rd(instr) == rs(instr)) {
+      uint8_t rtx = x86_reg(rt(instr));
+      // OR RD, RD, RT
+      if (rdx) {
+        if (rtx) as.or_(x86::gpd(rdx), x86::gpd(rtx));
+        else as.or_(x86::gpd(rdx), x86_spill(rt(instr)));
+      } else {
+        if (rtx) as.or_(x86_spill(rd(instr)), x86::gpd(rtx));
+        else {
+          as.mov(x86::eax, x86_spill(rt(instr)));
+          as.or_(x86_spill(rd(instr)), x86::eax);
+        }
+      }
     } else {
       uint8_t rsx = x86_reg(rs(instr));
       // OR RD, RS, RT
@@ -305,6 +331,19 @@ struct MipsJit {
     } else if (rt(instr) == rs(instr)) {
       // AND RD, RT, RT
       move(rd(instr), rt(instr));
+    } else if (rd(instr) == rs(instr)) {
+      uint8_t rtx = x86_reg(rt(instr));
+      // AND RD, RD, RT
+      if (rdx) {
+        if (rtx) as.and_(x86::gpd(rdx), x86::gpd(rtx));
+        else as.and_(x86::gpd(rdx), x86_spill(rt(instr)));
+      } else {
+        if (rtx) as.and_(x86_spill(rd(instr)), x86::gpd(rtx));
+        else {
+          as.mov(x86::eax, x86_spill(rt(instr)));
+          as.and_(x86_spill(rd(instr)), x86::eax);
+        }
+      }
     } else {
       uint8_t rsx = x86_reg(rs(instr));
       // AND RD, RS, RT
@@ -502,7 +541,7 @@ struct MipsJit {
       return block_end;
     }
     compare(rt(instr), rs(instr));
-    as.mov(x86::edi, pc);
+    as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     as.cmove(x86::edi, x86::eax);
     return block_end;
@@ -511,7 +550,7 @@ struct MipsJit {
   uint32_t bne(uint32_t instr, uint32_t pc) {
     if (rt(instr) == rs(instr)) return pc;
     compare(rt(instr), rs(instr));
-    as.mov(x86::edi, pc);
+    as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     as.cmovne(x86::edi, x86::eax);
     return block_end;
@@ -525,7 +564,7 @@ struct MipsJit {
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
     else as.cmp(x86_spill(rsx), 0);
-    as.mov(x86::edi, pc);
+    as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     as.cmovg(x86::edi, x86::eax);
     return block_end;
@@ -536,7 +575,7 @@ struct MipsJit {
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
     else as.cmp(x86_spill(rsx), 0);
-    as.mov(x86::edi, pc);
+    as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     as.cmovle(x86::edi, x86::eax);
     return block_end;
@@ -704,7 +743,7 @@ int main(int argc, char* argv[]) {
     }
     pc = run_block();
     printf("call stack: %d\n", call_stack);
-    printf("mem at 0x80..: %x\n", mem_read(0x80000000));
+    printf("$t0: %llx, $t3: %llx\n", reg_array[8], reg_array[11]);
     printf("Executed block %x\n", pc);
   }
 }
