@@ -25,29 +25,51 @@
 /* == Lots of Global Variables === */
 
 using namespace asmjit;
+
 typedef uint32_t (*Function)();
-
 std::unordered_map<uint32_t, Function> blocks;
-uint8_t *mem_array;
 const uint32_t block_end = 0x04ffffff;
-const uint32_t addr_mask = 0x1fffffff;
-
-uint64_t reg_array[0x23];
-const uint8_t hi = 0x20, lo = 0x21;
 
 uint8_t call_stack = 0;
 
-/* === Instruction Decoding == */
+/* === Memory Access === */
 
-inline uint32_t mem_read(uint32_t addr) {
-  uint32_t val = *reinterpret_cast<uint32_t*>(mem_array + (addr & addr_mask));
+const uint32_t addr_mask = 0x1fffffff;
+const uint32_t page_mask = 0x1fffff;
+uint8_t *pages[0x100] = {nullptr};
+uint32_t pi_rom, pi_ram = 0;
+
+uint32_t read32_special(uint32_t addr) {
+  return 0;
+}
+
+void write32_special(uint32_t addr, uint32_t val) {
+  if ((addr & addr_mask) == 0x04600000) pi_ram = val & 0xffffff; // PI RAM ADDR
+  else if ((addr & addr_mask) == 0x04600004) pi_rom = val & addr_mask; // PI ROM ADDR
+  else if ((addr & addr_mask) == 0x04600008) { // TRANSFER SIZE (RAM to ROM)
+    memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val);
+  } else if ((addr & addr_mask) == 0x0460000c) { // TRANSFER SIZE (ROM to RAM)
+    printf("Copying %x bytes from %x to %x\n", val, pi_rom, pi_ram);
+    memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val);
+  }
+}
+
+uint32_t read32(uint32_t addr) {
+  uint32_t *page = reinterpret_cast<uint32_t*>(pages[(addr >> 21) & 0xff]);
+  if (!page) return read32_special(addr);
+  //printf("Reading from %llx\n", (uint64_t)(&page[(addr & page_mask) >> 2]));
+  uint32_t val = page[(addr & page_mask) >> 2];
   return __builtin_bswap32(val);
 }
 
-inline void mem_write(uint32_t addr, uint32_t val) {
-  uint32_t *place = reinterpret_cast<uint32_t*>(mem_array + (addr & addr_mask));
-  *place = val;
+void write32(uint32_t addr, uint32_t val) {
+  uint32_t *page = reinterpret_cast<uint32_t*>(pages[(addr >> 21) & 0xff]);
+  if (!page) return write32_special(addr, val);
+  //printf("Writing to %llx %x\n", (uint64_t)(&page[(addr & page_mask) >> 2]), val);
+  page[(addr & page_mask) >> 2] = __builtin_bswap32(val);
 }
+
+/* === Instruction Decoding === */
 
 inline int32_t target(uint32_t instr) {
   int32_t val = (instr & 0x3ffffff) << 2;
@@ -81,9 +103,12 @@ inline uint32_t uimm(uint32_t instr) {
 
 /* === Register Allocation === */
 
+uint64_t reg_array[0x22];
+const uint8_t hi = 0x20, lo = 0x21;
+
 uint8_t x86_reg(uint8_t reg) {
   uint8_t mapping[0x20] = {0};
-  mapping[5] = 2, mapping[6] = 3;
+  mapping[5] = 12, mapping[6] = 13;
   return mapping[reg];
 }
 
@@ -133,43 +158,55 @@ struct MipsJit {
     }
   }
 
-  void translate_addr(int32_t offset) {
-    as.add(x86::eax, offset);
-
-    // calc page table entry for address (0 for now)
-    //as.xor_(x86::ecx, x86::ecx);
-
-    // add base addr from page table at rbp + 0x110
-    //as.add(x86::rcx, x86::rbp);
-    as.and_(x86::eax, addr_mask);
-    as.add(x86::rax, x86::dword_ptr(x86::rbp, 0x110));
-  }
-
   void lw(uint32_t instr) {
     if (rt(instr) == 0) return;
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // LW BASE(RS), RT, OFFSET(IMMEDIATE)
-    if (rsx) as.mov(x86::eax, x86::gpd(rsx));
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+			as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    as.call(reinterpret_cast<uint64_t>(read32));
+    if (rtx) as.mov(x86::gpd(rtx), x86::eax);
+    else as.mov(x86_spill(rt(instr)), x86::eax);
+    as.pop(x86::rdi);
+
+    /*if (rsx) as.mov(x86::eax, x86::gpd(rsx));
     else as.mov(x86::eax, x86_spill(rs(instr)));
     translate_addr(imm(instr));
     if (rtx) as.movbe(x86::gpd(rtx), x86::dword_ptr(x86::rax));
     else {
       as.movbe(x86::ecx, x86::dword_ptr(x86::rax));
       as.mov(x86_spill(rt(instr)), x86::ecx);
-    }
+    }*/
   }
 
   void sw(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SW BASE(RS), RT, OFFSET(IMMEDIATE)
-    if (rsx) as.mov(x86::eax, x86::gpd(rsx));
+    as.push(x86::edi);
+    as.push(x86::esi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+			as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    if (rtx) as.mov(x86::esi, x86::gpd(rtx));
+    else as.mov(x86::esi, x86_spill(rt(instr)));
+    as.call(reinterpret_cast<uint64_t>(write32));
+    as.pop(x86::esi);
+    as.pop(x86::edi);
+
+    /*if (rsx) as.mov(x86::eax, x86::gpd(rsx));
     else as.mov(x86::eax, x86_spill(rs(instr)));
     translate_addr(imm(instr));
     if (rtx) as.movbe(x86::dword_ptr(x86::rax), x86::gpd(rtx));
     else {
       as.mov(x86::ecx, x86_spill(rt(instr)));
       as.movbe(x86::dword_ptr(x86::rax), x86::ecx);
-    }
+    }*/
   }
 
   void lui(uint32_t instr) {
@@ -877,7 +914,7 @@ struct MipsJit {
 
     for (uint32_t next_pc = pc + 4; pc != block_end;) {
       printf("%x\n", pc);
-      uint32_t instr = mem_read(pc);
+      uint32_t instr = read32(pc);
       pc = next_pc, next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
@@ -924,16 +961,20 @@ int main(int argc, char* argv[]) {
     exit(1);
   }
 
-  mem_array = static_cast<uint8_t*>(mmap(NULL, addr_mask,
-      PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, 0, 0));
-  printf("mem_array is at address: %p\n", static_cast<void*>(mem_array));
+  pages[0] = reinterpret_cast<uint8_t*>(mmap(NULL, 0x20000000,
+    PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, 0, 0));
+  for (uint32_t i = 0x1; i < 0x100; ++i) {
+    if (i != 0x23) pages[i] = pages[0] + i * (page_mask + 1);
+  }
+  printf("mem_array is at address: %p\n", pages[0]);
+
   // set sp to pif boot rom value
   reg_array[29] = 0xa4001ff0;
-  // use last entry in reg_array for mem start addres
-  reg_array[34] = reinterpret_cast<uint64_t>(mem_array);
-
-  fread(mem_array + 0x04000040, 1, 4032, file);
+  fread(pages[0] + 0x04000000, 1, 0x101000, file);
   fclose(file);
+
+  // Cartridge Header at 0x10000000
+  memcpy(pages[0] + 0x10000000, pages[0] + 0x04000000, 0x40);
 
   while (true) {
     Function &run_block = blocks[pc];
@@ -951,7 +992,7 @@ int main(int argc, char* argv[]) {
     }
     pc = run_block();
     printf("call stack: %d\n", call_stack);
-    printf("$t0: %llx, $t3: %llx\n", reg_array[8], reg_array[11]);
-    printf("Executed block %x\n", pc);
+    printf("$sp: %llx\n", reg_array[29]);
+    printf("next block at %x\n", pc);
   }
 }
