@@ -29,10 +29,11 @@ typedef uint32_t (*Function)();
 
 std::unordered_map<uint32_t, Function> blocks;
 uint8_t *mem_array;
-uint8_t zero_array[] = {0};
-uint64_t reg_array[0x21];
 const uint32_t block_end = 0x04ffffff;
 const uint32_t addr_mask = 0x1fffffff;
+
+uint64_t reg_array[0x23];
+const uint8_t hi = 0x20, lo = 0x21;
 
 uint8_t call_stack = 0;
 
@@ -138,10 +139,10 @@ struct MipsJit {
     // calc page table entry for address (0 for now)
     //as.xor_(x86::ecx, x86::ecx);
 
-    // add base addr from page table at rbp + 0x100
+    // add base addr from page table at rbp + 0x110
     //as.add(x86::rcx, x86::rbp);
     as.and_(x86::eax, addr_mask);
-    as.add(x86::rax, x86::dword_ptr(x86::rbp, 0x100));
+    as.add(x86::rax, x86::dword_ptr(x86::rbp, 0x110));
   }
 
   void lw(uint32_t instr) {
@@ -240,6 +241,51 @@ struct MipsJit {
     }
   }
 
+  void subu(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint8_t rdx = x86_reg(rd(instr));
+    if (rs(instr) == 0 && rt(instr) == 0) {
+      // SUB RD, $0, $0 
+      if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
+      else as.mov(x86_spill(rd(instr)), 0);
+    } else if (rs(instr) == 0) {
+      // SUB RD, $0, RT
+      move(rd(instr), rt(instr));
+    } else if (rt(instr) == 0) {
+      // SUB RD, RS, $0
+      move(rd(instr), rs(instr));
+    } else if (rd(instr) == rs(instr)) {
+      uint8_t rtx = x86_reg(rt(instr));
+      // SUB RD, RD, RT
+      if (rdx) {
+        if (rtx) as.sub(x86::gpd(rdx), x86::gpd(rtx));
+        else as.sub(x86::gpd(rdx), x86_spill(rt(instr)));
+      } else {
+        if (rtx) as.sub(x86_spill(rd(instr)), x86::gpd(rtx));
+        else {
+          as.mov(x86::eax, x86_spill(rt(instr)));
+          as.sub(x86_spill(rd(instr)), x86::eax);
+        }
+      }
+    } else {
+      uint8_t rsx = x86_reg(rs(instr));
+      // SUB RD, RS, RT
+      move(rd(instr), rt(instr));
+      if (rdx) {
+        if (rsx) as.sub(x86::gpd(rdx), x86::gpd(rsx));
+        else as.sub(x86::gpd(rdx), x86_spill(rs(instr)));
+        as.neg(x86::gpd(rdx));
+      } else {
+        if (rsx) as.sub(x86_spill(rd(instr)), x86::gpd(rsx));
+        else {
+          as.mov(x86::eax, x86_spill(rs(instr)));
+          as.sub(x86_spill(rd(instr)), x86::eax);
+        }
+        as.neg(x86_spill(rd(instr)));
+      }
+    }
+  }
+
   void ori(uint32_t instr) {
     if (rt(instr) == 0) return;
     uint8_t rtx = x86_reg(rt(instr));
@@ -247,10 +293,6 @@ struct MipsJit {
       // ORI RT, $0, IMMEDIATE
       if (rtx) as.mov(x86::gpd(rtx), uimm(instr));
       else as.mov(x86_spill(rt(instr)), uimm(instr));
-    } else if (rt(instr) == rs(instr)) {
-      // ORI RT, RT, IMMEDIATE
-      if (rtx) as.or_(x86::gpd(rtx), uimm(instr));
-      else as.or_(x86_spill(rt(instr)), uimm(instr));
     } else {
       // ORI RT, RS, IMMEDIATE
       move(rt(instr), rs(instr));
@@ -309,10 +351,6 @@ struct MipsJit {
       // ANDI RT, $0, IMMEDIATE
       if (rtx) as.xor_(x86::gpd(rtx), x86::gpd(rtx));
       else as.mov(x86_spill(rt(instr)), 0);
-    } else if (rt(instr) == rs(instr)) {
-      // ANDI RT, RT, IMMEDIATE
-      if (rtx) as.and_(x86::gpd(rtx), uimm(instr));
-      else as.and_(x86_spill(rt(instr)), uimm(instr));
     } else {
       // ANDI RT, RS, IMMEDIATE
       move(rt(instr), rs(instr));
@@ -368,15 +406,54 @@ struct MipsJit {
       // XORI RT, $0, IMMEDIATE
       if (rtx) as.mov(x86::gpd(rtx), uimm(instr));
       else as.mov(x86_spill(rt(instr)), uimm(instr));
-    } else if (rt(instr) == rs(instr)) {
-      // XORI RT, RT, IMMEDIATE
-      if (rtx) as.xor_(x86::gpd(rtx), uimm(instr));
-      else as.xor_(x86_spill(rt(instr)), uimm(instr));
     } else {
       // XORI RT, RS, IMMEDIATE
       move(rt(instr), rs(instr));
       if (rtx) as.xor_(x86::gpd(rtx), uimm(instr));
       else as.xor_(x86_spill(rt(instr)), uimm(instr));
+    }
+  }
+
+  void xor_(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint8_t rdx = x86_reg(rd(instr));
+    if (rs(instr) == rt(instr)) {
+      // XOR RD, RT, RT
+      if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
+      else as.mov(x86_spill(rd(instr)), 0);
+    } else if (rs(instr) == 0) {
+      // XOR RD, $0, RT
+      move(rd(instr), rt(instr));
+    } else if (rt(instr) == 0) {
+      // XOR RD, RS, $0
+      move(rd(instr), rs(instr));
+    } else if (rd(instr) == rs(instr)) {
+      uint8_t rtx = x86_reg(rt(instr));
+      // XOR RD, RD, RT
+      if (rdx) {
+        if (rtx) as.xor_(x86::gpd(rdx), x86::gpd(rtx));
+        else as.xor_(x86::gpd(rdx), x86_spill(rt(instr)));
+      } else {
+        if (rtx) as.xor_(x86_spill(rd(instr)), x86::gpd(rtx));
+        else {
+          as.mov(x86::eax, x86_spill(rt(instr)));
+          as.xor_(x86_spill(rd(instr)), x86::eax);
+        }
+      }
+    } else {
+      uint8_t rsx = x86_reg(rs(instr));
+      // XOR RD, RS, RT
+      move(rd(instr), rt(instr));
+      if (rdx) {
+        if (rsx) as.xor_(x86::gpd(rdx), x86::gpd(rsx));
+        else as.xor_(x86::gpd(rdx), x86_spill(rs(instr)));
+      } else {
+        if (rsx) as.xor_(x86_spill(rd(instr)), x86::gpd(rsx));
+        else {
+          as.mov(x86::eax, x86_spill(rs(instr)));
+          as.xor_(x86_spill(rd(instr)), x86::eax);
+        }
+      }
     }
   }
 
@@ -387,15 +464,32 @@ struct MipsJit {
       // SLL RD, $0, IMMEDIATE
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spill(rd(instr)), 0);
-    } else if (rd(instr) == rt(instr)) {
-      // SLL RD, RD, IMMEDIATE
-      if (rdx) as.shl(x86::gpd(rdx), sa(instr));
-      else as.shl(x86_spill(rd(instr)), sa(instr));
     } else {
       // SLL RD, RT, IMMEDIATE
       move(rd(instr), rt(instr));
       if (rdx) as.shl(x86::gpd(rdx), sa(instr));
       else as.shl(x86_spill(rd(instr)), sa(instr));
+    }
+  }
+
+  void sllv(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint8_t rdx = x86_reg(rd(instr));
+    if (rt(instr) == 0) {
+      // SRLV RD, $0, RS
+      if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
+      else as.mov(x86_spill(rd(instr)), 0);
+    } else if (rs(instr) == 0) {
+      // SRLV RD, RT, $0
+      move(rd(instr), rt(instr));
+    } else {
+      uint8_t rsx = x86_reg(rs(instr));
+      // SRL RD, RT, IMMEDIATE
+      if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+      else as.mov(x86::ecx, x86_spill(rs(instr)));
+      move(rd(instr), rt(instr));
+      if (rdx) as.shl(x86::gpd(rdx), x86::cl);
+      else as.shl(x86_spill(rd(instr)), x86::cl);
     }
   }
 
@@ -406,15 +500,32 @@ struct MipsJit {
       // SRL RD, $0, IMMEDIATE
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spill(rd(instr)), 0);
-    } else if (rd(instr) == rt(instr)) {
-      // SRL RD, RD, IMMEDIATE
-      if (rdx) as.shr(x86::gpd(rdx), sa(instr));
-      else as.shr(x86_spill(rd(instr)), sa(instr));
     } else {
       // SRL RD, RT, IMMEDIATE
       move(rd(instr), rt(instr));
       if (rdx) as.shr(x86::gpd(rdx), sa(instr));
       else as.shr(x86_spill(rd(instr)), sa(instr));
+    }
+  }
+
+  void srlv(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint8_t rdx = x86_reg(rd(instr));
+    if (rt(instr) == 0) {
+      // SRLV RD, $0, RS
+      if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
+      else as.mov(x86_spill(rd(instr)), 0);
+    } else if (rs(instr) == 0) {
+      // SRLV RD, RT, $0
+      move(rd(instr), rt(instr));
+    } else {
+      uint8_t rsx = x86_reg(rs(instr));
+      // SRL RD, RT, IMMEDIATE
+      if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+      else as.mov(x86::ecx, x86_spill(rs(instr)));
+      move(rd(instr), rt(instr));
+      if (rdx) as.shr(x86::gpd(rdx), x86::cl);
+      else as.shr(x86_spill(rd(instr)), x86::cl);
     }
   }
 
@@ -425,15 +536,32 @@ struct MipsJit {
       // SLL RD, $0, IMMEDIATE
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spill(rd(instr)), 0);
-    } else if (rd(instr) == rt(instr)) {
-      // SLL RD, RD, IMMEDIATE
-      if (rdx) as.sar(x86::gpd(rdx), sa(instr));
-      else as.sar(x86_spill(rd(instr)), sa(instr));
     } else {
       // SLL RD, RT, IMMEDIATE
       move(rd(instr), rt(instr));
       if (rdx) as.sar(x86::gpd(rdx), sa(instr));
       else as.sar(x86_spill(rd(instr)), sa(instr));
+    }
+  }
+
+  void srav(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint8_t rdx = x86_reg(rd(instr));
+    if (rt(instr) == 0) {
+      // SRLV RD, $0, RS
+      if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
+      else as.mov(x86_spill(rd(instr)), 0);
+    } else if (rs(instr) == 0) {
+      // SRLV RD, RT, $0
+      move(rd(instr), rt(instr));
+    } else {
+      uint8_t rsx = x86_reg(rs(instr));
+      // SRL RD, RT, IMMEDIATE
+      if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+      else as.mov(x86::ecx, x86_spill(rs(instr)));
+      move(rd(instr), rt(instr));
+      if (rdx) as.sar(x86::gpd(rdx), x86::cl);
+      else as.sar(x86_spill(rd(instr)), x86::cl);
     }
   }
 
@@ -510,6 +638,76 @@ struct MipsJit {
         as.movzx(x86::eax, x86::al);
         as.mov(x86_spill(rd(instr)), x86::eax);
       }
+    }
+  }
+
+  void mult(uint32_t instr) {
+    if (rs(instr) == 0 || rt(instr) == 0) {
+      as.mov(x86_spill(hi), 0);
+      as.mov(x86_spill(lo), 0);
+    } else {
+      uint32_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+      if (rsx) as.mov(x86::eax, x86::gpd(rsx));
+      else as.mov(x86::eax, x86_spill(rs(instr)));
+      if (rtx) as.imul(x86::gpd(rtx));
+      else as.mul(x86_spill(rt(instr)));
+      as.mov(x86_spill(hi), x86::edx);
+      as.mov(x86_spill(lo), x86::eax);
+    }
+  }
+
+  void multu(uint32_t instr) {
+    if (rs(instr) == 0 || rt(instr) == 0) {
+      as.mov(x86_spill(hi), 0);
+      as.mov(x86_spill(lo), 0);
+    } else {
+      uint32_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+      if (rsx) as.mov(x86::eax, x86::gpd(rsx));
+      else as.mov(x86::eax, x86_spill(rs(instr)));
+      if (rtx) as.mul(x86::gpd(rtx));
+      else as.mul(x86_spill(rt(instr)));
+      as.mov(x86_spill(hi), x86::edx);
+      as.mov(x86_spill(lo), x86::eax);
+    }
+  }
+
+  void mfhi(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint32_t rdx = x86_reg(rd(instr));
+    if (rdx) as.mov(x86::gpd(rdx), x86_spill(hi));
+    else {
+      as.mov(x86::eax, x86_spill(hi));
+      as.mov(x86_spill(rd(instr)), x86::eax);
+    }
+  }
+
+  void mthi(uint32_t instr) {
+    uint32_t rdx = x86_reg(rd(instr));
+    if (rd(instr) == 0) as.mov(x86_spill(hi), 0);
+    else if (rdx) as.mov(x86_spill(hi), x86::gpd(rdx));
+    else {
+      as.mov(x86::eax, x86_spill(rd(instr)));
+      as.mov(x86_spill(hi), x86::eax);
+    }
+  }
+
+  void mflo(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint32_t rdx = x86_reg(rd(instr));
+    if (rdx) as.mov(x86::gpd(rdx), x86_spill(lo));
+    else {
+      as.mov(x86::eax, x86_spill(lo));
+      as.mov(x86_spill(rd(instr)), x86::eax);
+    }
+  }
+
+  void mtlo(uint32_t instr) {
+    uint32_t rdx = x86_reg(rd(instr));
+    if (rd(instr) == 0) as.mov(x86_spill(lo), 0);
+    else if (rdx) as.mov(x86_spill(lo), x86::gpd(rdx));
+    else {
+      as.mov(x86::eax, x86_spill(rd(instr)));
+      as.mov(x86_spill(lo), x86::eax);
     }
   }
 
@@ -627,8 +825,6 @@ struct MipsJit {
     return block_end;
   }
 
-  // subu, multu, mflo, addu, jr
-
   void cache(uint32_t instr) {
     printf("CACHE instruction %x\n", instr);
   }
@@ -646,11 +842,23 @@ struct MipsJit {
       case 0x00: sll(instr); break;
       case 0x02: srl(instr); break;
       case 0x03: sra(instr); break;
+      case 0x04: sllv(instr); break;
+      case 0x06: srlv(instr); break;
+      case 0x07: srav(instr); break;
       case 0x08: next_pc = jr(instr); break;
+      case 0x10: mfhi(instr);  break;
+      case 0x11: mthi(instr);  break;
+      case 0x12: mflo(instr);  break;
+      case 0x13: mtlo(instr);  break;
+      case 0x18: mult(instr); break;
+      case 0x19: multu(instr); break;
       case 0x20: addu(instr); break;
       case 0x21: addu(instr); break;
+      case 0x22: subu(instr); break;
+      case 0x23: subu(instr); break;
       case 0x24: and_(instr); break;
       case 0x25: or_(instr); break;
+      case 0x26: xor_(instr); break;
       case 0x2a: slt(instr); break;
       case 0x2b: sltu(instr); break;
       default: invalid(instr); break;
@@ -722,7 +930,7 @@ int main(int argc, char* argv[]) {
   // set sp to pif boot rom value
   reg_array[29] = 0xa4001ff0;
   // use last entry in reg_array for mem start addres
-  reg_array[32] = reinterpret_cast<uint64_t>(mem_array);
+  reg_array[34] = reinterpret_cast<uint64_t>(mem_array);
 
   fread(mem_array + 0x04000040, 1, 4032, file);
   fclose(file);
