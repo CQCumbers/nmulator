@@ -1,4 +1,5 @@
 #include "asmjit/asmjit.h"
+#include <SDL2/SDL.h>
 #include <unordered_map>
 #include <sys/mman.h>
 
@@ -24,6 +25,10 @@
 
 /* == Lots of Global Variables === */
 
+SDL_Renderer *renderer;
+SDL_Window *window;
+SDL_Texture *texture;
+
 using namespace asmjit;
 
 typedef uint32_t (*Function)();
@@ -37,14 +42,20 @@ uint8_t call_stack = 0;
 const uint32_t addr_mask = 0x1fffffff;
 const uint32_t page_mask = 0x1fffff;
 uint8_t *pages[0x100] = {nullptr};
+
 uint32_t pi_rom, pi_ram = 0;
+uint32_t scanline = 0;
+uint8_t *pixels = nullptr;
 
 uint32_t read32_special(uint32_t addr) {
+  if ((addr & addr_mask) == 0x04400010) return scanline; // VI_CURRENT_LINE
   return 0;
 }
 
 void write32_special(uint32_t addr, uint32_t val) {
-  if ((addr & addr_mask) == 0x04600000) pi_ram = val & 0xffffff; // PI RAM ADDR
+  if ((addr & addr_mask) == 0x04400010) scanline = 0; // VI_CURRENT_LINE
+  else if ((addr & addr_mask) == 0x04400004) pixels = pages[0] + (val & addr_mask); // VI_ORIGIN
+  else if ((addr & addr_mask) == 0x04600000) pi_ram = val & 0xffffff; // PI RAM ADDR
   else if ((addr & addr_mask) == 0x04600004) pi_rom = val & addr_mask; // PI ROM ADDR
   else if ((addr & addr_mask) == 0x04600008) { // TRANSFER SIZE (RAM to ROM)
     memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val);
@@ -67,6 +78,12 @@ void write32(uint32_t addr, uint32_t val) {
   if (!page) return write32_special(addr, val);
   //printf("Writing to %llx %x\n", (uint64_t)(&page[(addr & page_mask) >> 2]), val);
   page[(addr & page_mask) >> 2] = __builtin_bswap32(val);
+}
+
+uint8_t read8(uint32_t addr) {
+  uint8_t *page = pages[(addr >> 21) & 0xff];
+  if (!page) return read32_special(addr) & 0xff;
+  return page[addr & page_mask];
 }
 
 /* === Instruction Decoding === */
@@ -105,9 +122,9 @@ inline uint32_t uimm(uint32_t instr) {
 
 uint64_t reg_array[0x22];
 const uint8_t hi = 0x20, lo = 0x21;
+uint8_t mapping[0x20] = {0};
 
 uint8_t x86_reg(uint8_t reg) {
-  uint8_t mapping[0x20] = {0};
   mapping[5] = 12, mapping[6] = 13;
   return mapping[reg];
 }
@@ -181,6 +198,22 @@ struct MipsJit {
       as.movbe(x86::ecx, x86::dword_ptr(x86::rax));
       as.mov(x86_spill(rt(instr)), x86::ecx);
     }*/
+  }
+
+  void lb(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LB BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+			as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    as.call(reinterpret_cast<uint64_t>(read8));
+    if (rtx) as.mov(x86::gpd(rtx), x86::eax);
+    else as.mov(x86_spill(rt(instr)), x86::eax);
+    as.pop(x86::rdi);
   }
 
   void sw(uint32_t instr) {
@@ -801,7 +834,7 @@ struct MipsJit {
     else as.cmp(x86_spill(rsx), 0);
     as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
-    as.cmovg(x86::edi, x86::eax);
+    as.cmovle(x86::edi, x86::eax);
     return block_end;
   }
 
@@ -812,7 +845,7 @@ struct MipsJit {
     else as.cmp(x86_spill(rsx), 0);
     as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
-    as.cmovle(x86::edi, x86::eax);
+    as.cmovg(x86::edi, x86::eax);
     return block_end;
   }
 
@@ -862,6 +895,70 @@ struct MipsJit {
     return block_end;
   }
 
+  uint32_t bltzal(uint32_t instr, uint32_t pc) {
+    as.mov(x86_spill(31), pc + 4);
+    ++call_stack;
+    if (rs(instr) == 0) {
+      as.mov(x86::edi, pc + (imm(instr) << 2));
+      return block_end;
+    }
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.cmp(x86::gpd(rsx), 0);
+    else as.cmp(x86_spill(rsx), 0);
+    as.mov(x86::edi, pc + 4);
+    as.mov(x86::eax, pc + (imm(instr) << 2));
+    as.cmovl(x86::edi, x86::eax);
+    return block_end;
+  }
+
+  uint32_t bgezal(uint32_t instr, uint32_t pc) {
+    as.mov(x86_spill(31), pc + 4);
+    ++call_stack;
+    if (rs(instr) == 0) {
+      as.mov(x86::edi, pc + (imm(instr) << 2));
+      return block_end;
+    }
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.cmp(x86::gpd(rsx), 0);
+    else as.cmp(x86_spill(rsx), 0);
+    as.mov(x86::edi, pc + 4);
+    as.mov(x86::eax, pc + (imm(instr) << 2));
+    as.cmovge(x86::edi, x86::eax);
+    return block_end;
+  }
+
+  uint32_t bltzall(uint32_t instr, uint32_t pc) {
+    as.mov(x86_spill(31), pc + 4);
+    ++call_stack;
+    if (rs(instr) == 0) {
+      as.mov(x86::edi, pc + (imm(instr) << 2));
+      return block_end;
+    }
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.cmp(x86::gpd(rsx), 0);
+    else as.cmp(x86_spill(rsx), 0);
+    as.mov(x86::edi, pc + 4);
+    as.jge(end_label);
+    as.mov(x86::edi, pc + (imm(instr) << 2));
+    return block_end;
+  }
+
+  uint32_t bgezall(uint32_t instr, uint32_t pc) {
+    as.mov(x86_spill(31), pc + 4);
+    ++call_stack;
+    if (rs(instr) == 0) {
+      as.mov(x86::edi, pc + (imm(instr) << 2));
+      return block_end;
+    }
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.cmp(x86::gpd(rsx), 0);
+    else as.cmp(x86_spill(rsx), 0);
+    as.mov(x86::edi, pc + 4);
+    as.jl(end_label);
+    as.mov(x86::edi, pc + (imm(instr) << 2));
+    return block_end;
+  }
+
   void cache(uint32_t instr) {
     printf("CACHE instruction %x\n", instr);
   }
@@ -903,21 +1000,38 @@ struct MipsJit {
     return next_pc;
   }
 
+  uint32_t regimm(uint32_t instr, uint32_t pc) {
+    uint32_t next_pc = pc + 4;
+    switch ((instr >> 16) & 0x1f) {
+      case 0x10: next_pc = bltzal(instr, pc); break;
+      case 0x11: next_pc = bgezal(instr, pc); break;
+      case 0x12: next_pc = bltzall(instr, pc); break;
+      case 0x13: next_pc = bgezall(instr, pc); break;
+      default: invalid(instr); break;
+    }
+    return next_pc;
+  }
+
   void cop0(uint32_t instr) {
     printf("COP0 instruction %x\n", instr);
   }
 
   void jit_block(uint32_t pc) {
-    end_label = as.newLabel();
     as.push(x86::rbp);
     as.mov(x86::rbp, reinterpret_cast<uint64_t>(&reg_array));
+    as.push(x86::gpd(x86_reg(5)));
+    as.mov(x86::gpd(x86_reg(5)), x86_spill(5));
+    as.push(x86::gpd(x86_reg(6)));
+    as.mov(x86::gpd(x86_reg(6)), x86_spill(6));
 
+    end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end;) {
       printf("%x\n", pc);
       uint32_t instr = read32(pc);
       pc = next_pc, next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
+        case 0x01: next_pc = regimm(instr, pc); break;
         case 0x02: next_pc = j(instr, pc); break;
         case 0x03: next_pc = jal(instr, pc); break;
         case 0x04: next_pc = beq(instr, pc); break;
@@ -937,6 +1051,7 @@ struct MipsJit {
         case 0x15: next_pc = bnel(instr, pc); break;
         case 0x16: next_pc = blezl(instr, pc); break;
         case 0x17: next_pc = bgtzl(instr, pc); break;
+        case 0x20: lb(instr); break;
         case 0x23: lw(instr); break;
         case 0x2b: sw(instr); break;
         case 0x2f: cache(instr); break;
@@ -945,8 +1060,13 @@ struct MipsJit {
     }
 
     as.bind(end_label);
-    as.mov(x86::rax, x86::rdi);
+    as.mov(x86_spill(6), x86::gpd(x86_reg(6)));
+    as.pop(x86::gpd(x86_reg(6)));
+    as.mov(x86_spill(5), x86::gpd(x86_reg(5)));
+    as.pop(x86::gpd(x86_reg(5)));
     as.pop(x86::rbp);
+
+    as.mov(x86::rax, x86::rdi);
     as.ret();
   }
 };
@@ -955,6 +1075,15 @@ int main(int argc, char* argv[]) {
   FILE *file = fopen(argv[1], "r");
   uint32_t pc = 0xa4000040;
   JitRuntime runtime;
+
+  // setup SDL video
+  SDL_Init(SDL_INIT_VIDEO);
+  SDL_CreateWindowAndRenderer(640, 480, 0, &window, &renderer);
+  SDL_SetRenderDrawColor(renderer, 0x9b, 0xbc, 0x0f, 0xff);
+  SDL_RenderClear(renderer);
+  texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                              SDL_TEXTUREACCESS_STREAMING, 640, 480);
+  SDL_RenderPresent(renderer);
 
   if (!file) {
     printf("error: can't open file %s", argv[1]);
@@ -966,24 +1095,28 @@ int main(int argc, char* argv[]) {
   for (uint32_t i = 0x1; i < 0x100; ++i) {
     if (i != 0x23) pages[i] = pages[0] + i * (page_mask + 1);
   }
+  pixels = pages[0] + 0x100000;
   printf("mem_array is at address: %p\n", pages[0]);
 
   // set sp to pif boot rom value
   reg_array[29] = 0xa4001ff0;
+  reg_array[22] = 0x3f;
   fread(pages[0] + 0x04000000, 1, 0x101000, file);
   fclose(file);
 
   // Cartridge Header at 0x10000000
-  memcpy(pages[0] + 0x10000000, pages[0] + 0x04000000, 0x40);
+  memcpy(pages[0] + 0x10000000, pages[0] + 0x04000000, 0x100000);
 
   while (true) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {}
     Function &run_block = blocks[pc];
     if (!run_block) {
       CodeHolder code;
-      FileLogger logger(stdout);
+      //FileLogger logger(stdout);
 
       code.init(runtime.codeInfo());
-      code.setLogger(&logger);
+      //code.setLogger(&logger);
       MipsJit cpu(code);
 
       code.init(runtime.codeInfo());
@@ -991,8 +1124,20 @@ int main(int argc, char* argv[]) {
       runtime.add(&run_block, &code);
     }
     pc = run_block();
-    printf("call stack: %d\n", call_stack);
-    printf("$sp: %llx\n", reg_array[29]);
+
+    //printf("call stack: %d\n", call_stack);
+    //printf("$a1: %llx $s6: %llx\n", reg_array[5], reg_array[22]);
+    //printf("$a3: %llx $t0: %llx\n", reg_array[7], reg_array[8]);
+    printf("pixels: %p, scanline: %d\n", pixels, scanline);
     printf("next block at %x\n", pc);
+
+    if (++scanline == 484) {
+      scanline = 0;
+      if (!pixels) continue;
+      // draw screen texture
+      SDL_UpdateTexture(texture, nullptr, pixels, 640 << 2);
+      SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+      SDL_RenderPresent(renderer);
+    }
   }
 }
