@@ -528,12 +528,15 @@ struct MipsJit {
   }
 
   void sll(uint32_t instr) {
-    if (rd(instr) == 0 || sa(instr) == 0) return;
+    if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
     if (rt(instr) == 0) {
       // SLL RD, $0, IMMEDIATE
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spill(rd(instr)), 0);
+    } else if (sa(instr) == 0) {
+      // SLL RD, RT, 0
+      move(rd(instr), rt(instr));
     } else {
       // SLL RD, RT, IMMEDIATE
       move(rd(instr), rt(instr));
@@ -546,15 +549,15 @@ struct MipsJit {
     if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
     if (rt(instr) == 0) {
-      // SRLV RD, $0, RS
+      // SLLV RD, $0, RS
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spill(rd(instr)), 0);
     } else if (rs(instr) == 0) {
-      // SRLV RD, RT, $0
+      // SLLV RD, RT, $0
       move(rd(instr), rt(instr));
     } else {
       uint8_t rsx = x86_reg(rs(instr));
-      // SRL RD, RT, IMMEDIATE
+      // SLLV RD, RT, IMMEDIATE
       if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
       else as.mov(x86::ecx, x86_spill(rs(instr)));
       move(rd(instr), rt(instr));
@@ -564,12 +567,15 @@ struct MipsJit {
   }
 
   void srl(uint32_t instr) {
-    if (rd(instr) == 0 || sa(instr) == 0) return;
+    if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
     if (rt(instr) == 0) {
       // SRL RD, $0, IMMEDIATE
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spill(rd(instr)), 0);
+    } else if (sa(instr) == 0) {
+      // SRL RD, RT, 0
+      move(rd(instr), rt(instr));
     } else {
       // SRL RD, RT, IMMEDIATE
       move(rd(instr), rt(instr));
@@ -590,7 +596,7 @@ struct MipsJit {
       move(rd(instr), rt(instr));
     } else {
       uint8_t rsx = x86_reg(rs(instr));
-      // SRL RD, RT, IMMEDIATE
+      // SRLV RD, RT, IMMEDIATE
       if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
       else as.mov(x86::ecx, x86_spill(rs(instr)));
       move(rd(instr), rt(instr));
@@ -600,14 +606,17 @@ struct MipsJit {
   }
 
   void sra(uint32_t instr) {
-    if (rd(instr) == 0 || sa(instr) == 0) return;
+    if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
     if (rt(instr) == 0) {
-      // SLL RD, $0, IMMEDIATE
+      // SRA RD, $0, IMMEDIATE
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spill(rd(instr)), 0);
+    } else if (sa(instr) == 0) {
+      // SRA RD, RT, 0
+      move(rd(instr), rt(instr));
     } else {
-      // SLL RD, RT, IMMEDIATE
+      // SRA RD, RT, IMMEDIATE
       move(rd(instr), rt(instr));
       if (rdx) as.sar(x86::gpd(rdx), sa(instr));
       else as.sar(x86_spill(rd(instr)), sa(instr));
@@ -618,15 +627,15 @@ struct MipsJit {
     if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
     if (rt(instr) == 0) {
-      // SRLV RD, $0, RS
+      // SRAV RD, $0, RS
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spill(rd(instr)), 0);
     } else if (rs(instr) == 0) {
-      // SRLV RD, RT, $0
+      // SRAV RD, RT, $0
       move(rd(instr), rt(instr));
     } else {
       uint8_t rsx = x86_reg(rs(instr));
-      // SRL RD, RT, IMMEDIATE
+      // SRA RD, RT, IMMEDIATE
       if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
       else as.mov(x86::ecx, x86_spill(rs(instr)));
       move(rd(instr), rt(instr));
@@ -1078,12 +1087,11 @@ int main(int argc, char* argv[]) {
 
   // setup SDL video
   SDL_Init(SDL_INIT_VIDEO);
-  SDL_CreateWindowAndRenderer(640, 480, 0, &window, &renderer);
+  SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
   SDL_SetRenderDrawColor(renderer, 0x9b, 0xbc, 0x0f, 0xff);
   SDL_RenderClear(renderer);
   texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
                               SDL_TEXTUREACCESS_STREAMING, 640, 480);
-  SDL_RenderPresent(renderer);
 
   if (!file) {
     printf("error: can't open file %s", argv[1]);
@@ -1093,7 +1101,8 @@ int main(int argc, char* argv[]) {
   pages[0] = reinterpret_cast<uint8_t*>(mmap(NULL, 0x20000000,
     PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, 0, 0));
   for (uint32_t i = 0x1; i < 0x100; ++i) {
-    if (i != 0x23) pages[i] = pages[0] + i * (page_mask + 1);
+    // specially handle PI, VI ranges
+    if (i != 0x23 && i != 0x22) pages[i] = pages[0] + i * (page_mask + 1);
   }
   pixels = pages[0] + 0x100000;
   printf("mem_array is at address: %p\n", pages[0]);
@@ -1108,8 +1117,10 @@ int main(int argc, char* argv[]) {
   memcpy(pages[0] + 0x10000000, pages[0] + 0x04000000, 0x100000);
 
   while (true) {
-    SDL_Event e;
-    while (SDL_PollEvent(&e)) {}
+    for (SDL_Event e; SDL_PollEvent(&e);) {
+      if (e.type == SDL_QUIT) exit(0);
+    }
+
     Function &run_block = blocks[pc];
     if (!run_block) {
       CodeHolder code;
@@ -1135,7 +1146,7 @@ int main(int argc, char* argv[]) {
       scanline = 0;
       if (!pixels) continue;
       // draw screen texture
-      SDL_UpdateTexture(texture, nullptr, pixels, 640 << 2);
+      SDL_UpdateTexture(texture, nullptr, pixels, 640 * 4);
       SDL_RenderCopy(renderer, texture, nullptr, nullptr);
       SDL_RenderPresent(renderer);
     }
