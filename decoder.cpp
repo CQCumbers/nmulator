@@ -80,10 +80,10 @@ void write32(uint32_t addr, uint32_t val) {
   page[(addr & page_mask) >> 2] = __builtin_bswap32(val);
 }
 
-uint8_t read8(uint32_t addr) {
+int32_t read8(uint32_t addr) {
   uint8_t *page = pages[(addr >> 21) & 0xff];
-  if (!page) return read32_special(addr) & 0xff;
-  return page[addr & page_mask];
+  if (!page) return ((read32_special(addr) & 0xff) ^ 0x80) - 0x80;
+  return (page[addr & page_mask] ^ 0x80) - 0x80;
 }
 
 /* === Instruction Decoding === */
@@ -125,7 +125,7 @@ const uint8_t hi = 0x20, lo = 0x21;
 uint8_t mapping[0x20] = {0};
 
 uint8_t x86_reg(uint8_t reg) {
-  mapping[5] = 12, mapping[6] = 13;
+  //mapping[5] = 12, mapping[6] = 13;
   return mapping[reg];
 }
 
@@ -179,7 +179,7 @@ struct MipsJit {
     if (rt(instr) == 0) return;
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // LW BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi);
+    as.push(x86::rdi);
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
@@ -213,7 +213,7 @@ struct MipsJit {
     as.call(reinterpret_cast<uint64_t>(read8));
     if (rtx) as.mov(x86::gpd(rtx), x86::eax);
     else as.mov(x86_spill(rt(instr)), x86::eax);
-    as.pop(x86::rdi);
+    as.pop(x86::edi);
   }
 
   void sw(uint32_t instr) {
@@ -257,9 +257,6 @@ struct MipsJit {
       // ADDIU RT, $0, IMMEDIATE
       if (rtx) as.mov(x86::gpd(rtx), imm(instr));
       else as.mov(x86_spill(rt(instr)), imm(instr));
-    } else if (imm(instr) == 0) {
-      // ADDIU RT, RS, 0
-      move(rt(instr), rs(instr));
     } else {
       // ADDIU RT, RS, IMMEDIATE
       move(rt(instr), rs(instr));
@@ -840,7 +837,7 @@ struct MipsJit {
     }
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     as.cmovle(x86::edi, x86::eax);
@@ -851,7 +848,7 @@ struct MipsJit {
     if (rs(instr) == 0) return pc;
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     as.cmovg(x86::edi, x86::eax);
@@ -886,7 +883,7 @@ struct MipsJit {
     }
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
     as.jg(end_label);
     as.mov(x86::edi, pc + (imm(instr) << 2));
@@ -897,7 +894,7 @@ struct MipsJit {
     if (rs(instr) == 0) return pc + 4;
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
     as.jle(end_label);
     as.mov(x86::edi, pc + (imm(instr) << 2));
@@ -913,7 +910,7 @@ struct MipsJit {
     }
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     as.cmovl(x86::edi, x86::eax);
@@ -929,7 +926,7 @@ struct MipsJit {
     }
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     as.cmovge(x86::edi, x86::eax);
@@ -945,7 +942,7 @@ struct MipsJit {
     }
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
     as.jge(end_label);
     as.mov(x86::edi, pc + (imm(instr) << 2));
@@ -961,7 +958,7 @@ struct MipsJit {
     }
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
     as.jl(end_label);
     as.mov(x86::edi, pc + (imm(instr) << 2));
@@ -1028,10 +1025,10 @@ struct MipsJit {
   void jit_block(uint32_t pc) {
     as.push(x86::rbp);
     as.mov(x86::rbp, reinterpret_cast<uint64_t>(&reg_array));
-    as.push(x86::gpd(x86_reg(5)));
-    as.mov(x86::gpd(x86_reg(5)), x86_spill(5));
-    as.push(x86::gpd(x86_reg(6)));
-    as.mov(x86::gpd(x86_reg(6)), x86_spill(6));
+    //as.push(x86::gpd(x86_reg(5)));
+    //as.mov(x86::gpd(x86_reg(5)), x86_spill(5));
+    //as.push(x86::gpd(x86_reg(6)));
+    //as.mov(x86::gpd(x86_reg(6)), x86_spill(6));
 
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end;) {
@@ -1069,13 +1066,13 @@ struct MipsJit {
     }
 
     as.bind(end_label);
-    as.mov(x86_spill(6), x86::gpd(x86_reg(6)));
-    as.pop(x86::gpd(x86_reg(6)));
-    as.mov(x86_spill(5), x86::gpd(x86_reg(5)));
-    as.pop(x86::gpd(x86_reg(5)));
+    //as.mov(x86_spill(6), x86::gpd(x86_reg(6)));
+    //as.pop(x86::gpd(x86_reg(6)));
+    //as.mov(x86_spill(5), x86::gpd(x86_reg(5)));
+    //as.pop(x86::gpd(x86_reg(5)));
     as.pop(x86::rbp);
 
-    as.mov(x86::rax, x86::rdi);
+    as.mov(x86::eax, x86::edi);
     as.ret();
   }
 };
@@ -1090,7 +1087,7 @@ int main(int argc, char* argv[]) {
   SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
   SDL_SetRenderDrawColor(renderer, 0x9b, 0xbc, 0x0f, 0xff);
   SDL_RenderClear(renderer);
-  texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+  texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888,
                               SDL_TEXTUREACCESS_STREAMING, 640, 480);
 
   if (!file) {
@@ -1139,8 +1136,12 @@ int main(int argc, char* argv[]) {
     //printf("call stack: %d\n", call_stack);
     //printf("$a1: %llx $s6: %llx\n", reg_array[5], reg_array[22]);
     //printf("$a3: %llx $t0: %llx\n", reg_array[7], reg_array[8]);
-    printf("pixels: %p, scanline: %d\n", pixels, scanline);
+    //printf("pixels: %lx, scanline: %d\n", pixels - pages[0], scanline);
     printf("next block at %x\n", pc);
+    if (pc == 0x80005008 || pc == 0x80005010 || pc == 0x80005014) {
+      printf("$t3 %llx\n", reg_array[11]);
+      printf("$t4 %llx $t5: %llx\n", reg_array[12], reg_array[13]);
+    }
 
     if (++scanline == 484) {
       scanline = 0;
