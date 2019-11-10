@@ -35,8 +35,6 @@ typedef uint32_t (*Function)();
 std::unordered_map<uint32_t, Function> blocks;
 const uint32_t block_end = 0x04ffffff;
 
-uint8_t call_stack = 0;
-
 /* === Memory Access === */
 
 const uint32_t addr_mask = 0x1fffffff;
@@ -84,6 +82,18 @@ int32_t read8(uint32_t addr) {
   uint8_t *page = pages[(addr >> 21) & 0xff];
   if (!page) return ((read32_special(addr) & 0xff) ^ 0x80) - 0x80;
   return (page[addr & page_mask] ^ 0x80) - 0x80;
+}
+
+uint32_t uread8(uint32_t addr) {
+  uint8_t *page = pages[(addr >> 21) & 0xff];
+  if (!page) return read32_special(addr) & 0xff;
+  return page[addr & page_mask];
+}
+
+void write8(uint32_t addr, uint8_t val) {
+  uint8_t *page = pages[(addr >> 21) & 0xff];
+  if (!page) return write32_special(addr, val);
+  page[addr & page_mask] = val;
 }
 
 /* === Instruction Decoding === */
@@ -183,21 +193,28 @@ struct MipsJit {
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
-			as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
     as.call(reinterpret_cast<uint64_t>(read32));
     if (rtx) as.mov(x86::gpd(rtx), x86::eax);
     else as.mov(x86_spill(rt(instr)), x86::eax);
     as.pop(x86::rdi);
+  }
 
-    /*if (rsx) as.mov(x86::eax, x86::gpd(rsx));
-    else as.mov(x86::eax, x86_spill(rs(instr)));
-    translate_addr(imm(instr));
-    if (rtx) as.movbe(x86::gpd(rtx), x86::dword_ptr(x86::rax));
+  void lbu(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LB BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
-      as.movbe(x86::ecx, x86::dword_ptr(x86::rax));
-      as.mov(x86_spill(rt(instr)), x86::ecx);
-    }*/
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    as.call(reinterpret_cast<uint64_t>(uread8));
+    if (rtx) as.mov(x86::gpd(rtx), x86::eax);
+    else as.mov(x86_spill(rt(instr)), x86::eax);
+    as.pop(x86::edi);
   }
 
   void lb(uint32_t instr) {
@@ -208,7 +225,7 @@ struct MipsJit {
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
-			as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
     as.call(reinterpret_cast<uint64_t>(read8));
     if (rtx) as.mov(x86::gpd(rtx), x86::eax);
@@ -224,22 +241,30 @@ struct MipsJit {
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
-			as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
     if (rtx) as.mov(x86::esi, x86::gpd(rtx));
     else as.mov(x86::esi, x86_spill(rt(instr)));
     as.call(reinterpret_cast<uint64_t>(write32));
     as.pop(x86::esi);
     as.pop(x86::edi);
+  }
 
-    /*if (rsx) as.mov(x86::eax, x86::gpd(rsx));
-    else as.mov(x86::eax, x86_spill(rs(instr)));
-    translate_addr(imm(instr));
-    if (rtx) as.movbe(x86::dword_ptr(x86::rax), x86::gpd(rtx));
+  void sb(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // SB BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    as.push(x86::esi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
-      as.mov(x86::ecx, x86_spill(rt(instr)));
-      as.movbe(x86::dword_ptr(x86::rax), x86::ecx);
-    }*/
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    if (rtx) as.mov(x86::esi, x86::gpd(rtx));
+    else as.mov(x86::esi, x86_spill(rt(instr)));
+    as.call(reinterpret_cast<uint64_t>(write8));
+    as.pop(x86::esi);
+    as.pop(x86::edi);
   }
 
   void lui(uint32_t instr) {
@@ -655,7 +680,7 @@ struct MipsJit {
       else as.cmp(x86_spill(rs(instr)), imm(instr));
       as.setl(x86::al);
       if (rtx) as.movzx(x86::gpd(rtx), x86::al);
-			else {
+      else {
         as.movzx(x86::eax, x86::al);
         as.mov(x86_spill(rt(instr)), x86::eax);
       }
@@ -676,7 +701,7 @@ struct MipsJit {
       else as.cmp(x86_spill(rs(instr)), imm(instr));
       as.setb(x86::al);
       if (rtx) as.movzx(x86::gpd(rtx), x86::al);
-			else {
+      else {
         as.movzx(x86::eax, x86::al);
         as.mov(x86_spill(rt(instr)), x86::eax);
       }
@@ -693,7 +718,7 @@ struct MipsJit {
       compare(rs(instr), rt(instr));
       as.setl(x86::al);
       if (rdx) as.movzx(x86::gpd(rdx), x86::al);
-			else {
+      else {
         as.movzx(x86::eax, x86::al);
         as.mov(x86_spill(rd(instr)), x86::eax);
       }
@@ -710,7 +735,7 @@ struct MipsJit {
       compare(rs(instr), rt(instr));
       as.setb(x86::al);
       if (rdx) as.movzx(x86::gpd(rdx), x86::al);
-			else {
+      else {
         as.movzx(x86::eax, x86::al);
         as.mov(x86_spill(rd(instr)), x86::eax);
       }
@@ -797,7 +822,6 @@ struct MipsJit {
     uint32_t dst = (pc & 0xf0000000) | target(instr);
     as.mov(x86_spill(31), pc + 4);
     as.mov(x86::edi, dst);
-    ++call_stack;
     return block_end;
   }
 
@@ -805,7 +829,6 @@ struct MipsJit {
     uint32_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::edi, x86::gpd(rsx));
     else as.mov(x86::edi, x86_spill(rs(instr)));
-    --call_stack;
     return block_end;
   }
 
@@ -876,16 +899,13 @@ struct MipsJit {
     return block_end;
   }
 
-  uint32_t blezl(uint32_t instr, uint32_t pc) {
-    if (rs(instr) == 0) {
-      as.mov(x86::edi, pc + (imm(instr) << 2));
-      return block_end;
-    }
+  uint32_t bltzl(uint32_t instr, uint32_t pc) {
+    if (rs(instr) == 0) return pc + 4;
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
     else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
-    as.jg(end_label);
+    as.jge(end_label);
     as.mov(x86::edi, pc + (imm(instr) << 2));
     return block_end;
   }
@@ -901,9 +921,33 @@ struct MipsJit {
     return block_end;
   }
 
+  uint32_t blezl(uint32_t instr, uint32_t pc) {
+    if (rs(instr) == 0) {
+      as.mov(x86::edi, pc + (imm(instr) << 2));
+      return block_end;
+    }
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.cmp(x86::gpd(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
+    as.mov(x86::edi, pc + 4);
+    as.jg(end_label);
+    as.mov(x86::edi, pc + (imm(instr) << 2));
+    return block_end;
+  }
+
+  uint32_t bgezl(uint32_t instr, uint32_t pc) {
+    if (rs(instr) == 0) return pc + 4;
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.cmp(x86::gpd(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
+    as.mov(x86::edi, pc + 4);
+    as.jl(end_label);
+    as.mov(x86::edi, pc + (imm(instr) << 2));
+    return block_end;
+  }
+
   uint32_t bltzal(uint32_t instr, uint32_t pc) {
     as.mov(x86_spill(31), pc + 4);
-    ++call_stack;
     if (rs(instr) == 0) {
       as.mov(x86::edi, pc + (imm(instr) << 2));
       return block_end;
@@ -919,7 +963,6 @@ struct MipsJit {
 
   uint32_t bgezal(uint32_t instr, uint32_t pc) {
     as.mov(x86_spill(31), pc + 4);
-    ++call_stack;
     if (rs(instr) == 0) {
       as.mov(x86::edi, pc + (imm(instr) << 2));
       return block_end;
@@ -935,7 +978,6 @@ struct MipsJit {
 
   uint32_t bltzall(uint32_t instr, uint32_t pc) {
     as.mov(x86_spill(31), pc + 4);
-    ++call_stack;
     if (rs(instr) == 0) {
       as.mov(x86::edi, pc + (imm(instr) << 2));
       return block_end;
@@ -951,7 +993,6 @@ struct MipsJit {
 
   uint32_t bgezall(uint32_t instr, uint32_t pc) {
     as.mov(x86_spill(31), pc + 4);
-    ++call_stack;
     if (rs(instr) == 0) {
       as.mov(x86::edi, pc + (imm(instr) << 2));
       return block_end;
@@ -1009,6 +1050,8 @@ struct MipsJit {
   uint32_t regimm(uint32_t instr, uint32_t pc) {
     uint32_t next_pc = pc + 4;
     switch ((instr >> 16) & 0x1f) {
+      case 0x02: next_pc = bltzl(instr, pc); break;
+      case 0x03: next_pc = bgezl(instr, pc); break;
       case 0x10: next_pc = bltzal(instr, pc); break;
       case 0x11: next_pc = bgezal(instr, pc); break;
       case 0x12: next_pc = bltzall(instr, pc); break;
@@ -1032,7 +1075,7 @@ struct MipsJit {
 
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end;) {
-      printf("%x\n", pc);
+      //printf("%x\n", pc);
       uint32_t instr = read32(pc);
       pc = next_pc, next_pc += 4;
       switch (instr >> 26) {
@@ -1059,6 +1102,8 @@ struct MipsJit {
         case 0x17: next_pc = bgtzl(instr, pc); break;
         case 0x20: lb(instr); break;
         case 0x23: lw(instr); break;
+        case 0x24: lbu(instr); break;
+        case 0x28: sb(instr); break;
         case 0x2b: sw(instr); break;
         case 0x2f: cache(instr); break;
         default: invalid(instr); break;
@@ -1133,12 +1178,9 @@ int main(int argc, char* argv[]) {
     }
     pc = run_block();
 
-    //printf("call stack: %d\n", call_stack);
-    //printf("$a1: %llx $s6: %llx\n", reg_array[5], reg_array[22]);
-    //printf("$a3: %llx $t0: %llx\n", reg_array[7], reg_array[8]);
     //printf("pixels: %lx, scanline: %d\n", pixels - pages[0], scanline);
-    printf("next block at %x\n", pc);
     if (pc == 0x80005008 || pc == 0x80005010 || pc == 0x80005014) {
+      printf("next block at %x\n", pc);
       printf("$t3 %llx\n", reg_array[11]);
       printf("$t4 %llx $t5: %llx\n", reg_array[12], reg_array[13]);
     }
