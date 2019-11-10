@@ -33,6 +33,7 @@ using namespace asmjit;
 
 typedef uint32_t (*Function)();
 std::unordered_map<uint32_t, Function> blocks;
+std::unordered_map<uint32_t, uint32_t> block_times;
 const uint32_t block_end = 0x04ffffff;
 
 /* === Memory Access === */
@@ -56,10 +57,14 @@ void write32_special(uint32_t addr, uint32_t val) {
   else if ((addr & addr_mask) == 0x04600000) pi_ram = val & 0xffffff; // PI RAM ADDR
   else if ((addr & addr_mask) == 0x04600004) pi_rom = val & addr_mask; // PI ROM ADDR
   else if ((addr & addr_mask) == 0x04600008) { // TRANSFER SIZE (RAM to ROM)
-    memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val);
+    memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val + 1);
   } else if ((addr & addr_mask) == 0x0460000c) { // TRANSFER SIZE (ROM to RAM)
-    printf("Copying %x bytes from %x to %x\n", val, pi_rom, pi_ram);
-    memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val);
+    printf("Copying %x bytes from %x to %x\n", val + 1, pi_rom, pi_ram);
+    memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1);
+  } else if ((addr & addr_mask) == 0x0430000c) { // MI interrupt mask
+    printf("Setting interrupt mask to %x\n", val);
+  } else {
+    printf("Unhandled write to address %x: %x\n", addr, val);
   }
 }
 
@@ -130,13 +135,15 @@ inline uint32_t uimm(uint32_t instr) {
 
 /* === Register Allocation === */
 
-uint64_t reg_array[0x22];
+uint64_t reg_array[0x42];
 const uint8_t hi = 0x20, lo = 0x21;
-uint8_t mapping[0x20] = {0};
+//uint8_t mapping[0x20] = {0};
+const uint8_t dev_cop0 = 0x22;
 
 uint8_t x86_reg(uint8_t reg) {
   //mapping[5] = 12, mapping[6] = 13;
-  return mapping[reg];
+  //return mapping[reg];
+  return 0;
 }
 
 const x86::Mem x86_spill(uint8_t reg) {
@@ -751,7 +758,7 @@ struct MipsJit {
       if (rsx) as.mov(x86::eax, x86::gpd(rsx));
       else as.mov(x86::eax, x86_spill(rs(instr)));
       if (rtx) as.imul(x86::gpd(rtx));
-      else as.mul(x86_spill(rt(instr)));
+      else as.imul(x86_spill(rt(instr)));
       as.mov(x86_spill(hi), x86::edx);
       as.mov(x86_spill(lo), x86::eax);
     }
@@ -767,6 +774,38 @@ struct MipsJit {
       else as.mov(x86::eax, x86_spill(rs(instr)));
       if (rtx) as.mul(x86::gpd(rtx));
       else as.mul(x86_spill(rt(instr)));
+      as.mov(x86_spill(hi), x86::edx);
+      as.mov(x86_spill(lo), x86::eax);
+    }
+  }
+
+  void div(uint32_t instr) {
+    if (rs(instr) == 0 || rt(instr) == 0) {
+      as.mov(x86_spill(hi), 0);
+      as.mov(x86_spill(lo), 0);
+    } else {
+      uint32_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+      if (rsx) as.mov(x86::eax, x86::gpd(rsx));
+      else as.mov(x86::eax, x86_spill(rs(instr)));
+      as.cdq();
+      if (rtx) as.idiv(x86::gpd(rtx));
+      else as.idiv(x86_spill(rt(instr)));
+      as.mov(x86_spill(hi), x86::edx);
+      as.mov(x86_spill(lo), x86::eax);
+    }
+  }
+
+  void divu(uint32_t instr) {
+    if (rs(instr) == 0 || rt(instr) == 0) {
+      as.mov(x86_spill(hi), 0);
+      as.mov(x86_spill(lo), 0);
+    } else {
+      uint32_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+      if (rsx) as.mov(x86::eax, x86::gpd(rsx));
+      else as.mov(x86::eax, x86_spill(rs(instr)));
+      as.xor_(x86::edx, x86::edx);
+      if (rtx) as.div(x86::gpd(rtx));
+      else as.div(x86_spill(rt(instr)));
       as.mov(x86_spill(hi), x86::edx);
       as.mov(x86_spill(lo), x86::eax);
     }
@@ -853,6 +892,28 @@ struct MipsJit {
     return block_end;
   }
 
+  uint32_t bltz(uint32_t instr, uint32_t pc) {
+    if (rs(instr) == 0) return pc;
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.cmp(x86::gpd(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
+    as.mov(x86::edi, pc + 4);
+    as.mov(x86::eax, pc + (imm(instr) << 2));
+    as.cmovl(x86::edi, x86::eax);
+    return block_end;
+  }
+
+  uint32_t bgtz(uint32_t instr, uint32_t pc) {
+    if (rs(instr) == 0) return pc;
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.cmp(x86::gpd(rsx), 0);
+    else as.cmp(x86_spill(rs(instr)), 0);
+    as.mov(x86::edi, pc + 4);
+    as.mov(x86::eax, pc + (imm(instr) << 2));
+    as.cmovg(x86::edi, x86::eax);
+    return block_end;
+  }
+
   uint32_t blez(uint32_t instr, uint32_t pc) {
     if (rs(instr) == 0) {
       as.mov(x86::edi, pc + (imm(instr) << 2));
@@ -867,14 +928,17 @@ struct MipsJit {
     return block_end;
   }
 
-  uint32_t bgtz(uint32_t instr, uint32_t pc) {
-    if (rs(instr) == 0) return pc;
+  uint32_t bgez(uint32_t instr, uint32_t pc) {
+    if (rs(instr) == 0) {
+      as.mov(x86::edi, pc + (imm(instr) << 2));
+      return block_end;
+    }
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.cmp(x86::gpd(rsx), 0);
     else as.cmp(x86_spill(rs(instr)), 0);
     as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
-    as.cmovg(x86::edi, x86::eax);
+    as.cmovge(x86::edi, x86::eax);
     return block_end;
   }
 
@@ -1006,6 +1070,18 @@ struct MipsJit {
     return block_end;
   }
 
+  void mfc0(uint32_t instr) {
+    printf("Read from COP0 reg %d\n", rd(instr));
+    if (rt(instr) == 0) return;
+    else move(rt(instr), rd(instr) + dev_cop0);
+  }
+
+  void mtc0(uint32_t instr) {
+    printf("Write to COP0 reg %d\n", rd(instr));
+    if (rt(instr) == 0) as.mov(x86_spill(rd(instr + dev_cop0)), 0);
+    else move(rd(instr) + dev_cop0, rt(instr));
+  }
+
   void cache(uint32_t instr) {
     printf("CACHE instruction %x\n", instr);
   }
@@ -1033,6 +1109,8 @@ struct MipsJit {
       case 0x13: mtlo(instr);  break;
       case 0x18: mult(instr); break;
       case 0x19: multu(instr); break;
+      case 0x1a: div(instr); break;
+      case 0x1b: divu(instr); break;
       case 0x20: addu(instr); break;
       case 0x21: addu(instr); break;
       case 0x22: subu(instr); break;
@@ -1050,6 +1128,8 @@ struct MipsJit {
   uint32_t regimm(uint32_t instr, uint32_t pc) {
     uint32_t next_pc = pc + 4;
     switch ((instr >> 16) & 0x1f) {
+      case 0x00: next_pc = bltz(instr, pc); break;
+      case 0x01: next_pc = bgez(instr, pc); break;
       case 0x02: next_pc = bltzl(instr, pc); break;
       case 0x03: next_pc = bgezl(instr, pc); break;
       case 0x10: next_pc = bltzal(instr, pc); break;
@@ -1062,10 +1142,23 @@ struct MipsJit {
   }
 
   void cop0(uint32_t instr) {
-    printf("COP0 instruction %x\n", instr);
+    switch ((instr >> 24) & 0x3) {
+      case 0x0: // COP0/0
+        switch (rs(instr)) {
+          case 0x0: mfc0(instr); break;
+          case 0x4: mtc0(instr); break;
+          default: printf("COP0 instruction %x\n", instr); break;
+        }
+        break;
+      default: printf("COP0 instruction %x\n", instr); break;
+    }
   }
 
-  void jit_block(uint32_t pc) {
+  void cop1(uint32_t instr) {
+    printf("COP1 instruction %x\n", instr);
+  }
+
+  uint32_t jit_block(uint32_t pc) {
     as.push(x86::rbp);
     as.mov(x86::rbp, reinterpret_cast<uint64_t>(&reg_array));
     //as.push(x86::gpd(x86_reg(5)));
@@ -1074,7 +1167,8 @@ struct MipsJit {
     //as.mov(x86::gpd(x86_reg(6)), x86_spill(6));
 
     end_label = as.newLabel();
-    for (uint32_t next_pc = pc + 4; pc != block_end;) {
+    uint32_t cycles = 0;
+    for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       //printf("%x\n", pc);
       uint32_t instr = read32(pc);
       pc = next_pc, next_pc += 4;
@@ -1096,6 +1190,7 @@ struct MipsJit {
         case 0x0e: xori(instr); break;
         case 0x0f: lui(instr); break;
         case 0x10: cop0(instr); break;
+        case 0x11: cop1(instr); break;
         case 0x14: next_pc = beql(instr, pc); break;
         case 0x15: next_pc = bnel(instr, pc); break;
         case 0x16: next_pc = blezl(instr, pc); break;
@@ -1106,6 +1201,8 @@ struct MipsJit {
         case 0x28: sb(instr); break;
         case 0x2b: sw(instr); break;
         case 0x2f: cache(instr); break;
+        case 0x37: lw(instr); break;
+        case 0x3f: sw(instr); break;
         default: invalid(instr); break;
       }
     }
@@ -1119,14 +1216,11 @@ struct MipsJit {
 
     as.mov(x86::eax, x86::edi);
     as.ret();
+    return cycles;
   }
 };
 
 int main(int argc, char* argv[]) {
-  FILE *file = fopen(argv[1], "r");
-  uint32_t pc = 0xa4000040;
-  JitRuntime runtime;
-
   // setup SDL video
   SDL_Init(SDL_INIT_VIDEO);
   SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
@@ -1135,35 +1229,39 @@ int main(int argc, char* argv[]) {
   texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888,
                               SDL_TEXTUREACCESS_STREAMING, 640, 480);
 
-  if (!file) {
-    printf("error: can't open file %s", argv[1]);
-    exit(1);
-  }
-
+  // setup memory pages
   pages[0] = reinterpret_cast<uint8_t*>(mmap(NULL, 0x20000000,
     PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, 0, 0));
   for (uint32_t i = 0x1; i < 0x100; ++i) {
     // specially handle PI, VI ranges
     if (i != 0x23 && i != 0x22) pages[i] = pages[0] + i * (page_mask + 1);
   }
-  pixels = pages[0] + 0x100000;
-  printf("mem_array is at address: %p\n", pages[0]);
 
-  // set sp to pif boot rom value
-  reg_array[29] = 0xa4001ff0;
-  reg_array[22] = 0x3f;
-  fread(pages[0] + 0x04000000, 1, 0x101000, file);
+  // read ROM file into memory
+  FILE *file = fopen(argv[1], "r");
+  if (!file) printf("error: can't open file %s", argv[1]), exit(1);
+  fseek(file, 0, SEEK_END);
+  long fsize = ftell(file);
+  fseek(file, 0, SEEK_SET);
+  fread(pages[0] + 0x04000000, 1, fsize, file);
   fclose(file);
 
+  // set registers to initial values
+  uint32_t pc = 0xa4000040;
+  reg_array[20] = 0x1;
+  reg_array[22] = 0x3f;
+  reg_array[29] = 0xa4001ff0;
+  write32(0x04300004, 0x01010101);
+
+  // VI_ORIGIN at 0x100000
+  pixels = pages[0] + 0x100000;
   // Cartridge Header at 0x10000000
-  memcpy(pages[0] + 0x10000000, pages[0] + 0x04000000, 0x100000);
+  memcpy(pages[0] + 0x10000000, pages[0] + 0x04000000, fsize);
 
+  JitRuntime runtime;
   while (true) {
-    for (SDL_Event e; SDL_PollEvent(&e);) {
-      if (e.type == SDL_QUIT) exit(0);
-    }
-
     Function &run_block = blocks[pc];
+    uint32_t &run_time = block_times[pc];
     if (!run_block) {
       CodeHolder code;
       //FileLogger logger(stdout);
@@ -1173,19 +1271,25 @@ int main(int argc, char* argv[]) {
       MipsJit cpu(code);
 
       code.init(runtime.codeInfo());
-      cpu.jit_block(pc);
+      run_time = cpu.jit_block(pc);
       runtime.add(&run_block, &code);
     }
     pc = run_block();
 
     //printf("pixels: %lx, scanline: %d\n", pixels - pages[0], scanline);
-    if (pc == 0x80005008 || pc == 0x80005010 || pc == 0x80005014) {
-      printf("next block at %x\n", pc);
-      printf("$t3 %llx\n", reg_array[11]);
-      printf("$t4 %llx $t5: %llx\n", reg_array[12], reg_array[13]);
+    //printf("$sp: %llx $s1: %llx\n", reg_array[29], reg_array[17]);
+    //printf("$a3: %llx $t0: %llx\n", reg_array[7], reg_array[8]);
+    //printf("next block at %x\n", pc);
+
+    reg_array[9 + dev_cop0] += run_time >> 1; // update COUNT
+    if (reg_array[9 + dev_cop0] >= reg_array[11 + dev_cop0]) { // check COUNT >= COMPARE
+      reg_array[13 + dev_cop0] |= (0x1 << 15); // set pending IP7 IRQ
     }
 
     if (++scanline == 484) {
+      for (SDL_Event e; SDL_PollEvent(&e);) {
+        if (e.type == SDL_QUIT) exit(0);
+      }
       scanline = 0;
       if (!pixels) continue;
       // draw screen texture
