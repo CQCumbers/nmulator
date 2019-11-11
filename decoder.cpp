@@ -43,53 +43,101 @@ const uint32_t page_mask = 0x1fffff;
 uint8_t *pages[0x100] = {nullptr};
 
 uint32_t pi_rom, pi_ram = 0;
-uint32_t scanline = 0;
+uint32_t mi_mask = 0x0, mi_intr = 0;
+uint32_t ai_run, ai_used, ai_len = 0;
+uint32_t scanline = 0, intrline = 0;
 uint8_t *pixels = nullptr;
 
 uint32_t read32_special(uint32_t addr) {
-  if ((addr & addr_mask) == 0x04400010) return scanline; // VI_CURRENT_LINE
+  //printf("! read from address %x\n", addr);
+  if ((addr & addr_mask) == 0x04300004) return 0x01010101; // MI Version
+  else if ((addr & addr_mask) == 0x04300008) return mi_intr; // MI INTERRUPT
+  else if ((addr & addr_mask) == 0x0430000c) return mi_mask; // MI INTERRUPT_MASK
+  else if ((addr & addr_mask) == 0x04400010) return scanline; // VI_CURRENT_LINE
+  else if ((addr & addr_mask) == 0x0450000c) return 0x11111111; // AI_STATUS
+  else printf("Unhandled read from address %x\n", addr);
   return 0;
 }
 
 void write32_special(uint32_t addr, uint32_t val) {
-  if ((addr & addr_mask) == 0x04400010) scanline = 0; // VI_CURRENT_LINE
-  else if ((addr & addr_mask) == 0x04400004) pixels = pages[0] + (val & addr_mask); // VI_ORIGIN
+  //printf("! write to address %x %x\n", addr, val);
+  if ((addr & addr_mask) == 0x04400010) mi_intr &= ~0x8; // VI_CURRENT_LINE
+  else if ((addr & addr_mask) == 0x04400004) pixels = (pages[0] + (val & 0xffffff)); // VI_ORIGIN
+  else if ((addr & addr_mask) == 0x0440000c) intrline = val & 0x3ff; // VI_INTR_LINE
+  else if ((addr & addr_mask) == 0x04500004) ai_len = val & 0x3ffff; // AI LENGTH
+  else if ((addr & addr_mask) == 0x04500008) ai_run = val & 0x1; // AI CONTROL
+  else if ((addr & addr_mask) == 0x0450000c) mi_intr &= ~0x4; // AI_STATUS
   else if ((addr & addr_mask) == 0x04600000) pi_ram = val & 0xffffff; // PI RAM ADDR
   else if ((addr & addr_mask) == 0x04600004) pi_rom = val & addr_mask; // PI ROM ADDR
-  else if ((addr & addr_mask) == 0x04600008) { // TRANSFER SIZE (RAM to ROM)
+  else if ((addr & addr_mask) == 0x04600010) mi_intr &= ~0x10; // PI INTR
+  else if ((addr & addr_mask) == 0x04800018) mi_intr &= ~0x2; // SI INTR
+  else if ((addr & addr_mask) == 0x0430000c) { // MI INTERRUPT MASK
+    mi_mask = ((val & 0x2) >> 1) | ((val & 0x8) >> 2) | ((val & 0x20) >> 3)
+      | ((val & 0x80) >> 4) | ((val & 0x200) >> 5) | ((val ^ 0x800) >> 6);
+  } else if ((addr & addr_mask) == 0x04600008) { // TRANSFER SIZE (RAM to ROM)
     memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val + 1);
   } else if ((addr & addr_mask) == 0x0460000c) { // TRANSFER SIZE (ROM to RAM)
     printf("Copying %x bytes from %x to %x\n", val + 1, pi_rom, pi_ram);
-    memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1);
-  } else if ((addr & addr_mask) == 0x0430000c) { // MI interrupt mask
-    printf("Setting interrupt mask to %x\n", val);
-  } else {
-    printf("Unhandled write to address %x: %x\n", addr, val);
-  }
+    memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1); mi_intr |= 0x10;
+  } else printf("Unhandled write to address %x: %x\n", addr, val);
 }
 
-uint32_t read32(uint32_t addr) {
+uint64_t read64(uint32_t addr) {
+  uint64_t *page = reinterpret_cast<uint64_t*>(pages[(addr >> 21) & 0xff]);
+  if (!page) return (read32_special(addr) << 8) | read32_special(addr + 1);
+  return __builtin_bswap64(page[(addr & page_mask) >> 3]);
+}
+
+void write64(uint32_t addr, uint64_t val) {
+  uint64_t *page = reinterpret_cast<uint64_t*>(pages[(addr >> 21) & 0xff]);
+  if (!page) return write32_special(addr, val >> 8);
+  page[(addr & page_mask) >> 3] = __builtin_bswap64(val);
+}
+
+uint64_t read32(uint32_t addr) {
   uint32_t *page = reinterpret_cast<uint32_t*>(pages[(addr >> 21) & 0xff]);
   if (!page) return read32_special(addr);
-  //printf("Reading from %llx\n", (uint64_t)(&page[(addr & page_mask) >> 2]));
-  uint32_t val = page[(addr & page_mask) >> 2];
-  return __builtin_bswap32(val);
+  uint64_t val = __builtin_bswap32(page[(addr & page_mask) >> 2]);
+  return (val ^ 0x80000000) - 0x80000000;
+}
+
+uint64_t uread32(uint32_t addr) {
+  uint32_t *page = reinterpret_cast<uint32_t*>(pages[(addr >> 21) & 0xff]);
+  if (!page) return read32_special(addr);
+  return __builtin_bswap32(page[(addr & page_mask) >> 2]);
 }
 
 void write32(uint32_t addr, uint32_t val) {
   uint32_t *page = reinterpret_cast<uint32_t*>(pages[(addr >> 21) & 0xff]);
   if (!page) return write32_special(addr, val);
-  //printf("Writing to %llx %x\n", (uint64_t)(&page[(addr & page_mask) >> 2]), val);
   page[(addr & page_mask) >> 2] = __builtin_bswap32(val);
 }
 
-int32_t read8(uint32_t addr) {
+uint64_t read16(uint32_t addr) {
+  uint16_t *page = reinterpret_cast<uint16_t*>(pages[(addr >> 21) & 0xff]);
+  if (!page) return read32_special(addr);
+  return (__builtin_bswap16(page[(addr & page_mask) >> 1]) ^ 0x8000) - 0x8000;
+}
+
+uint64_t uread16(uint32_t addr) {
+  uint16_t *page = reinterpret_cast<uint16_t*>(pages[(addr >> 21) & 0xff]);
+  if (!page) return read32_special(addr);
+  return __builtin_bswap16(page[(addr & page_mask) >> 1]);
+}
+
+void write16(uint32_t addr, uint16_t val) {
+  uint16_t *page = reinterpret_cast<uint16_t*>(pages[(addr >> 21) & 0xff]);
+  if (!page) return write32_special(addr, val);
+  page[(addr & page_mask) >> 1] = __builtin_bswap16(val);
+}
+
+uint64_t read8(uint32_t addr) {
   uint8_t *page = pages[(addr >> 21) & 0xff];
   if (!page) return ((read32_special(addr) & 0xff) ^ 0x80) - 0x80;
   return (page[addr & page_mask] ^ 0x80) - 0x80;
 }
 
-uint32_t uread8(uint32_t addr) {
+uint64_t uread8(uint32_t addr) {
   uint8_t *page = pages[(addr >> 21) & 0xff];
   if (!page) return read32_special(addr) & 0xff;
   return page[addr & page_mask];
@@ -103,9 +151,8 @@ void write8(uint32_t addr, uint8_t val) {
 
 /* === Instruction Decoding === */
 
-inline int32_t target(uint32_t instr) {
-  int32_t val = (instr & 0x3ffffff) << 2;
-  return (val ^ 0x8000000) - 0x8000000;
+inline uint32_t target(uint32_t instr) {
+  return (instr & 0x3ffffff) << 2;
 }
 
 inline uint8_t rs(uint32_t instr) {
@@ -150,6 +197,10 @@ const x86::Mem x86_spill(uint8_t reg) {
   return x86::dword_ptr(x86::rbp, reg << 3);
 }
 
+const x86::Mem x86_spilld(uint8_t reg) {
+  return x86::qword_ptr(x86::rbp, reg << 3);
+}
+
 /* === Instruction Translation === */
 
 struct MipsJit {
@@ -192,26 +243,90 @@ struct MipsJit {
     }
   }
 
-  void lw(uint32_t instr) {
+  void ld(uint32_t instr) {
     if (rt(instr) == 0) return;
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
-    // LW BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::rdi);
+    // LD BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpq(rsx), imm(instr)));
+    else {
+      as.mov(x86::rax, x86_spilld(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::rax, imm(instr)));
+    }
+    as.call(reinterpret_cast<uint64_t>(read64));
+    if (rtx) as.mov(x86::gpq(rtx), x86::rax);
+    else as.mov(x86_spilld(rt(instr)), x86::rax);
+    as.pop(x86::edi);
+  }
+
+  void lwu(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LWU BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
-    as.call(reinterpret_cast<uint64_t>(read32));
+    as.call(reinterpret_cast<uint64_t>(uread32));
     if (rtx) as.mov(x86::gpd(rtx), x86::eax);
     else as.mov(x86_spill(rt(instr)), x86::eax);
-    as.pop(x86::rdi);
+    as.pop(x86::edi);
+  }
+
+  void lw(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LW BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpq(rsx), imm(instr)));
+    else {
+      as.mov(x86::rax, x86_spilld(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::rax, imm(instr)));
+    }
+    as.call(reinterpret_cast<uint64_t>(read32));
+    if (rtx) as.mov(x86::gpq(rtx), x86::rax);
+    else as.mov(x86_spilld(rt(instr)), x86::rax);
+    as.pop(x86::edi);
+  }
+
+  void lhu(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LHU BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    as.call(reinterpret_cast<uint64_t>(uread16));
+    if (rtx) as.mov(x86::gpd(rtx), x86::eax);
+    else as.mov(x86_spill(rt(instr)), x86::eax);
+    as.pop(x86::edi);
+  }
+
+  void lh(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LH BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    as.call(reinterpret_cast<uint64_t>(read16));
+    if (rtx) as.mov(x86::gpd(rtx), x86::eax);
+    else as.mov(x86_spill(rt(instr)), x86::eax);
+    as.pop(x86::edi);
   }
 
   void lbu(uint32_t instr) {
     if (rt(instr) == 0) return;
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
-    // LB BASE(RS), RT, OFFSET(IMMEDIATE)
+    // LBU BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi);
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
@@ -240,6 +355,23 @@ struct MipsJit {
     as.pop(x86::edi);
   }
 
+  void sd(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // SD BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    as.push(x86::esi);
+    if (rsx) as.lea(x86::rdi, x86::dword_ptr(x86::gpq(rsx), imm(instr)));
+    else {
+      as.mov(x86::rax, x86_spilld(rs(instr)));
+      as.lea(x86::rdi, x86::dword_ptr(x86::rax, imm(instr)));
+    }
+    if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
+    else as.mov(x86::rsi, x86_spilld(rt(instr)));
+    as.call(reinterpret_cast<uint64_t>(write64));
+    as.pop(x86::esi);
+    as.pop(x86::edi);
+  }
+
   void sw(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SW BASE(RS), RT, OFFSET(IMMEDIATE)
@@ -253,6 +385,23 @@ struct MipsJit {
     if (rtx) as.mov(x86::esi, x86::gpd(rtx));
     else as.mov(x86::esi, x86_spill(rt(instr)));
     as.call(reinterpret_cast<uint64_t>(write32));
+    as.pop(x86::esi);
+    as.pop(x86::edi);
+  }
+
+  void sh(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // SH BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    as.push(x86::esi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    if (rtx) as.mov(x86::esi, x86::gpd(rtx));
+    else as.mov(x86::esi, x86_spill(rt(instr)));
+    as.call(reinterpret_cast<uint64_t>(write16));
     as.pop(x86::esi);
     as.pop(x86::edi);
   }
@@ -556,6 +705,29 @@ struct MipsJit {
     }
   }
 
+  void nor(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint8_t rdx = x86_reg(rd(instr));
+    or_(instr);
+    if (rdx) as.not_(x86::gpd(rdx));
+    else as.not_(x86_spill(rd(instr)));
+  }
+
+  void dsll32(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint8_t rdx = x86_reg(rd(instr));
+    if (rt(instr) == 0) {
+      // DSLL32 RD, $0, IMMEDIATE
+      if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
+      else as.mov(x86_spill(rd(instr)), 0);
+    } else {
+      // DSLL32 RD, RT, IMMEDIATE
+      move(rd(instr), rt(instr));
+      if (rdx) as.shl(x86::gpq(rdx), sa(instr) + 32);
+      else as.shl(x86_spilld(rd(instr)), sa(instr) + 32);
+    }
+  }
+
   void sll(uint32_t instr) {
     if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
@@ -595,6 +767,21 @@ struct MipsJit {
     }
   }
 
+  void dsrl32(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint8_t rdx = x86_reg(rd(instr));
+    if (rt(instr) == 0) {
+      // DSRL32 RD, $0, IMMEDIATE
+      if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
+      else as.mov(x86_spill(rd(instr)), 0);
+    } else {
+      // DSRL32 RD, RT, IMMEDIATE
+      move(rd(instr), rt(instr));
+      if (rdx) as.shr(x86::gpq(rdx), sa(instr) + 32);
+      else as.shr(x86_spilld(rd(instr)), sa(instr) + 32);
+    }
+  }
+
   void srl(uint32_t instr) {
     if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
@@ -631,6 +818,24 @@ struct MipsJit {
       move(rd(instr), rt(instr));
       if (rdx) as.shr(x86::gpd(rdx), x86::cl);
       else as.shr(x86_spill(rd(instr)), x86::cl);
+    }
+  }
+
+  void dsra32(uint32_t instr) {
+    if (rd(instr) == 0) return;
+    uint8_t rdx = x86_reg(rd(instr));
+    if (rt(instr) == 0) {
+      // DSRA RD, $0, IMMEDIATE
+      if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
+      else as.mov(x86_spill(rd(instr)), 0);
+    } else if (sa(instr) == 0) {
+      // DSRA RD, RT, 0
+      move(rd(instr), rt(instr));
+    } else {
+      // DSRA RD, RT, IMMEDIATE
+      move(rd(instr), rt(instr));
+      if (rdx) as.sar(x86::gpd(rdx), sa(instr) + 32);
+      else as.sar(x86_spill(rd(instr)), sa(instr) + 32);
     }
   }
 
@@ -751,63 +956,81 @@ struct MipsJit {
 
   void mult(uint32_t instr) {
     if (rs(instr) == 0 || rt(instr) == 0) {
-      as.mov(x86_spill(hi), 0);
       as.mov(x86_spill(lo), 0);
+      as.mov(x86_spill(hi), 0);
     } else {
       uint32_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
       if (rsx) as.mov(x86::eax, x86::gpd(rsx));
       else as.mov(x86::eax, x86_spill(rs(instr)));
       if (rtx) as.imul(x86::gpd(rtx));
       else as.imul(x86_spill(rt(instr)));
-      as.mov(x86_spill(hi), x86::edx);
       as.mov(x86_spill(lo), x86::eax);
+      as.mov(x86_spill(hi), x86::edx);
     }
   }
 
   void multu(uint32_t instr) {
     if (rs(instr) == 0 || rt(instr) == 0) {
-      as.mov(x86_spill(hi), 0);
       as.mov(x86_spill(lo), 0);
+      as.mov(x86_spill(hi), 0);
     } else {
       uint32_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
       if (rsx) as.mov(x86::eax, x86::gpd(rsx));
       else as.mov(x86::eax, x86_spill(rs(instr)));
       if (rtx) as.mul(x86::gpd(rtx));
       else as.mul(x86_spill(rt(instr)));
-      as.mov(x86_spill(hi), x86::edx);
       as.mov(x86_spill(lo), x86::eax);
+      as.mov(x86_spill(hi), x86::edx);
     }
   }
 
   void div(uint32_t instr) {
     if (rs(instr) == 0 || rt(instr) == 0) {
-      as.mov(x86_spill(hi), 0);
       as.mov(x86_spill(lo), 0);
+      as.mov(x86_spill(hi), 0);
     } else {
       uint32_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
       if (rsx) as.mov(x86::eax, x86::gpd(rsx));
       else as.mov(x86::eax, x86_spill(rs(instr)));
       as.cdq();
-      if (rtx) as.idiv(x86::gpd(rtx));
-      else as.idiv(x86_spill(rt(instr)));
-      as.mov(x86_spill(hi), x86::edx);
+      Label after_div = as.newLabel();
+      if (rtx) {
+        as.cmp(x86::gpd(rtx), 0);
+        as.je(after_div);
+        as.idiv(x86::gpd(rtx));
+      } else {
+        as.cmp(x86_spill(rt(instr)), 0);
+        as.je(after_div);
+        as.idiv(x86_spill(rt(instr)));
+      }
+      as.bind(after_div);
       as.mov(x86_spill(lo), x86::eax);
+      as.mov(x86_spill(hi), x86::edx);
     }
   }
 
   void divu(uint32_t instr) {
     if (rs(instr) == 0 || rt(instr) == 0) {
-      as.mov(x86_spill(hi), 0);
       as.mov(x86_spill(lo), 0);
+      as.mov(x86_spill(hi), 0);
     } else {
       uint32_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
       if (rsx) as.mov(x86::eax, x86::gpd(rsx));
       else as.mov(x86::eax, x86_spill(rs(instr)));
       as.xor_(x86::edx, x86::edx);
-      if (rtx) as.div(x86::gpd(rtx));
-      else as.div(x86_spill(rt(instr)));
-      as.mov(x86_spill(hi), x86::edx);
+      Label after_div = as.newLabel();
+      if (rtx) {
+        as.cmp(x86::gpd(rtx), 0);
+        as.je(after_div);
+        as.div(x86::gpd(rtx));
+      } else {
+        as.cmp(x86_spill(rt(instr)), 0);
+        as.je(after_div);
+        as.div(x86_spill(rt(instr)));
+      }
+      as.bind(after_div);
       as.mov(x86_spill(lo), x86::eax);
+      as.mov(x86_spill(hi), x86::edx);
     }
   }
 
@@ -1078,8 +1301,17 @@ struct MipsJit {
 
   void mtc0(uint32_t instr) {
     printf("Write to COP0 reg %d\n", rd(instr));
-    if (rt(instr) == 0) as.mov(x86_spill(rd(instr + dev_cop0)), 0);
+    if (rd(instr) == 11) as.and_(x86_spill(13 + dev_cop0), ~(0x1 << 15));
+    if (rt(instr) == 0) as.mov(x86_spill(rd(instr) + dev_cop0), 0);
     else move(rd(instr) + dev_cop0, rt(instr));
+  }
+
+  uint32_t eret(uint32_t instr) {
+    printf("Returning from interrupt\n");
+    as.and_(x86_spill(12 + dev_cop0), ~0x2);
+    as.mov(x86::edi, x86_spill(14 + dev_cop0));
+    as.jmp(end_label);
+    return block_end;
   }
 
   void cache(uint32_t instr) {
@@ -1103,6 +1335,7 @@ struct MipsJit {
       case 0x06: srlv(instr); break;
       case 0x07: srav(instr); break;
       case 0x08: next_pc = jr(instr); break;
+      case 0x0f: printf("SYNC\n"); break;
       case 0x10: mfhi(instr);  break;
       case 0x11: mthi(instr);  break;
       case 0x12: mflo(instr);  break;
@@ -1111,15 +1344,22 @@ struct MipsJit {
       case 0x19: multu(instr); break;
       case 0x1a: div(instr); break;
       case 0x1b: divu(instr); break;
-      case 0x20: addu(instr); break;
+      case 0x20: addu(instr); break; // ADD
       case 0x21: addu(instr); break;
-      case 0x22: subu(instr); break;
+      case 0x22: subu(instr); break; // SUB
       case 0x23: subu(instr); break;
       case 0x24: and_(instr); break;
       case 0x25: or_(instr); break;
       case 0x26: xor_(instr); break;
+      case 0x27: nor(instr); break;
       case 0x2a: slt(instr); break;
       case 0x2b: sltu(instr); break;
+      case 0x38: sll(instr); break; // DSLL
+      case 0x3a: srl(instr); break; // DSRL
+      case 0x3b: sra(instr); break; // DSRA
+      case 0x3c: dsll32(instr); break;
+      case 0x3e: dsrl32(instr); break;
+      case 0x3f: dsra32(instr); break;
       default: invalid(instr); break;
     }
     return next_pc;
@@ -1141,7 +1381,8 @@ struct MipsJit {
     return next_pc;
   }
 
-  void cop0(uint32_t instr) {
+  uint32_t cop0(uint32_t instr, uint32_t pc) {
+    uint32_t next_pc = pc + 4;
     switch ((instr >> 24) & 0x3) {
       case 0x0: // COP0/0
         switch (rs(instr)) {
@@ -1150,8 +1391,15 @@ struct MipsJit {
           default: printf("COP0 instruction %x\n", instr); break;
         }
         break;
+      case 0x2: // COP0/2
+        switch (instr & 0x3f) {
+          case 0x18: next_pc = eret(instr); break;
+          default: printf("COP0 instruction %x\n", instr); break;
+        }
+        break;
       default: printf("COP0 instruction %x\n", instr); break;
     }
+    return next_pc;
   }
 
   void cop1(uint32_t instr) {
@@ -1181,7 +1429,7 @@ struct MipsJit {
         case 0x05: next_pc = bne(instr, pc); break;
         case 0x06: next_pc = blez(instr, pc); break;
         case 0x07: next_pc = bgtz(instr, pc); break;
-        case 0x08: addiu(instr); break;
+        case 0x08: addiu(instr); break; // ADDI
         case 0x09: addiu(instr); break;
         case 0x0a: slti(instr); break;
         case 0x0b: sltiu(instr); break;
@@ -1189,20 +1437,28 @@ struct MipsJit {
         case 0x0d: ori(instr); break;
         case 0x0e: xori(instr); break;
         case 0x0f: lui(instr); break;
-        case 0x10: cop0(instr); break;
+        case 0x10: next_pc = cop0(instr, pc); break;
         case 0x11: cop1(instr); break;
         case 0x14: next_pc = beql(instr, pc); break;
         case 0x15: next_pc = bnel(instr, pc); break;
         case 0x16: next_pc = blezl(instr, pc); break;
         case 0x17: next_pc = bgtzl(instr, pc); break;
         case 0x20: lb(instr); break;
+        case 0x21: lh(instr); break;
         case 0x23: lw(instr); break;
         case 0x24: lbu(instr); break;
+        case 0x25: lhu(instr); break;
+        case 0x27: lwu(instr); break;
         case 0x28: sb(instr); break;
+        case 0x29: sh(instr); break;
         case 0x2b: sw(instr); break;
         case 0x2f: cache(instr); break;
-        case 0x37: lw(instr); break;
-        case 0x3f: sw(instr); break;
+        case 0x31: cop1(instr); break; // LWC1
+        case 0x35: cop1(instr); break; // LDC1
+        case 0x37: ld(instr); break;
+        case 0x39: cop1(instr); break; // SWC1
+        case 0x3d: cop1(instr); break; // SDC1
+        case 0x3f: sd(instr); break;
         default: invalid(instr); break;
       }
     }
@@ -1230,12 +1486,13 @@ int main(int argc, char* argv[]) {
                               SDL_TEXTUREACCESS_STREAMING, 640, 480);
 
   // setup memory pages
-  pages[0] = reinterpret_cast<uint8_t*>(mmap(NULL, 0x20000000,
+  pages[0] = reinterpret_cast<uint8_t*>(mmap(nullptr, 0x20000000,
     PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, 0, 0));
   for (uint32_t i = 0x1; i < 0x100; ++i) {
-    // specially handle PI, VI ranges
-    if (i != 0x23 && i != 0x22) pages[i] = pages[0] + i * (page_mask + 1);
+    // specially handle SP/DP, DP/MI, VI/AI, PI/RI, and SI ranges
+    if (i < 0x21 || i > 0x24) pages[i] = pages[0] + i * (page_mask + 1);
   }
+  pages[0xfe] = nullptr; // PIF range
 
   // read ROM file into memory
   FILE *file = fopen(argv[1], "r");
@@ -1251,17 +1508,19 @@ int main(int argc, char* argv[]) {
   reg_array[20] = 0x1;
   reg_array[22] = 0x3f;
   reg_array[29] = 0xa4001ff0;
-  write32(0x04300004, 0x01010101);
 
   // VI_ORIGIN at 0x100000
-  pixels = pages[0] + 0x100000;
+  pixels = pages[0];// + 0x100000;
   // Cartridge Header at 0x10000000
   memcpy(pages[0] + 0x10000000, pages[0] + 0x04000000, fsize);
 
   JitRuntime runtime;
+  uint32_t line_cycle = 0;
   while (true) {
-    Function &run_block = blocks[pc];
-    uint32_t &run_time = block_times[pc];
+    //Function &run_block = blocks[pc];
+    //uint32_t &block_time = block_times[pc];
+    Function run_block = nullptr;
+    uint32_t block_time = 0;
     if (!run_block) {
       CodeHolder code;
       //FileLogger logger(stdout);
@@ -1271,31 +1530,64 @@ int main(int argc, char* argv[]) {
       MipsJit cpu(code);
 
       code.init(runtime.codeInfo());
-      run_time = cpu.jit_block(pc);
+      block_time = cpu.jit_block(pc);
       runtime.add(&run_block, &code);
     }
     pc = run_block();
+    line_cycle += block_time;
 
     //printf("pixels: %lx, scanline: %d\n", pixels - pages[0], scanline);
     //printf("$sp: %llx $s1: %llx\n", reg_array[29], reg_array[17]);
     //printf("$a3: %llx $t0: %llx\n", reg_array[7], reg_array[8]);
     //printf("next block at %x\n", pc);
+    //printf("STATUS: %llx EPC: %llx\n", reg_array[12 + dev_cop0] & 0x3, reg_array[14 + dev_cop0]);
 
-    reg_array[9 + dev_cop0] += run_time >> 1; // update COUNT
-    if (reg_array[9 + dev_cop0] >= reg_array[11 + dev_cop0]) { // check COUNT >= COMPARE
-      reg_array[13 + dev_cop0] |= (0x1 << 15); // set pending IP7 IRQ
-    }
+    // set MI_INTR when all audio used
+    if (ai_run && ++ai_used == 1000000) mi_intr |= 0x4, ai_used = 0;
+    // clear MI_INTR a few cycles after that
+    else if (ai_run && ai_used == 0x08) mi_intr &= ~0x4;
 
-    if (++scanline == 484) {
+    if (line_cycle >= 6150) {
+      line_cycle = 0, ++scanline;
+      if (scanline == 484) {
+        scanline = 0, mi_intr |= 0x2; // SI INTR
+        if (intrline == scanline) mi_intr |= 0x8; // VI INTR
+      }
+
+      // handle SDL events
       for (SDL_Event e; SDL_PollEvent(&e);) {
         if (e.type == SDL_QUIT) exit(0);
       }
-      scanline = 0;
-      if (!pixels) continue;
-      // draw screen texture
-      SDL_UpdateTexture(texture, nullptr, pixels, 640 * 4);
-      SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-      SDL_RenderPresent(renderer);
+        
+      if (pixels) {
+        // draw screen texture
+        SDL_UpdateTexture(texture, nullptr, pixels, 640 * 4);
+        SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+        SDL_RenderPresent(renderer);
+      }
+    }
+
+    // update IP2 based on MI_INTR and MI_MASK
+    if (mi_intr & mi_mask) reg_array[13 + dev_cop0] |= (0x1 << 10);
+    else reg_array[13 + dev_cop0] &= ~(0x1 << 10);
+
+    // check ++COUNT against COMPARE, set IP7
+    uint64_t &count = reg_array[9 + dev_cop0];
+    uint64_t compare = reg_array[11 + dev_cop0];
+    for (uint32_t i = 0; i < (block_time >> 1); ++i) {
+      count = (count + 1) & 0xffffffff;
+      if (count == compare) reg_array[13 + dev_cop0] |= (0x1 << 15);
+    }
+
+    // if interrupt enabled and triggered, goto interrupt handler
+    uint8_t ip = (reg_array[13 + dev_cop0] >> 8) & 0xff;
+    uint8_t im = (reg_array[12 + dev_cop0] >> 8) & 0xff;
+    if ((reg_array[12 + dev_cop0] & 0x3) == 0x1 && (ip & im)) {
+      printf("Jumping to interrupt instead of %x\n", pc);
+      printf("IP: %x MI: %x MASK: %x\n", ip, mi_intr, mi_mask);
+      printf("count: %llx compare: %llx\n", reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
+      reg_array[14 + dev_cop0] = pc;
+      pc = 0x80000180; reg_array[12 + dev_cop0] |= 0x2;
     }
   }
 }
