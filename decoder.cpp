@@ -50,23 +50,23 @@ uint32_t scanline = 0, intrline = 0;
 uint8_t *pixels = nullptr;
 
 uint32_t read32_special(uint32_t addr) {
-  printf("! read from address %x\n", addr);
+  //printf("! read from address %x\n", addr);
   if ((addr & addr_mask) == 0x04300004) return 0x01010101; // MI Version
   else if ((addr & addr_mask) == 0x04300008) return mi_intr; // MI INTERRUPT
   else if ((addr & addr_mask) == 0x0430000c) return mi_mask; // MI INTERRUPT_MASK
   else if ((addr & addr_mask) == 0x04400010) return scanline; // VI_CURRENT_LINE
-  else if ((addr & addr_mask) == 0x0450000c) return 0xffffffff; //(mi_intr & 0x4) ? 0x8000001 : 0; // AI_STATUS
+  else if ((addr & addr_mask) == 0x0450000c) return 0xffffffff; // AI_STATUS
   else if ((addr & addr_mask) == 0x04800018) return (((mi_intr >> 1) & 0x1) << 12); // SI_STATUS
   else printf("Unhandled read from address %x\n", addr);
   return 0;
 }
 
 void write32_special(uint32_t addr, uint32_t val) {
-  printf("! write to address %x %x\n", addr, val);
+  //printf("! write to address %x %x\n", addr, val);
   if ((addr & addr_mask) == 0x04400010) mi_intr &= ~0x8; // VI_CURRENT_LINE
   else if ((addr & addr_mask) == 0x04400004) pixels = (pages[0] + (val & 0xffffff)); // VI_ORIGIN
   else if ((addr & addr_mask) == 0x0440000c) intrline = val & 0x3ff; // VI_INTR_LINE
-  else if ((addr & addr_mask) == 0x04500000) ai_used = 0; // AI ADDR
+  else if ((addr & addr_mask) == 0x04500000) ai_used = 0, ai_run = 1; // AI ADDR
   else if ((addr & addr_mask) == 0x04500004) ai_len = val & 0x3fff8; // AI LENGTH
   else if ((addr & addr_mask) == 0x04500008) ai_run = val & 0x1; // AI CONTROL
   else if ((addr & addr_mask) == 0x0450000c) mi_intr &= ~0x4; // AI_STATUS
@@ -78,9 +78,8 @@ void write32_special(uint32_t addr, uint32_t val) {
     mi_mask = ((val & 0x2) >> 1) | ((val & 0x8) >> 2) | ((val & 0x20) >> 3)
       | ((val & 0x80) >> 4) | ((val & 0x200) >> 5) | ((val ^ 0x800) >> 6);
   } else if ((addr & addr_mask) == 0x04600008) { // TRANSFER SIZE (RAM to ROM)
-    memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val + 1);
+    memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1); mi_intr |= 0x10;
   } else if ((addr & addr_mask) == 0x0460000c) { // TRANSFER SIZE (ROM to RAM)
-    printf("Copying %x bytes from %x to %x\n", val + 1, pi_rom, pi_ram);
     memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1); mi_intr |= 0x10;
   } else printf("Unhandled write to address %x: %x\n", addr, val);
 }
@@ -245,6 +244,64 @@ struct MipsJit {
       }
     }
   }
+
+  void ldl(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LDL BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpq(rsx), imm(instr)));
+    else {
+      as.mov(x86::rax, x86_spilld(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::rax, imm(instr)));
+    }
+    as.mov(x86::ecx, x86::edi);
+    as.xor_(x86::rax, x86::rax); as.not_(x86::rax);
+    as.and_(x86::ecx, 0x7); as.shl(x86::ecx, 3);
+    as.shl(x86::rax, x86::cl);
+    as.push(x86::rax); as.push(x86::ecx);
+    as.call(reinterpret_cast<uint64_t>(read64));
+    as.pop(x86::ecx); as.shl(x86::rax, x86::cl);
+    as.pop(x86::rcx); as.not_(x86::rcx);
+    if (rtx) {
+      as.and_(x86::gpq(rtx), x86::rcx);
+      as.or_(x86::gpq(rtx), x86::rax);
+    } else {
+      as.and_(x86_spilld(rt(instr)), x86::rcx);
+      as.or_(x86_spilld(rt(instr)), x86::rax);
+    }
+    as.pop(x86::edi);
+  }
+
+  void ldr(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LDR BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpq(rsx), imm(instr)));
+    else {
+      as.mov(x86::rax, x86_spilld(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::rax, imm(instr)));
+    }
+    as.inc(x86::edi);
+    as.mov(x86::ecx, x86::edi);
+    as.xor_(x86::rax, x86::rax); as.not_(x86::rax);
+    as.and_(x86::ecx, 0x7); as.shl(x86::ecx, 3);
+    as.shl(x86::rax, x86::cl); as.not_(x86::rax);
+    as.push(x86::rax); as.push(x86::ecx);
+    as.call(reinterpret_cast<uint64_t>(read64));
+    as.pop(x86::ecx); as.rol(x86::rax, x86::cl);
+    as.pop(x86::rcx); as.and_(x86::rax, x86::rcx); as.not_(x86::rcx);
+    if (rtx) {
+      as.and_(x86::gpq(rtx), x86::rcx);
+      as.or_(x86::gpq(rtx), x86::rax);
+    } else {
+      as.and_(x86_spilld(rt(instr)), x86::rcx);
+      as.or_(x86_spilld(rt(instr)), x86::rax);
+    }
+    as.pop(x86::edi);
+  }
+
 
   void ld(uint32_t instr) {
     if (rt(instr) == 0) return;
@@ -1560,6 +1617,8 @@ struct MipsJit {
         case 0x15: next_pc = bnel(instr, pc); break;
         case 0x16: next_pc = blezl(instr, pc); break;
         case 0x17: next_pc = bgtzl(instr, pc); break;
+        case 0x1a: ldl(instr); break;
+        case 0x1b: ldr(instr); break;
         case 0x20: lb(instr); break;
         case 0x21: lh(instr); break;
         case 0x22: lwl(instr); break;
@@ -1601,10 +1660,10 @@ int main(int argc, char* argv[]) {
   // setup SDL video
   SDL_Init(SDL_INIT_VIDEO);
   SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
-  SDL_SetRenderDrawColor(renderer, 0x9b, 0xbc, 0x0f, 0xff);
+  SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
   SDL_RenderClear(renderer);
-  texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888,
-                              SDL_TEXTUREACCESS_STREAMING, 640, 480);
+  texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA5551,
+                              SDL_TEXTUREACCESS_STREAMING, 320, 240);
 
   // setup memory pages
   pages[0] = reinterpret_cast<uint8_t*>(mmap(nullptr, 0x20000000,
@@ -1631,12 +1690,13 @@ int main(int argc, char* argv[]) {
   reg_array[29] = 0xa4001ff0;
 
   // VI_ORIGIN at 0x100000
-  pixels = pages[0];// + 0x100000;
+  pixels = pages[0];
   // Cartridge Header at 0x10000000
   memcpy(pages[0] + 0x10000000, pages[0] + 0x04000000, fsize);
 
   JitRuntime runtime;
   uint32_t line_cycle = 0;
+  uint16_t *out = new uint16_t[336 * 240];
   while (true) {
     Function &run_block = blocks[pc];
     uint32_t &block_time = block_times[pc];
@@ -1665,23 +1725,26 @@ int main(int argc, char* argv[]) {
     //printf("STATUS: %llx EPC: %llx\n", reg_array[12 + dev_cop0] & 0x3, reg_array[14 + dev_cop0]);
 
     // set MI_INTR when all audio used
-    if (ai_run && ai_used < 0x100000 && (ai_used += block_time) >= 0x100000) mi_intr |= 0x4;
+    if (ai_run && ai_used < 10000 && (ai_used += block_time) >= 10000) mi_intr |= 0x4;
 
     if (line_cycle >= 6150) {
-      line_cycle = 0, ++scanline;
-      if (scanline == 484) scanline = 0, mi_intr |= 0x2; // SI INTR
-      if (intrline == scanline) mi_intr |= 0x8; // VI INTR
-
-      // handle SDL events
-      for (SDL_Event e; SDL_PollEvent(&e);) {
-        if (e.type == SDL_QUIT) exit(0);
-      }
-        
-      if (pixels) {
+      line_cycle = 0;
+      if (intrline == ++scanline) mi_intr |= 0x8; // VI INTR
+      if (scanline > 484) {
+        scanline = 0, mi_intr |= 0x2; // SI INTR
+        // handle SDL events
+        for (SDL_Event e; SDL_PollEvent(&e);) {
+          if (e.type == SDL_QUIT) exit(0);
+        }
         // draw screen texture
-        SDL_UpdateTexture(texture, nullptr, pixels, 640 * 4);
-        SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-        SDL_RenderPresent(renderer);
+        if (pixels) {
+          for (uint32_t i = 0; i < 336 * 240; ++i) {
+            out[i] = __builtin_bswap16(reinterpret_cast<uint16_t*>(pixels)[i]);
+          }
+          SDL_UpdateTexture(texture, nullptr, out + 16, 336 * 2);
+          SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+          SDL_RenderPresent(renderer);
+        }
       }
     }
 
@@ -1692,10 +1755,9 @@ int main(int argc, char* argv[]) {
     // check ++COUNT against COMPARE, set IP7
     uint64_t &count = reg_array[9 + dev_cop0];
     uint64_t compare = reg_array[11 + dev_cop0];
-    for (uint32_t i = 0; i < (block_time >> 1); ++i) {
-      count = (count + 1) & 0xffffffff;
-      if (count == compare) reg_array[13 + dev_cop0] |= (0x1 << 15);
-    }
+    uint64_t new_c = (count + block_time) & 0xffffffff;
+    if ((count >= compare) ^ (new_c >= compare)) reg_array[13 + dev_cop0] |= (0x1 << 15);
+    count = new_c;
 
     // if interrupt enabled and triggered, goto interrupt handler
     uint8_t ip = (reg_array[13 + dev_cop0] >> 8) & 0xff;
