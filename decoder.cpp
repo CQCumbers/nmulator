@@ -259,6 +259,60 @@ struct MipsJit {
     as.pop(x86::edi);
   }
 
+  void lwl(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LWL BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    as.mov(x86::ecx, x86::edi); as.mov(x86::eax, 0xffffffff);
+    as.and_(x86::ecx, 0x3); as.shl(x86::ecx, 3);
+    as.shl(x86::eax, x86::cl);
+    as.push(x86::eax); as.push(x86::ecx);
+    as.call(reinterpret_cast<uint64_t>(uread32));
+    as.pop(x86::ecx); as.rol(x86::eax, x86::cl);
+    as.pop(x86::ecx); as.not_(x86::ecx);
+    if (rtx) {
+      as.and_(x86::gpd(rtx), x86::ecx);
+      as.or_(x86::gpd(rtx), x86::eax);
+    } else {
+      as.and_(x86_spill(rt(instr)), x86::ecx);
+      as.or_(x86_spill(rt(instr)), x86::eax);
+    }
+    as.pop(x86::edi);
+  }
+
+  void lwr(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
+    // LWR BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi);
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    as.mov(x86::ecx, x86::edi); as.mov(x86::eax, 0xffffff00);
+    as.and_(x86::ecx, 0x3); as.shl(x86::ecx, 3);
+    as.shl(x86::eax, x86::cl);
+    as.push(x86::eax); as.push(x86::ecx);
+    as.call(reinterpret_cast<uint64_t>(uread32));
+    as.pop(x86::ecx); as.add(x86::ecx, 8);
+    as.rol(x86::eax, x86::cl); as.pop(x86::ecx);
+    if (rtx) {
+      as.and_(x86::gpd(rtx), x86::ecx);
+      as.or_(x86::gpd(rtx), x86::eax);
+    } else {
+      as.and_(x86_spill(rt(instr)), x86::ecx);
+      as.or_(x86_spill(rt(instr)), x86::eax);
+    }
+    as.pop(x86::edi);
+  }
+
   void lwu(uint32_t instr) {
     if (rt(instr) == 0) return;
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
@@ -1445,9 +1499,11 @@ struct MipsJit {
         case 0x17: next_pc = bgtzl(instr, pc); break;
         case 0x20: lb(instr); break;
         case 0x21: lh(instr); break;
+        case 0x22: lwl(instr); break;
         case 0x23: lw(instr); break;
         case 0x24: lbu(instr); break;
         case 0x25: lhu(instr); break;
+        case 0x26: lwr(instr); break;
         case 0x27: lwu(instr); break;
         case 0x28: sb(instr); break;
         case 0x29: sh(instr); break;
