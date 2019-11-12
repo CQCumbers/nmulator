@@ -34,6 +34,7 @@ using namespace asmjit;
 typedef uint32_t (*Function)();
 std::unordered_map<uint32_t, Function> blocks;
 std::unordered_map<uint32_t, uint32_t> block_times;
+std::unordered_map<uint32_t, uint32_t> block_firsts;
 const uint32_t block_end = 0x04ffffff;
 
 /* === Memory Access === */
@@ -49,22 +50,24 @@ uint32_t scanline = 0, intrline = 0;
 uint8_t *pixels = nullptr;
 
 uint32_t read32_special(uint32_t addr) {
-  //printf("! read from address %x\n", addr);
+  printf("! read from address %x\n", addr);
   if ((addr & addr_mask) == 0x04300004) return 0x01010101; // MI Version
   else if ((addr & addr_mask) == 0x04300008) return mi_intr; // MI INTERRUPT
   else if ((addr & addr_mask) == 0x0430000c) return mi_mask; // MI INTERRUPT_MASK
   else if ((addr & addr_mask) == 0x04400010) return scanline; // VI_CURRENT_LINE
-  else if ((addr & addr_mask) == 0x0450000c) return 0x11111111; // AI_STATUS
+  else if ((addr & addr_mask) == 0x0450000c) return 0xffffffff; //(mi_intr & 0x4) ? 0x8000001 : 0; // AI_STATUS
+  else if ((addr & addr_mask) == 0x04800018) return (((mi_intr >> 1) & 0x1) << 12); // SI_STATUS
   else printf("Unhandled read from address %x\n", addr);
   return 0;
 }
 
 void write32_special(uint32_t addr, uint32_t val) {
-  //printf("! write to address %x %x\n", addr, val);
+  printf("! write to address %x %x\n", addr, val);
   if ((addr & addr_mask) == 0x04400010) mi_intr &= ~0x8; // VI_CURRENT_LINE
   else if ((addr & addr_mask) == 0x04400004) pixels = (pages[0] + (val & 0xffffff)); // VI_ORIGIN
   else if ((addr & addr_mask) == 0x0440000c) intrline = val & 0x3ff; // VI_INTR_LINE
-  else if ((addr & addr_mask) == 0x04500004) ai_len = val & 0x3ffff; // AI LENGTH
+  else if ((addr & addr_mask) == 0x04500000) ai_used = 0; // AI ADDR
+  else if ((addr & addr_mask) == 0x04500004) ai_len = val & 0x3fff8; // AI LENGTH
   else if ((addr & addr_mask) == 0x04500008) ai_run = val & 0x1; // AI CONTROL
   else if ((addr & addr_mask) == 0x0450000c) mi_intr &= ~0x4; // AI_STATUS
   else if ((addr & addr_mask) == 0x04600000) pi_ram = val & 0xffffff; // PI RAM ADDR
@@ -1192,6 +1195,14 @@ struct MipsJit {
     return block_end;
   }
 
+  uint32_t jalr(uint32_t instr, uint32_t pc) {
+    as.mov(x86_spill(31), pc + 4);
+    uint32_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::edi, x86::gpd(rsx));
+    else as.mov(x86::edi, x86_spill(rs(instr)));
+    return block_end;
+  }
+
   uint32_t jr(uint32_t instr) {
     uint32_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::edi, x86::gpd(rsx));
@@ -1440,6 +1451,7 @@ struct MipsJit {
       case 0x06: srlv(instr); break;
       case 0x07: srav(instr); break;
       case 0x08: next_pc = jr(instr); break;
+      case 0x09: next_pc = jalr(instr, pc); break;
       case 0x0f: printf("SYNC\n"); break;
       case 0x10: mfhi(instr);  break;
       case 0x11: mthi(instr);  break;
@@ -1522,8 +1534,8 @@ struct MipsJit {
     end_label = as.newLabel();
     uint32_t cycles = 0;
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
-      //printf("%x\n", pc);
       uint32_t instr = read32(pc);
+      //printf("%x: %x\n", pc, instr);
       pc = next_pc, next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
@@ -1626,11 +1638,11 @@ int main(int argc, char* argv[]) {
   JitRuntime runtime;
   uint32_t line_cycle = 0;
   while (true) {
-    //Function &run_block = blocks[pc];
-    //uint32_t &block_time = block_times[pc];
-    Function run_block = nullptr;
-    uint32_t block_time = 0;
-    if (!run_block) {
+    Function &run_block = blocks[pc];
+    uint32_t &block_time = block_times[pc];
+    uint32_t &block_first = block_firsts[pc];
+    uint32_t first_instr = read32(pc);
+    if (!run_block || first_instr != block_first) {
       CodeHolder code;
       //FileLogger logger(stdout);
 
@@ -1639,6 +1651,7 @@ int main(int argc, char* argv[]) {
       MipsJit cpu(code);
 
       code.init(runtime.codeInfo());
+      block_first = first_instr;
       block_time = cpu.jit_block(pc);
       runtime.add(&run_block, &code);
     }
@@ -1648,20 +1661,16 @@ int main(int argc, char* argv[]) {
     //printf("pixels: %lx, scanline: %d\n", pixels - pages[0], scanline);
     //printf("$sp: %llx $s1: %llx\n", reg_array[29], reg_array[17]);
     //printf("$a3: %llx $t0: %llx\n", reg_array[7], reg_array[8]);
-    //printf("next block at %x\n", pc);
+    //if (pc > 0x80004c00) printf("next block at %x\n", pc);
     //printf("STATUS: %llx EPC: %llx\n", reg_array[12 + dev_cop0] & 0x3, reg_array[14 + dev_cop0]);
 
     // set MI_INTR when all audio used
-    if (ai_run && ++ai_used == 1000000) mi_intr |= 0x4, ai_used = 0;
-    // clear MI_INTR a few cycles after that
-    else if (ai_run && ai_used == 0x08) mi_intr &= ~0x4;
+    if (ai_run && ai_used < 0x100000 && (ai_used += block_time) >= 0x100000) mi_intr |= 0x4;
 
     if (line_cycle >= 6150) {
       line_cycle = 0, ++scanline;
-      if (scanline == 484) {
-        scanline = 0, mi_intr |= 0x2; // SI INTR
-        if (intrline == scanline) mi_intr |= 0x8; // VI INTR
-      }
+      if (scanline == 484) scanline = 0, mi_intr |= 0x2; // SI INTR
+      if (intrline == scanline) mi_intr |= 0x8; // VI INTR
 
       // handle SDL events
       for (SDL_Event e; SDL_PollEvent(&e);) {
@@ -1693,7 +1702,7 @@ int main(int argc, char* argv[]) {
     uint8_t im = (reg_array[12 + dev_cop0] >> 8) & 0xff;
     if ((reg_array[12 + dev_cop0] & 0x3) == 0x1 && (ip & im)) {
       printf("Jumping to interrupt instead of %x\n", pc);
-      printf("IP: %x MI: %x MASK: %x\n", ip, mi_intr, mi_mask);
+      printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_intr, mi_mask, intrline);
       printf("count: %llx compare: %llx\n", reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
       reg_array[14 + dev_cop0] = pc;
       pc = 0x80000180; reg_array[12 + dev_cop0] |= 0x2;
