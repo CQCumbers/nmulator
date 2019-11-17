@@ -5,9 +5,14 @@ nmulator
 *.dSYM
 *.stackdump
 
+# precompiled artifacts
+*.o
+*.a
+*.gch
+*.pch
+
 # macOS stuff
 .DS_Store
-frame_boy.xcodeproj/
 gdb-entitlement.xml
 
 # test roms
