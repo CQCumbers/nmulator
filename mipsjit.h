@@ -109,7 +109,6 @@ struct MipsJit {
       as.mov(x86::rax, x86_spilld(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::rax, imm(instr)));
     }
-    as.and_(x86::edi, Imm(~(sizeof(T) - 1)));
     as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
     if (rtx) as.mov(x86::gpq(rtx), x86::rax);
     else as.mov(x86_spilld(rt(instr)), x86::rax);
@@ -127,7 +126,6 @@ struct MipsJit {
       as.mov(x86::rax, x86_spilld(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::rax, imm(instr)));
     }
-    as.and_(x86::edi, Imm(~(sizeof(T) - 1)));
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
     else as.mov(x86::rsi, x86_spilld(rt(instr)));
     as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
@@ -162,21 +160,20 @@ struct MipsJit {
     }
     as.and_(x86::rax, x86::rcx); as.not_(x86::rcx);
     if (rtx) {
-      as.movsx(x86::rdx, x86::gpq(rtx));
+      as.movsxd(x86::rdx, x86::gpq(rtx));
+      as.and_(x86::rdx, x86::rcx); as.or_(x86::rdx, x86::rax);
       as.mov(x86::gpq(rtx), x86::rdx);
-      as.and_(x86::gpq(rtx), x86::rcx);
-      as.or_(x86::gpq(rtx), x86::rax);
     } else {
-      as.movsx(x86::rdx, x86_spilld(rt(instr)));
+      as.movsxd(x86::rdx, x86_spilld(rt(instr)));
+      as.and_(x86::rdx, x86::rcx); as.or_(x86::rdx, x86::rax);
       as.mov(x86_spilld(rt(instr)), x86::rdx);
-      as.and_(x86_spilld(rt(instr)), x86::rcx);
-      as.or_(x86_spilld(rt(instr)), x86::rax);
     }
     as.pop(x86::edi);
   }
 
   template <typename T, bool right>
   void swl(uint32_t instr) {
+    printf("SWL (unaligned store)\n");
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SWL BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi);
@@ -187,10 +184,14 @@ struct MipsJit {
       as.lea(x86::edi, x86::dword_ptr(x86::rax, imm(instr)));
     }
     // compute mask for loaded data
-    /*as.mov(x86::ecx, x86::edi); as.and_(x86::ecx, Imm(sizeof(T) - 1));
+    as.mov(x86::ecx, x86::edi); as.and_(x86::ecx, Imm(sizeof(T) - 1));
     as.xor_(x86::rax, x86::rax); as.not_(x86::rax);
-    as.shl(x86::ecx, 3); as.shr(x86::rax, x86::cl);*/
     if (right) as.sub(x86::edi, Imm(sizeof(T) - 1)), as.add(x86::ecx, 1);
+    as.shl(x86::ecx, 3); as.shl(x86::rax, x86::cl);
+    // read previous data from memory
+    as.push(x86::rax);
+    as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    as.pop(x86::rcx);
     // apply mask depending on direction
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
     else as.mov(x86::rsi, x86_spilld(rt(instr)));
@@ -198,14 +199,9 @@ struct MipsJit {
       as.mov(x86::rdx, x86::rcx); as.not_(x86::rcx);
       as.cmp(x86::rcx, 0); as.cmove(x86::rcx, x86::rdx);
     }
-    /*if (right) as.not_(x86::rax);
-    as.and_(x86::rsi, x86::rax); as.not_(x86::rax);
-    // read unaligned data from memory
-    as.push(x86::rax);
-    //as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
-    as.xor_(x86::rax, x86::rax);
-    as.pop(x86::rcx); as.and_(x86::rax, x86::rcx);
-    as.or_(x86::rsi, x86::rax);*/
+    as.and_(x86::rsi, x86::rcx); as.not_(x86::rcx);
+    as.and_(x86::rax, x86::rcx); as.or_(x86::rsi, x86::rax);
+    // write masked data to memory
     as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
     as.pop(x86::esi);
     as.pop(x86::edi);
@@ -1240,8 +1236,8 @@ struct MipsJit {
         case 0x15: next_pc = bnel(instr, pc); break;
         case 0x16: next_pc = blezl(instr, pc); break;
         case 0x17: next_pc = bgtzl(instr, pc); break;
-        case 0x1a: lwl<int64_t, false>(instr); break;
-        case 0x1b: lwl<int64_t, true>(instr); break;
+        case 0x1a: lwl<uint64_t, false>(instr); break;
+        case 0x1b: lwl<uint64_t, true>(instr); break;
         case 0x20: lw<int8_t>(instr); break;
         case 0x21: lw<int16_t>(instr); break;
         case 0x22: lwl<int32_t, false>(instr); break;
@@ -1260,7 +1256,7 @@ struct MipsJit {
         case 0x2f: cache(instr); break;
         case 0x31: cop1(instr); break; // LWC1
         case 0x35: cop1(instr); break; // LDC1
-        case 0x37: lw<int64_t>(instr); break;
+        case 0x37: lw<uint64_t>(instr); break;
         case 0x39: cop1(instr); break; // SWC1
         case 0x3d: cop1(instr); break; // SDC1
         case 0x3f: sw<uint64_t>(instr); break;

@@ -29,7 +29,7 @@ namespace R4300 {
   }
 
   void mi_write(uint8_t offset, uint32_t val) {
-    if (offset == 0x0c) { mi_mask = _pext_u32(val, 0xaa); return; }
+    if (offset == 0x0c) { mi_mask = _pext_u32(val, 0xaaa); return; }
     printf("[MI] write to %x\n", offset);
   }
 
@@ -151,7 +151,7 @@ namespace R4300 {
       case 0x00: pi_ram = val & 0xfffff8; return;
       case 0x04: pi_rom = val & 0x1ffffff8; return;
       case 0x08: // DMA completes immediately
-        memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1);
+        memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val + 1);
         mi_intr |= 0x10; return;
       case 0x0c:
         memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1);
@@ -203,7 +203,7 @@ namespace R4300 {
     if (!page) return mmio_read(addr);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
     switch (sizeof(T)) {
-      case 1: return static_cast<T>(*ptr);
+      case 1: return *ptr;
       case 2: return static_cast<T>(__builtin_bswap16(*ptr));
       case 4: return static_cast<T>(__builtin_bswap32(*ptr));
       case 8: return static_cast<T>(__builtin_bswap64(*ptr));
@@ -211,9 +211,9 @@ namespace R4300 {
   }
 
   template <typename T>
-  void write(uint32_t addr, T val) {
+  void write(uint32_t addr, int64_t val) {
     uint8_t *page = pages[(addr >> 21) & 0xff];
-    if (!page) { mmio_write(addr, val); return; }
+    if (!page) return mmio_write(addr, val);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
     switch (sizeof(T)) {
       case 1: *ptr = val; return;
@@ -225,7 +225,7 @@ namespace R4300 {
 
   /* === Actual CPU Functions === */
 
-  uint64_t reg_array[0x42];
+  uint64_t reg_array[0x42] = {0};
   uint32_t pc = 0xa4000040;
   constexpr uint8_t hi = 0x20, lo = 0x21;
   constexpr uint8_t dev_cop0 = 0x22;
@@ -252,11 +252,15 @@ namespace R4300 {
     uint8_t ip = (reg_array[13 + dev_cop0] >> 8) & 0xff;
     uint8_t im = (reg_array[12 + dev_cop0] >> 8) & 0xff;
     if ((reg_array[12 + dev_cop0] & 0x3) == 0x1 && (ip & im)) {
-      //printf("Jumping to interrupt instead of %x\n", pc);
-      //printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_intr, mi_mask, vi_intr);
-      //printf("count: %llx compare: %llx\n", reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
-      //printf("s5: %llx a0: %llx\n", reg_array[21], reg_array[4]);
+      printf("Jumping to interrupt instead of %x\n", pc);
+      printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_intr, mi_mask, vi_intr);
+      printf("count: %llx compare: %llx\n", reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
+      printf("0x80195734: %llx\n", read<uint32_t>(0x80195734));
       reg_array[14 + dev_cop0] = pc; pc = 0x80000180; reg_array[12 + dev_cop0] |= 0x2;
+    }
+    if (pc == 0x80093070) {
+      printf("pc: %x s0: %llx s4: %llx\n", pc, reg_array[16], reg_array[20]);
+      printf("0x80195734: %llx\n", read<uint32_t>(0x80195734));
     }
   }
 
