@@ -82,7 +82,7 @@ namespace R4300 {
 
     vi_line_progress = 0;
     if (++vi_line == vi_intr) mi_intr |= 0x8;
-    if (vi_line < vi_height) return;
+    if (vi_line < 484) return;
 
     vi_line = 0;
     mi_intr |= 0x2; si_status |= 0x1000; // SI INTR
@@ -212,6 +212,7 @@ namespace R4300 {
 
   template <typename T>
   void write(uint32_t addr, int64_t val) {
+    printf("--- %x written to %x ---\n", val, addr); 
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if (!page) return mmio_write(addr, val);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
@@ -255,12 +256,15 @@ namespace R4300 {
       printf("Jumping to interrupt instead of %x\n", pc);
       printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_intr, mi_mask, vi_intr);
       printf("count: %llx compare: %llx\n", reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
-      printf("0x80195734: %llx\n", read<uint32_t>(0x80195734));
+      //printf("0x80195734: %llx\n", read<uint32_t>(0x80195734));
       reg_array[14 + dev_cop0] = pc; pc = 0x80000180; reg_array[12 + dev_cop0] |= 0x2;
     }
-    if (pc == 0x80093070) {
-      printf("pc: %x s0: %llx s4: %llx\n", pc, reg_array[16], reg_array[20]);
-      printf("0x80195734: %llx\n", read<uint32_t>(0x80195734));
+    //printf("pc: %x s0: %llx s4: %llx\n", pc, reg_array[16], reg_array[20]);
+    //printf("0x80195734: %llx\n", read<uint32_t>(0x80195734));
+    //printf("$a3: %llx $t0: %llx, $v0: %llx, $t5: %llx\n", reg_array[7], reg_array[8], reg_array[2], reg_array[13]);
+    for (uint8_t i = 0; i < 32; ++i) {
+      if ((reg_array[i] & 0x80000000) ^ ((reg_array[i] & 0x100000000) >> 1))
+        printf("Sign extension violation on $%x\n", i);
     }
   }
 
@@ -268,7 +272,7 @@ namespace R4300 {
     // setup registers
     reg_array[20] = 0x1;
     reg_array[22] = 0x3f;
-    reg_array[29] = 0xa4001ff0;
+    reg_array[29] = 0xffffffffa4001ff0;
 
     // setup page table
     pages[0] = reinterpret_cast<uint8_t*>(mmap(
