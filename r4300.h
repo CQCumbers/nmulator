@@ -226,10 +226,10 @@ namespace R4300 {
 
   /* === Actual CPU Functions === */
 
-  uint64_t reg_array[0x42] = {0};
+  uint64_t reg_array[0x62] = {0};
   uint32_t pc = 0xa4000040;
   constexpr uint8_t hi = 0x20, lo = 0x21;
-  constexpr uint8_t dev_cop0 = 0x22;
+  constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
 
   uint32_t fetch(uint32_t addr = pc) {
     uint8_t *page = pages[(addr >> 21) & 0xff];
