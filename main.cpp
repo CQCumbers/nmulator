@@ -25,19 +25,18 @@ int main(int argc, char* argv[]) {
   std::unordered_map<uint32_t, Block> blocks;
   while (true) {
     Block &block = blocks[R4300::pc];
-    if (!block.valid(R4300::fetch())) {
-      block.hash = R4300::fetch();
+    if (!block.valid(R4300::fetch(R4300::pc))) {
+      block.hash = R4300::fetch(R4300::pc);
       CodeHolder code;
       code.init(runtime.codeInfo());
       MipsJit jit(code);
 
-      code.init(runtime.codeInfo());
       block.cycles = jit.jit_block();
       runtime.add(&block.code, &code);
     }
     R4300::pc = block.code();
     R4300::ai_update(block.cycles);
     R4300::vi_update(block.cycles);
-    R4300::intrs_update(block.cycles);
+    R4300::irqs_update(block.cycles);
   }
 }

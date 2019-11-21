@@ -15,7 +15,7 @@ struct MipsJit {
   static constexpr uint8_t dev_cop1 = R4300::dev_cop1;
   enum class Dir { ll, rl, ra };
   enum class CC { gt, lt, ge, le };
-  enum class Op { add, sub, mul, div };
+  enum class Op { add, sub, mul, div, sqrt, abs, mov, neg };
 
   MipsJit(CodeHolder &code) : as(&code) {}
 
@@ -851,7 +851,7 @@ struct MipsJit {
 
   uint32_t eret() {
     printf("Returning from interrupt\n");
-    as.and_(x86_spill(12 + dev_cop0), ~0x2);
+    as.and_(x86_spilld(12 + dev_cop0), ~0x2);
     as.mov(x86::edi, x86_spill(14 + dev_cop0));
     as.jmp(end_label);
     return block_end;
@@ -869,8 +869,8 @@ struct MipsJit {
 
   void mtc0(uint32_t instr) {
     printf("Write to COP0 reg %d\n", rd(instr));
-    if (rd(instr) == 11) as.and_(x86_spill(13 + dev_cop0), ~0x8000);
-    if (rt(instr) == 0) as.mov(x86_spill(rd(instr) + dev_cop0), 0);
+    if (rd(instr) == 11) as.and_(x86_spilld(13 + dev_cop0), ~0x8000);
+    if (rt(instr) == 0) as.mov(x86_spilld(rd(instr) + dev_cop0), 0);
     else move(rd(instr) + dev_cop0, rt(instr));
   }
 
@@ -892,6 +892,16 @@ struct MipsJit {
     } else if (operation == Op::div) {
       if (rtx) as.divss(x86::xmm0, x86::xmm(rtx));
       else as.divss(x86::xmm0, x86_spill(rt(instr) + dev_cop1));
+    } else if (operation == Op::sqrt) {
+      as.sqrtss(x86::xmm0, x86::xmm0);
+    } else if (operation == Op::abs) {
+      as.xorps(x86::xmm1, x86::xmm1);
+      as.subss(x86::xmm1, x86::xmm0);
+      as.maxss(x86::xmm0, x86::xmm1);
+    } else if (operation == Op::neg) {
+      as.xorps(x86::xmm1, x86::xmm1);
+      as.subss(x86::xmm1, x86::xmm0);
+      as.movss(x86::xmm0, x86::xmm1);
     }
     uint8_t sax = x86_reg(sa(instr) + dev_cop1);
     if (sax) as.movss(x86::xmm(sax), x86::xmm0);
@@ -947,15 +957,6 @@ struct MipsJit {
     return block_end;
   }
 
-  void mov_fmt(uint32_t instr) {
-    uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
-    if (rdx) as.movss(x86::xmm0, x86::xmm(rdx));
-    else as.movss(x86::xmm0, x86_spill(rd(instr) + dev_cop1));
-    uint8_t sax = x86_reg(sa(instr) + dev_cop1);
-    if (sax) as.movss(x86::xmm(sax), x86::xmm0);
-    else as.movss(x86_spill(sa(instr) + dev_cop1), x86::xmm0);
-  }
-
   void mfc1(uint32_t instr) {
     printf("Read from COP1 reg %d\n", rd(instr));
     if (rt(instr) == 0) return;
@@ -963,8 +964,9 @@ struct MipsJit {
     if (rdx) as.movss(x86::xmm0, x86::xmm(rdx));
     else as.movss(x86::xmm0, x86_spill(rd(instr) + dev_cop1));
     as.movss(x86_spill(rt(instr)), x86::xmm0);
-    uint8_t rtx = x86_reg(rt(instr) + dev_cop1);
+    uint8_t rtx = x86_reg(rt(instr));
     if (rtx) as.mov(x86::gpd(rtx), x86_spill(rt(instr)));
+    to_eax(rt(instr)); from_eax(rt(instr));
   }
 
   void mtc1(uint32_t instr) {
@@ -980,7 +982,7 @@ struct MipsJit {
   template <typename T>
   void lwc1(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
-    // LW BASE(RS), RT, OFFSET(IMMEDIATE)
+    // LWC1 BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi);
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
@@ -996,7 +998,7 @@ struct MipsJit {
   template <typename T>
   void swc1(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
-    // SW BASE(RS), RT, OFFSET(IMMEDIATE)
+    // SWC1 BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi);
     as.push(x86::esi);
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
@@ -1009,6 +1011,26 @@ struct MipsJit {
     as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
     as.pop(x86::esi);
     as.pop(x86::edi);
+  }
+
+  template <uint8_t round_mode>
+  void round_w_fmt(uint32_t instr) {
+    uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
+    if (rdx) as.roundss(x86::xmm0, x86::xmm(rdx), round_mode);
+    else as.roundss(x86::xmm0, x86_spill(rd(instr) + dev_cop1), round_mode);
+    as.cvtss2si(x86::eax, x86::xmm0);
+    as.mov(x86_spill(sa(instr) + dev_cop1), x86::eax);
+    uint8_t sax = x86_reg(sa(instr) + dev_cop1);
+    if (sax) as.movss(x86::xmm(sax), x86_spill(sa(instr) + dev_cop1));
+  }
+
+  void cvt_fmt_w(uint32_t instr) {
+    uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
+    if (rdx) as.movss(x86_spill(rd(instr) + dev_cop1), x86::xmm(rdx));
+    as.cvtsi2ss(x86::xmm0, x86_spill(rd(instr) + dev_cop1));
+    uint8_t sax = x86_reg(sa(instr) + dev_cop1);
+    if (sax) as.movss(x86::xmm(sax), x86::xmm0);
+    else as.movss(x86_spill(sa(instr) + dev_cop1), x86::xmm0);
   }
 
   void invalid(uint32_t instr) {
@@ -1121,7 +1143,16 @@ struct MipsJit {
           case 0x01: add_fmt<Op::sub>(instr); break;
           case 0x02: add_fmt<Op::mul>(instr); break;
           case 0x03: add_fmt<Op::div>(instr); break;
-          case 0x06: mov_fmt(instr); break;
+          case 0x04: add_fmt<Op::sqrt>(instr); break;
+          case 0x05: add_fmt<Op::abs>(instr); break;
+          case 0x06: add_fmt<Op::mov>(instr); break;
+          case 0x07: add_fmt<Op::neg>(instr); break;
+          case 0x0c: round_w_fmt<0>(instr); break;
+          case 0x0d: round_w_fmt<3>(instr); break;
+          case 0x0e: round_w_fmt<2>(instr); break;
+          case 0x0f: round_w_fmt<1>(instr); break;
+          case 0x20: cvt_fmt_w(instr); break;
+          case 0x21: cvt_fmt_w(instr); break;
           case 0x30: case 0x32: case 0x34: case 0x36:
           case 0x31: case 0x33: case 0x35: case 0x37:
             c_fmt(instr); break;
@@ -1138,7 +1169,7 @@ struct MipsJit {
 
   uint32_t jit_block() {
     as.push(x86::rbp);
-    as.mov(x86::rbp, reinterpret_cast<uint64_t>(R4300::reg_array));
+    as.mov(x86::rbp, reinterpret_cast<uint64_t>(&R4300::reg_array));
     //as.push(x86::gpd(x86_reg(5)));
     //as.mov(x86::gpd(x86_reg(5)), x86_spill(5));
     //as.push(x86::gpd(x86_reg(6)));
@@ -1187,11 +1218,11 @@ struct MipsJit {
         case 0x29: sw<uint16_t>(instr); break;
         case 0x2a: swl<uint32_t, Dir::ll>(instr); break;
         case 0x2b: sw<uint32_t>(instr); break;
-        case 0x2c: swl<uint64_t, Dir::ll>(instr); break;
-        case 0x2d: swl<uint64_t, Dir::rl>(instr); break;
+        //case 0x2c: swl<uint64_t, Dir::ll>(instr); break;
+        //case 0x2d: swl<uint64_t, Dir::rl>(instr); break;
         case 0x2e: swl<uint32_t, Dir::rl>(instr); break;
         case 0x2f: cache(instr); break;
-        case 0x31: lwc1<uint32_t>(instr); break;
+        case 0x31: lwc1<int32_t>(instr); break;
         case 0x35: lwc1<uint64_t>(instr); break;
         case 0x37: lw<uint64_t>(instr); break;
         case 0x39: swc1<uint32_t>(instr); break;
