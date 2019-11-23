@@ -3,7 +3,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -g -march=native -fno-rtti -fno-exceptions -
 LDFLAGS = -I/Library/Frameworks/SDL2.framework/Headers -F/Library/Frameworks -framework SDL2
 
 # Compile the main executable
-nmulator: $(SOURCES) r4300.h mipsjit.h
+nmulator: $(SOURCES) rsp.h r4300.h mipsjit.h
 	g++ $(CXXFLAGS) $(SOURCES) $(LDFLAGS) -o $@
 
 # Remove automatically generated files

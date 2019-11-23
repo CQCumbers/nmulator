@@ -6,16 +6,22 @@
 
 using namespace asmjit;
 
+enum class Device { r4300, rsp };
+
+template <Device device>
 struct MipsJit {
-  x86::Assembler as;
-  Label end_label;
-  static constexpr uint32_t block_end = 0x04ffffff;
-  static constexpr uint8_t hi = R4300::hi, lo = R4300::lo;
-  static constexpr uint8_t dev_cop0 = R4300::dev_cop0;
-  static constexpr uint8_t dev_cop1 = R4300::dev_cop1;
   enum class Dir { ll, rl, ra };
   enum class CC { gt, lt, ge, le };
   enum class Op { add, sub, mul, div, sqrt, abs, mov, neg };
+
+  x86::Assembler as;
+  Label end_label;
+  static constexpr uint32_t block_end = 0x04ffffff;
+
+  const bool is_rsp = (device == Device::rsp);
+  const uint8_t hi = R4300::hi, lo = R4300::lo;
+  const uint8_t dev_cop0 = (is_rsp ? RSP::dev_cop0 : R4300::dev_cop0);
+  const uint8_t dev_cop1 = R4300::dev_cop1, dev_cop2 = RSP::dev_cop2;
 
   MipsJit(CodeHolder &code) : as(&code) {}
 
@@ -52,16 +58,58 @@ struct MipsJit {
 
   /* === Register Allocation === */
 
-  uint8_t x86_reg(uint8_t reg) {
-    return 0;
+  constexpr uint8_t x86_reg(uint8_t reg) {
+    // allocate cop1 and cop2 xmm regs too
+    switch (reg) {
+      case 2: return 12; // $v0 = r12
+      case 4: return 13; // $a0 = r13
+      case 5: return 14; // $a1 = r14
+      case 6: return 15; // $a2 = r15
+      case 18: return 3; // $s2 = rbx
+      case 3: return 8;  // $v1 = r8
+      case 7: return 9;  // $a3 = r9
+      case 8: return 10; // $t0 = r10
+      case 9: return 11; // $t1 = r11
+      default: return 0;
+    }
   }
 
-  const x86::Mem x86_spill(uint8_t reg) {
+  constexpr x86::Mem x86_spill(uint8_t reg) {
     return x86::dword_ptr(x86::rbp, reg << 3);
   }
 
-  const x86::Mem x86_spilld(uint8_t reg) {
+  constexpr x86::Mem x86_spilld(uint8_t reg) {
     return x86::qword_ptr(x86::rbp, reg << 3);
+  }
+
+  void x86_load_all() {
+    for (uint8_t i = 0x0; i < 0x20; ++i) {
+      if (x86_reg(i) == 0) continue;
+      as.push(x86::gpq(x86_reg(i)));
+      as.mov(x86::gpq(x86_reg(i)), x86_spilld(i));
+    }
+  }
+
+  void x86_store_all() {
+    for (uint8_t i = 0x20; i != 0; --i) {
+      if (x86_reg(i) == 0) continue;
+      as.mov(x86_spilld(i), x86::gpq(x86_reg(i)));
+      as.pop(x86::gpq(x86_reg(i)));
+    }
+  }
+
+  void x86_store_caller() {
+    for (uint8_t i = 0x20; i != 0; --i) {
+      if (x86_reg(i) < 8 || x86_reg(i) >= 12) continue;
+      as.push(x86::gpq(x86_reg(i)));
+    }
+  }
+
+  void x86_load_caller() {
+    for (uint8_t i = 0x0; i < 0x20; ++i) {
+      if (x86_reg(i) < 8 || x86_reg(i) >= 12) continue;
+      as.pop(x86::gpq(x86_reg(i)));
+    }
   }
 
   /* === Helper Pseudo-instructions === */
@@ -75,7 +123,7 @@ struct MipsJit {
       else as.mov(x86::gpq(dstx), x86_spilld(src));
     } else {
       if (srcx) as.mov(x86_spilld(dst), x86::gpq(srcx));
-      else { 
+      else {
         as.mov(x86::rax, x86_spilld(src));
         as.mov(x86_spilld(dst), x86::rax);
       }
@@ -126,24 +174,24 @@ struct MipsJit {
     if (rt(instr) == 0) return;
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // LW BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi);
+    as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
-    as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    x86_load_caller(); as.pop(x86::edi);
     if (rtx) as.mov(x86::gpq(rtx), x86::rax);
     else as.mov(x86_spilld(rt(instr)), x86::rax);
-    as.pop(x86::edi);
   }
 
   template <typename T>
   void sw(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SW BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi);
-    as.push(x86::esi);
+    as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
@@ -151,9 +199,9 @@ struct MipsJit {
     }
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
     else as.mov(x86::rsi, x86_spilld(rt(instr)));
-    as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
-    as.pop(x86::esi);
-    as.pop(x86::edi);
+    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
+    x86_load_caller(); as.pop(x86::edi);
   }
 
   template <typename T, Dir dir>
@@ -162,7 +210,7 @@ struct MipsJit {
     constexpr bool right = (dir != Dir::ll);
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // LWL BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi);
+    as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
@@ -175,7 +223,8 @@ struct MipsJit {
     as.shl(x86::ecx, 3); as.shl(x86::rax, x86::cl);
     // read unaligned data from memory
     as.push(x86::rax);
-    as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
     as.pop(x86::rcx);
     // apply mask depending on direction
     if (right) {
@@ -183,6 +232,7 @@ struct MipsJit {
       as.cmp(x86::rcx, 0); as.cmove(x86::rcx, x86::rdx);
     }
     as.and_(x86::rax, x86::rcx); as.not_(x86::rcx);
+    x86_load_caller(); as.pop(x86::edi);
     if (rtx) {
       as.and_(x86::gpq(rtx), x86::rcx);
       as.or_(x86::gpq(rtx), x86::rax);
@@ -191,7 +241,6 @@ struct MipsJit {
       as.or_(x86_spilld(rt(instr)), x86::rax);
     }
     if (sizeof(T) < 8) to_eax(rt(instr)), from_eax(rt(instr));
-    as.pop(x86::edi);
   }
 
   template <typename T, Dir dir>
@@ -199,8 +248,7 @@ struct MipsJit {
     constexpr bool right = (dir != Dir::ll);
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SWL BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi);
-    as.push(x86::esi);
+    as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
@@ -213,7 +261,8 @@ struct MipsJit {
     as.shl(x86::ecx, 3); as.shl(x86::rax, x86::cl);
     // read previous data from memory
     as.push(x86::edi); as.push(x86::rax);
-    as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
     as.pop(x86::rcx); as.pop(x86::edi);
     // apply mask depending on direction
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
@@ -225,9 +274,9 @@ struct MipsJit {
     as.and_(x86::rsi, x86::rcx); as.not_(x86::rcx);
     as.and_(x86::rax, x86::rcx); as.or_(x86::rsi, x86::rax);
     // write masked data to memory
-    as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
-    as.pop(x86::esi);
-    as.pop(x86::edi);
+    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
+    x86_load_caller(); as.pop(x86::edi);
   }
 
   void lui(uint32_t instr) {
@@ -861,6 +910,13 @@ struct MipsJit {
     printf("CACHE instruction %x\n", instr);
   }
 
+  uint32_t break_(uint32_t instr, uint32_t pc) {
+    if (!is_rsp) invalid(instr);
+    as.or_(x86_spilld(4 + dev_cop0), 0x3);
+    as.mov(x86::edi, pc + 4);
+    return block_end;
+  }
+
   void mfc0(uint32_t instr) {
     printf("Read from COP0 reg %d\n", rd(instr));
     if (rt(instr) == 0) return;
@@ -869,7 +925,13 @@ struct MipsJit {
 
   void mtc0(uint32_t instr) {
     printf("Write to COP0 reg %d\n", rd(instr));
-    if (rd(instr) == 11) as.and_(x86_spilld(13 + dev_cop0), ~0x8000);
+    if (is_rsp && rd(instr) == 4) {
+      as.push(x86::edi); x86_store_caller(); as.mov(x86::edi, rt(instr));
+      as.call(reinterpret_cast<uint64_t>(RSP::set_status));
+      x86_load_caller(); as.pop(x86::edi); return;
+    } else if (!is_rsp && rd(instr) == 11) {
+      as.and_(x86_spilld(13 + dev_cop0), ~0x8000);
+    }
     if (rt(instr) == 0) as.mov(x86_spilld(rd(instr) + dev_cop0), 0);
     else move(rd(instr) + dev_cop0, rt(instr));
   }
@@ -983,24 +1045,24 @@ struct MipsJit {
   void lwc1(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
     // LWC1 BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi);
+    as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
-    as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    x86_load_caller(); as.pop(x86::edi);
     as.mov(x86_spilld(rt(instr) + dev_cop1), x86::rax);
     if (rtx) as.movss(x86::xmm(rtx), x86_spilld(rt(instr) + dev_cop1));
-    as.pop(x86::edi);
   }
 
   template <typename T>
   void swc1(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
     // SWC1 BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi);
-    as.push(x86::esi);
+    as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
@@ -1008,9 +1070,9 @@ struct MipsJit {
     }
     if (rtx) as.movss(x86_spilld(rt(instr) + dev_cop1), x86::xmm(rtx));
     as.mov(x86::rsi, x86_spilld(rt(instr) + dev_cop1));
-    as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
-    as.pop(x86::esi);
-    as.pop(x86::edi);
+    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
+    x86_load_caller(); as.pop(x86::edi);
   }
 
   template <uint8_t round_mode>
@@ -1051,6 +1113,7 @@ struct MipsJit {
       case 0x07: sllv<Dir::ra>(instr); break;
       case 0x08: next_pc = jr(instr); break;
       case 0x09: next_pc = jalr(instr, pc); break;
+      case 0x0d: next_pc = break_(instr, pc); break;
       case 0x0f: printf("SYNC\n"); break;
       case 0x10: mfhi(instr);  break;
       case 0x11: mthi(instr);  break;
@@ -1169,16 +1232,14 @@ struct MipsJit {
 
   uint32_t jit_block() {
     as.push(x86::rbp);
-    as.mov(x86::rbp, reinterpret_cast<uint64_t>(&R4300::reg_array));
-    //as.push(x86::gpd(x86_reg(5)));
-    //as.mov(x86::gpd(x86_reg(5)), x86_spill(5));
-    //as.push(x86::gpd(x86_reg(6)));
-    //as.mov(x86::gpd(x86_reg(6)), x86_spill(6));
+    if (is_rsp) as.mov(x86::rbp, reinterpret_cast<uint64_t>(&RSP::reg_array));
+    else as.mov(x86::rbp, reinterpret_cast<uint64_t>(&R4300::reg_array));
+    x86_load_all();
 
+    uint32_t cycles = 0, pc = (is_rsp ? RSP::pc : R4300::pc);
     end_label = as.newLabel();
-    uint32_t cycles = 0, pc = R4300::pc;
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
-      uint32_t instr = R4300::fetch(pc);
+      uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
       //printf("%x: %x\n", pc, instr);
       pc = next_pc, next_pc += 4;
       switch (instr >> 26) {
@@ -1222,9 +1283,11 @@ struct MipsJit {
         //case 0x2d: swl<uint64_t, Dir::rl>(instr); break;
         case 0x2e: swl<uint32_t, Dir::rl>(instr); break;
         case 0x2f: cache(instr); break;
+        case 0x30: lw<int32_t>(instr); break; // LL
         case 0x31: lwc1<int32_t>(instr); break;
         case 0x35: lwc1<uint64_t>(instr); break;
         case 0x37: lw<uint64_t>(instr); break;
+        case 0x38: sw<uint32_t>(instr); break; // SC
         case 0x39: swc1<uint32_t>(instr); break;
         case 0x3d: swc1<uint64_t>(instr); break;
         case 0x3f: sw<uint64_t>(instr); break;
@@ -1233,12 +1296,8 @@ struct MipsJit {
     }
 
     as.bind(end_label);
-    //as.mov(x86_spill(6), x86::gpd(x86_reg(6)));
-    //as.pop(x86::gpd(x86_reg(6)));
-    //as.mov(x86_spill(5), x86::gpd(x86_reg(5)));
-    //as.pop(x86::gpd(x86_reg(5)));
+    x86_store_all();
     as.pop(x86::rbp);
-
     as.mov(x86::eax, x86::edi);
     as.ret();
     return cycles;

@@ -1,6 +1,7 @@
 #ifndef R4300_H
 #define R4300_H
 
+#include "rsp.h"
 #include <SDL2/SDL.h>
 #include <sys/mman.h>
 #include <x86intrin.h>
@@ -18,6 +19,23 @@ namespace R4300 {
   // put into array and read offset without switch?
   constexpr uint32_t mi_version = 0x01010101;
   uint32_t mi_irqs = 0x0, mi_mask = 0x0;
+
+  /* === RSP Interface registers === */
+
+  uint64_t *rsp_cop0 = RSP::reg_array + RSP::dev_cop0;
+
+  template <bool write>
+  void rsp_dma(uint32_t val) {
+    uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
+    printf("RSP DMA with skip %d, count %d, len %d\n", skip, count, len);
+    uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
+    for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
+      if (write) memcpy(ram, mem, len + 1); else memcpy(mem, ram, len + 1);
+  }
+
+  void rsp_update() {
+    mi_irqs |= RSP::broke();
+  }
 
   /* === Video Interface registers === */
 
@@ -86,8 +104,16 @@ namespace R4300 {
   /* === Reading and Writing === */
 
   uint32_t mmio_read(uint32_t addr) {
+    if ((addr & addr_mask & ~0x1fff) == 0x4000000)
+      return RSP::read<uint32_t>(addr & 0x1fff);
     switch (addr & addr_mask) {
       default: printf("[MMIO] read from %x\n", addr); return 0;
+      // RSP Interface
+      case 0x4040000: return rsp_cop0[0];
+      case 0x4040004: return rsp_cop0[1];
+      case 0x4040010: return rsp_cop0[4];
+      case 0x404001c: return (rsp_cop0[7] ? 0x1 : rsp_cop0[7]++);
+      case 0x4080000: return RSP::pc;
       // MIPS Interface
       case 0x4300004: return mi_version;
       case 0x4300008: return mi_irqs;
@@ -112,8 +138,18 @@ namespace R4300 {
   }
 
   void mmio_write(uint32_t addr, uint32_t val) {
+    if ((addr & addr_mask & ~0x1fff) == 0x4000000)
+      return RSP::write<uint32_t>(addr & 0x1fff, val);
     switch (addr & addr_mask) {
       default: printf("[MMIO] write to %x: %x\n", addr, val); return;
+      // RSP Interface
+      case 0x4040000: rsp_cop0[0] = val & 0x1fff; return;
+      case 0x4040004: rsp_cop0[1] = val & 0xffffff; return;
+      case 0x4040008: rsp_dma<false>(val); return;
+      case 0x404000c: rsp_dma<true>(val); return;
+      case 0x4040010: RSP::set_status(val); return;
+      case 0x404001c: rsp_cop0[7] = 0x0; return;
+      case 0x4080000: RSP::pc = val & 0xfff; return;
       // MIPS Interface
       case 0x430000c: mi_mask = _pext_u32(val, 0xaaa); return;
       // Video Interface
@@ -176,9 +212,7 @@ namespace R4300 {
   }
 
   uint32_t fetch(uint32_t addr) {
-    uint8_t *page = pages[(addr >> 21) & 0xff];
-    uint32_t *val = reinterpret_cast<uint32_t*>(page + (addr & page_mask));
-    return __builtin_bswap32(*val);
+    return read<uint32_t>(addr);
   }
 
   /* === Actual CPU Functions === */
@@ -211,10 +245,10 @@ namespace R4300 {
     }
 
     // Debug sign extension
-    for (uint8_t i = 0; i < 32; ++i) {
+    /*for (uint8_t i = 0; i < 32; ++i) {
       if ((reg_array[i] & 0x80000000) ^ ((reg_array[i] & 0x100000000) >> 1))
         printf("Sign extension violation on $%x\n", i);
-    }
+    }*/
   }
 
   void init(FILE *file) {
@@ -230,7 +264,7 @@ namespace R4300 {
     ));
     // specially handle SP/DP, DP/MI, VI/AI, PI/RI, and SI ranges
     for (uint32_t i = 0x1; i < 0x100; ++i) {
-      if (i < 0x21 || i > 0x24) pages[i] = pages[0] + i * (page_mask + 1);
+      if (i < 0x20 || i > 0x24) pages[i] = pages[0] + i * (page_mask + 1);
     }
     pages[0xfe] = nullptr; // PIF range
 
@@ -252,6 +286,11 @@ namespace R4300 {
     SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
     SDL_RenderClear(renderer);
+
+    // setup RSP
+    RSP::dmem = pages[0] + 0x04000000;
+    RSP::imem = pages[0] + 0x04001000;
+    rsp_cop0[4] = 0x1;
   }
 }
 
