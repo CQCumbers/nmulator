@@ -36,10 +36,9 @@ namespace RSP {
     return __builtin_bswap32(*reinterpret_cast<uint32_t*>(imem + addr));
   }
 
-  uint64_t reg_array[0x63] = {0};
+  uint64_t reg_array[0x86] = {0};
   uint32_t pc = 0x0;
   constexpr uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40;
-  constexpr uint8_t acc0 = 0x60, acc1 = 0x61, acc2 = 0x62;
 
   bool halted() {
     return reg_array[4 + dev_cop0] & 0x1;
