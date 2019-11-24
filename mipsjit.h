@@ -12,7 +12,10 @@ template <Device device>
 struct MipsJit {
   enum class Dir { ll, rl, ra };
   enum class CC { gt, lt, ge, le };
-  enum class Op { add, sub, mul, div, sqrt, abs, mov, neg };
+  enum class Op {
+    add, sub, mul, div, sqrt, abs, mov, neg,
+    and_, or_, xor_, addc, subc
+  };
 
   x86::Assembler as;
   Label end_label;
@@ -20,6 +23,7 @@ struct MipsJit {
 
   const bool is_rsp = (device == Device::rsp);
   const uint8_t hi = R4300::hi, lo = R4300::lo;
+  const uint8_t acc0 = RSP::acc0, acc1 = RSP::acc1, acc2 = RSP::acc2;
   const uint8_t dev_cop0 = (is_rsp ? RSP::dev_cop0 : R4300::dev_cop0);
   const uint8_t dev_cop1 = R4300::dev_cop1, dev_cop2 = RSP::dev_cop2;
 
@@ -80,6 +84,10 @@ struct MipsJit {
 
   constexpr x86::Mem x86_spilld(uint8_t reg) {
     return x86::qword_ptr(x86::rbp, reg << 3);
+  }
+
+  constexpr x86::Mem x86_spillq(uint8_t reg) {
+    return x86::dqword_ptr(x86::rbp, reg << 3);
   }
 
   void x86_load_all() {
@@ -1051,8 +1059,7 @@ struct MipsJit {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
-    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
     x86_load_caller(); as.pop(x86::edi);
     as.mov(x86_spilld(rt(instr) + dev_cop1), x86::rax);
     if (rtx) as.movss(x86::xmm(rtx), x86_spilld(rt(instr) + dev_cop1));
@@ -1070,8 +1077,7 @@ struct MipsJit {
     }
     if (rtx) as.movss(x86_spilld(rt(instr) + dev_cop1), x86::xmm(rtx));
     as.mov(x86::rsi, x86_spilld(rt(instr) + dev_cop1));
-    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
+    as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
     x86_load_caller(); as.pop(x86::edi);
   }
 
@@ -1098,6 +1104,138 @@ struct MipsJit {
   void invalid(uint32_t instr) {
     printf("Unimplemented instruction %x\n", instr);
     exit(0);
+  }
+
+  // Must figure out how to save and restore xmm registers,
+  // for accumulator to work correctly (and for RSP register allocation)
+
+  void vmacf(uint32_t instr) {
+    as.pxor(x86::xmm14, x86::xmm14); // clear junk (since no xmm save/load)
+    as.pxor(x86::xmm15, x86::xmm15);
+    as.pxor(x86::xmm13, x86::xmm13);
+    uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
+    if (rtx) as.movdqa(x86::xmm0, x86::xmm(rtx));
+    else as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
+    uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    // doesn't handle 'e' scalar value
+    if (rdx) {
+      as.movdqa(x86::xmm1, x86::xmm0);
+      as.pmulhw(x86::xmm0, x86::xmm(rdx));
+      as.pmullw(x86::xmm1, x86::xmm(rdx));
+    } else {
+      as.movdqa(x86::xmm1, x86::xmm0);
+      as.pmulhw(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
+      as.pmullw(x86::xmm1, x86_spillq(rd(instr) * 2 + dev_cop2));
+    }
+    as.psllw(x86::xmm0, 1); as.psllw(x86::xmm1, 1);
+    // accumulator lo (xmm15) should carry into mid (xmm14)
+    as.paddsw(x86::xmm14, x86::xmm0); as.paddsw(x86::xmm15, x86::xmm1);
+    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
+    if (sax) as.movdqa(x86::xmm(sax), x86::xmm14);
+    else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm14);
+  }
+
+  template <Op operation>
+  void vadd(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
+    if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
+    else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
+    uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    // doesn't handle 'e' scalar value
+    if (operation == Op::abs) {
+      if (rdx) as.psignw(x86::xmm15, x86::xmm(rdx));
+      else as.psignw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+    } else if (operation == Op::add) { // doesn't handle VCO carry-in/clear
+      if (rdx) as.paddsw(x86::xmm15, x86::xmm(rdx));
+      else as.paddsw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+    } else if (operation == Op::addc) { // doesn't handle VCO carry-out
+      if (rdx) as.paddw(x86::xmm15, x86::xmm(rdx));
+      else as.paddw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+    } else if (operation == Op::sub) {
+      if (rdx) as.psubsw(x86::xmm15, x86::xmm(rdx));
+      else as.psubsw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+    } else if (operation == Op::subc) {
+      if (rdx) as.psubw(x86::xmm15, x86::xmm(rdx));
+      else as.psubw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+    }
+    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
+    if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
+    else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
+  }
+
+  template <Op operation, bool invert>
+  void vand(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
+    if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
+    else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
+    uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    // doesn't handle 'e' scalar value
+    if (operation == Op::and_) {
+      if (rdx) as.pand(x86::xmm15, x86::xmm(rdx));
+      else as.pand(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+    } else if (operation == Op::or_) {
+      if (rdx) as.por(x86::xmm15, x86::xmm(rdx));
+      else as.por(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+    } else if (operation == Op::xor_) {
+      if (rdx) as.pxor(x86::xmm15, x86::xmm(rdx));
+      else as.pxor(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+    }
+    if (invert) as.pcmpeqd(x86::xmm0, x86::xmm0), as.pxor(x86::xmm15, x86::xmm0);
+    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
+    if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
+    else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
+  }
+
+  void vsar(uint32_t instr) {
+    uint8_t acc = (rs(instr) & 0x3) + 13;
+    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
+    if (sax) as.movdqa(x86::xmm(sax), x86::xmm(acc));
+    else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm(acc));
+    uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    if (rdx) as.movdqa(x86::xmm(acc), x86::xmm(rdx));
+    else as.movdqa(x86::xmm(acc), x86_spillq(rd(instr) * 2 + dev_cop2));
+  }
+
+  void lqv(uint32_t instr) {
+    // only handles 128-bit aligned
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
+    uint32_t offset = (instr & 0x7) << 4;
+    // LQV BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi); x86_store_caller();
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, offset));
+    }
+    as.push(x86::edi);
+    as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+    as.mov(x86_spilld(rt(instr) * 2 + 1 + dev_cop2), x86::rax);
+    as.pop(x86::edi); as.add(x86::edi, 8);
+    as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+    as.mov(x86_spilld(rt(instr) * 2 + dev_cop2), x86::rax);
+    x86_load_caller(); as.pop(x86::edi);
+    if (rtx) as.movdqa(x86::xmm(rtx), x86_spillq(rt(instr) * 2 + dev_cop2));
+  }
+
+  void sqv(uint32_t instr) {
+    // only handles 128-bit aligned
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
+    uint32_t offset = (instr & 0x7) << 4;
+    // SQV BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi); x86_store_caller();
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, offset));
+    }
+    if (rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm(rtx));
+    as.mov(x86::rsi, x86_spilld(rt(instr) * 2 + 1 + dev_cop2));
+    as.push(x86::edi);
+    as.call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
+    as.mov(x86::rsi, x86_spilld(rt(instr) * 2 + dev_cop2));
+    as.pop(x86::edi); as.add(x86::edi, 8);
+    as.call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
+    x86_load_caller(); as.pop(x86::edi);
   }
 
   /* === Basic Block Translation ==*/
@@ -1182,6 +1320,7 @@ struct MipsJit {
   }
 
   uint32_t cop1(uint32_t instr, uint32_t pc) {
+    // only handles single-precision float (no fixed points or doubles)
     uint32_t next_pc = pc + 4;
     switch ((instr >> 24) & 0x3) {
       case 0x0: // COP1/0
@@ -1230,6 +1369,28 @@ struct MipsJit {
     return next_pc;
   }
 
+  uint32_t cop2(uint32_t instr, uint32_t pc) {
+    uint32_t next_pc = pc + 4;
+    switch (instr & 0x3f) {
+      case 0x08: vmacf(instr); break;
+      case 0x09: vmacf(instr); break; // VMACU
+      case 0x10: vadd<Op::add>(instr); break;
+      case 0x11: vadd<Op::sub>(instr); break;
+      case 0x13: vadd<Op::abs>(instr); break;
+      case 0x14: vadd<Op::addc>(instr); break;
+      case 0x15: vadd<Op::subc>(instr); break;
+      case 0x1d: vsar(instr); break;
+      case 0x28: vand<Op::and_, false>(instr); break;
+      case 0x29: vand<Op::and_, true>(instr); break;
+      case 0x2a: vand<Op::or_, false>(instr); break;
+      case 0x2b: vand<Op::or_, true>(instr); break;
+      case 0x2c: vand<Op::xor_, false>(instr); break;
+      case 0x2d: vand<Op::xor_, true>(instr); break;
+      default: printf("COP2 instruction %x\n", instr); break;
+    }
+    return next_pc;
+  }
+
   uint32_t jit_block() {
     as.push(x86::rbp);
     if (is_rsp) as.mov(x86::rbp, reinterpret_cast<uint64_t>(&RSP::reg_array));
@@ -1261,6 +1422,7 @@ struct MipsJit {
         case 0x0f: lui(instr); break;
         case 0x10: next_pc = cop0(instr, pc); break;
         case 0x11: next_pc = cop1(instr, pc); break;
+        case 0x12: next_pc = cop2(instr, pc); break;
         case 0x14: next_pc = beql(instr, pc); break;
         case 0x15: next_pc = bnel(instr, pc); break;
         case 0x16: next_pc = bltzl<CC::le, false>(instr, pc); break;
@@ -1285,10 +1447,12 @@ struct MipsJit {
         case 0x2f: cache(instr); break;
         case 0x30: lw<int32_t>(instr); break; // LL
         case 0x31: lwc1<int32_t>(instr); break;
+        case 0x32: lqv(instr); break;
         case 0x35: lwc1<uint64_t>(instr); break;
         case 0x37: lw<uint64_t>(instr); break;
         case 0x38: sw<uint32_t>(instr); break; // SC
         case 0x39: swc1<uint32_t>(instr); break;
+        case 0x3a: sqv(instr); break;
         case 0x3d: swc1<uint64_t>(instr); break;
         case 0x3f: sw<uint64_t>(instr); break;
         default: invalid(instr); break;

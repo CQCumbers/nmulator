@@ -105,7 +105,7 @@ namespace R4300 {
 
   uint32_t mmio_read(uint32_t addr) {
     if ((addr & addr_mask & ~0x1fff) == 0x4000000)
-      return RSP::read<uint32_t>(addr & 0x1fff);
+      return RSP::read<uint32_t>(addr);
     switch (addr & addr_mask) {
       default: printf("[MMIO] read from %x\n", addr); return 0;
       // RSP Interface
@@ -139,7 +139,7 @@ namespace R4300 {
 
   void mmio_write(uint32_t addr, uint32_t val) {
     if ((addr & addr_mask & ~0x1fff) == 0x4000000)
-      return RSP::write<uint32_t>(addr & 0x1fff, val);
+      return RSP::write<uint32_t>(addr, val);
     switch (addr & addr_mask) {
       default: printf("[MMIO] write to %x: %x\n", addr, val); return;
       // RSP Interface
