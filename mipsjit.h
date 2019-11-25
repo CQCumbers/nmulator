@@ -11,7 +11,7 @@ enum class Device { r4300, rsp };
 template <Device device>
 struct MipsJit {
   enum class Dir { ll, rl, ra };
-  enum class CC { gt, lt, ge, le };
+  enum class CC { gt, lt, ge, le, eq, ne };
   enum class Mul { frac, high, midm, midn, low };
   enum class Op {
     add, sub, mul, div, sqrt, abs, mov, neg,
@@ -1169,7 +1169,13 @@ struct MipsJit {
 
   template <Mul mul_type, bool accumulate>
   void vmudn(uint32_t instr) {
-    if (accumulate) x86_store_acc();
+    // add rounding value
+    if (mul_type == Mul::frac && !accumulate) {
+      as.pcmpeqd(x86::xmm15, x86::xmm15); as.psllw(x86::xmm15, 15);
+      as.pxor(x86::xmm14, x86::xmm14); as.pxor(x86::xmm13, x86::xmm13);
+    }
+    // save old accumulator values
+    if (accumulate || mul_type == Mul::frac) x86_store_acc();
     // move vt into accumulator
     uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
@@ -1214,7 +1220,7 @@ struct MipsJit {
       // sign extend to upper accumulator
       as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
     }
-    if (accumulate) update_acc();
+    if (accumulate || mul_type == Mul::frac) update_acc();
     // saturate signed value
     if (mul_type == Mul::midn || mul_type == Mul::low) {
       as.movdqa(x86::xmm0, x86::xmm15);
@@ -1257,9 +1263,28 @@ struct MipsJit {
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
   }
 
+  template <bool eq, bool invert>
+  void veq(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
+    if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
+    else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
+    uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
+    else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
+    as.movdqa(x86::xmm1, x86::xmm15);
+    if (eq) as.pcmpeqw(x86::xmm15, x86::xmm0);
+    else as.pcmpgtw(x86::xmm15, x86::xmm0);
+    if (invert) as.pand(x86::xmm1, x86::xmm15), as.pandn(x86::xmm15, x86::xmm0);
+    else as.pand(x86::xmm0, x86::xmm15), as.pandn(x86::xmm15, x86::xmm1);
+    auto result = (invert ? x86::xmm1 : x86::xmm0); as.por(x86::xmm15, result);
+    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
+    if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
+    else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
+  }
+
   template <Op operation, bool invert>
   void vand(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
@@ -1466,14 +1491,14 @@ struct MipsJit {
       printf("COP2 instruction %x\n", instr); return next_pc;
     }
     switch (instr & 0x3f) {
-      case 0x00: vmudn<Mul::frac, false>(instr); break; // VMULF
-      case 0x01: vmudn<Mul::frac, false>(instr); break; // VMULU
+      case 0x00: vmudn<Mul::frac, false>(instr); break; // VMULF (buggy)
+      case 0x01: vmudn<Mul::frac, false>(instr); break; // VMULU (buggy)
       case 0x04: vmudn<Mul::low, false>(instr); break; // VMUDL
       case 0x05: vmudn<Mul::midm, false>(instr); break; // VMUDM
       case 0x06: vmudn<Mul::midn, false>(instr); break; // VMUDN
       case 0x07: vmudn<Mul::high, false>(instr); break; // VMUDH
-      case 0x08: vmudn<Mul::frac, true>(instr); break; // VMACF
-      case 0x09: vmudn<Mul::frac, true>(instr); break; // VMACU
+      case 0x08: vmudn<Mul::frac, true>(instr); break; // VMACF (buggy)
+      case 0x09: vmudn<Mul::frac, true>(instr); break; // VMACU (buggy)
       case 0x0c: vmudn<Mul::low, true>(instr); break; // VMADL
       case 0x0d: vmudn<Mul::midm, true>(instr); break; // VMADM
       case 0x0e: vmudn<Mul::midn, true>(instr); break; // VMADN
@@ -1484,6 +1509,10 @@ struct MipsJit {
       case 0x14: vadd<Op::addc>(instr); break;
       case 0x15: vadd<Op::subc>(instr); break;
       case 0x1d: vsar(instr); break;
+      case 0x20: veq<false, false>(instr); break;
+      case 0x21: veq<true, false>(instr); break;
+      case 0x22: veq<true, true>(instr); break;
+      case 0x23: veq<false, true>(instr); break;
       case 0x28: vand<Op::and_, false>(instr); break;
       case 0x29: vand<Op::and_, true>(instr); break;
       case 0x2a: vand<Op::or_, false>(instr); break;
