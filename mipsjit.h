@@ -12,6 +12,7 @@ template <Device device>
 struct MipsJit {
   enum class Dir { ll, rl, ra };
   enum class CC { gt, lt, ge, le };
+  enum class Mul { frac, high, midm, midn, low };
   enum class Op {
     add, sub, mul, div, sqrt, abs, mov, neg,
     and_, or_, xor_, addc, subc
@@ -89,7 +90,7 @@ struct MipsJit {
     return x86::dqword_ptr(x86::rbp, reg << 3);
   }
 
-  void x86_load_xmm() {
+  void x86_load_acc() {
     // the only saved xmm registers are RSP accumulators
     if (!is_rsp) return;
     as.movdqa(x86::xmm13, x86_spillq(32 * 2 + dev_cop2));
@@ -97,7 +98,7 @@ struct MipsJit {
     as.movdqa(x86::xmm15, x86_spillq(34 * 2 + dev_cop2));
   }
 
-  void x86_store_xmm() {
+  void x86_store_acc() {
     if (!is_rsp) return;
     as.movdqa(x86_spillq(32 * 2 + dev_cop2), x86::xmm13);
     as.movdqa(x86_spillq(33 * 2 + dev_cop2), x86::xmm14);
@@ -105,7 +106,7 @@ struct MipsJit {
   }
 
   void x86_load_all() {
-    x86_load_xmm();
+    x86_load_acc();
     for (uint8_t i = 0x0; i < 0x20; ++i) {
       if (x86_reg(i) == 0) continue;
       as.push(x86::gpq(x86_reg(i)));
@@ -114,7 +115,7 @@ struct MipsJit {
   }
 
   void x86_store_all() {
-    x86_store_xmm();
+    x86_store_acc();
     for (uint8_t i = 0x20; i != 0; --i) {
       if (x86_reg(i) == 0) continue;
       as.mov(x86_spilld(i), x86::gpq(x86_reg(i)));
@@ -123,7 +124,7 @@ struct MipsJit {
   }
 
   void x86_store_caller() {
-    x86_store_xmm();
+    x86_store_acc();
     for (uint8_t i = 0x20; i != 0; --i) {
       if (x86_reg(i) < 8 || x86_reg(i) >= 12) continue;
       as.push(x86::gpq(x86_reg(i)));
@@ -131,7 +132,7 @@ struct MipsJit {
   }
 
   void x86_load_caller() {
-    x86_load_xmm();
+    x86_load_acc();
     for (uint8_t i = 0x0; i < 0x20; ++i) {
       if (x86_reg(i) < 8 || x86_reg(i) >= 12) continue;
       as.pop(x86::gpq(x86_reg(i)));
@@ -194,6 +195,7 @@ struct MipsJit {
   }
 
   void elem_spec(uint8_t e) {
+    // creates scalars from xmm15, according to element specifier
     uint64_t base; uint8_t offset;
     switch (__builtin_clz(e & 0xf)) {
       case 0: base = 0x0000000000000000; offset = (e & 0x7) * 2; break;
@@ -209,6 +211,29 @@ struct MipsJit {
     as.movdqa(x86::xmm1, x86::xmm0); as.pcmpeqd(x86::xmm2, x86::xmm2);
     as.psubb(x86::xmm1, x86::xmm2); as.punpcklbw(x86::xmm0, x86::xmm1);
     as.pshufb(x86::xmm15, x86::xmm0);
+  }
+
+  void update_acc() {
+    // assuming old accumulator values stored in spillq
+    // adds them to new accumulator values in xmm13-15
+    as.pxor(x86::xmm1, x86::xmm1);
+    // calc lower accumulator overflow mask
+    as.movdqa(x86::xmm0, x86_spillq(34 * 2 + dev_cop2));
+    as.paddusw(x86::xmm0, x86::xmm15);
+    as.paddw(x86::xmm15, x86_spillq(34 * 2 + dev_cop2));
+    // add carry to mid if overflow
+    as.pcmpeqw(x86::xmm0, x86::xmm15);
+    as.pcmpeqw(x86::xmm0, x86::xmm1);
+    as.psubw(x86::xmm14, x86::xmm0);
+    // calc middle accumulator overflow mask
+    as.movdqa(x86::xmm0, x86_spillq(33 * 2 + dev_cop2));
+    as.paddusw(x86::xmm0, x86::xmm14);
+    as.paddw(x86::xmm14, x86_spillq(33 * 2 + dev_cop2));
+    // add carry to high if overflow
+    as.pcmpeqw(x86::xmm0, x86::xmm14);
+    as.pcmpeqw(x86::xmm0, x86::xmm1);
+    as.paddw(x86::xmm13, x86_spillq(32 * 2 + dev_cop2));
+    as.psubw(x86::xmm13, x86::xmm0);
   }
 
   /* === Instruction Translations === */
@@ -1142,36 +1167,66 @@ struct MipsJit {
     exit(0);
   }
 
-  template <bool accumulate, bool shift, bool low, bool frac>
-  void vmudm(uint32_t instr) {
-    if (accumulate) {
-      as.movdqa(x86::xmm14, x86_spillq(33 * 2 + dev_cop2));
-      as.movdqa(x86::xmm15, x86_spillq(34 * 2 + dev_cop2));
-    }
+  template <Mul mul_type, bool accumulate>
+  void vmudn(uint32_t instr) {
+    if (accumulate) x86_store_acc();
+    // move vt into accumulator
     uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
+    elem_spec(rs(instr)); as.movdqa(x86::xmm14, x86::xmm15);
+    // move vs into xmm temp register
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
-    elem_spec(rs(instr));
-    as.movdqa(x86::xmm14, x86::xmm15);
-    if (rdx) {
-      as.pmulhw(x86::xmm14, x86::xmm(rdx));
-      as.pmullw(x86::xmm15, x86::xmm(rdx));
+    if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
+    else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
+    if (mul_type == Mul::high) {
+      // multiply signed vt by signed vs
+      as.pmullw(x86::xmm15, x86::xmm0);
+      as.pmulhw(x86::xmm14, x86::xmm0);
+      // shift product up by 16 bits
+      as.movdqa(x86::xmm13, x86::xmm14);
+      as.movdqa(x86::xmm14, x86::xmm15);
+      as.pxor(x86::xmm15, x86::xmm15);
+    } else if (mul_type == Mul::low) {
+      // multiply unsigned vt by unsigned vs
+      as.pmulhuw(x86::xmm15, x86::xmm0);
+      as.pxor(x86::xmm14, x86::xmm14);
+      as.pxor(x86::xmm13, x86::xmm13);
+    } else if (mul_type == Mul::frac) {
+      // multiply signed vt by signed vs
+      as.pmullw(x86::xmm15, x86::xmm0);
+      as.pmulhw(x86::xmm14, x86::xmm0);
+      // shift product up by 1 bit
+      as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
+      as.psllw(x86::xmm14, 1);
+      as.movdqa(x86::xmm0, x86::xmm15); as.psrlw(x86::xmm0, 15);
+      as.por(x86::xmm14, x86::xmm0);
+      as.psllw(x86::xmm15, 1);
     } else {
-      as.pmulhw(x86::xmm14, x86_spillq(rd(instr) * 2 + dev_cop2));
-      as.pmullw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+      // save sign of vt, to fix unsigned multiply
+      as.movdqa(x86::xmm1, x86::xmm15); as.psraw(x86::xmm1, 15);
+      // multiply unsigned vt by unsigned vs
+      as.pmullw(x86::xmm15, x86::xmm0);
+      as.pmulhuw(x86::xmm14, x86::xmm0);
+      // subtract vs where vt was negative
+      as.pand(x86::xmm0, x86::xmm1);
+      as.psubw(x86::xmm14, x86::xmm0);
+      // sign extend to upper accumulator
+      as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
     }
-    // accumulator lo (xmm15) should carry into mid (xmm14)
-    if (frac) {
-      as.psllw(x86::xmm14, 1); as.psllw(x86::xmm15, 1);
+    if (accumulate) update_acc();
+    // saturate signed value
+    if (mul_type == Mul::midn || mul_type == Mul::low) {
+      as.movdqa(x86::xmm0, x86::xmm15);
+    } else {
+      as.movdqa(x86::xmm0, x86::xmm14); as.movdqa(x86::xmm1, x86::xmm14);
+      as.punpcklwd(x86::xmm0, x86::xmm13); as.punpckhwd(x86::xmm1, x86::xmm13);
+      as.packssdw(x86::xmm0, x86::xmm1);
     }
-    if (accumulate) {
-      as.paddsw(x86::xmm14, x86_spillq(33 * 2 + dev_cop2));
-      as.paddsw(x86::xmm15, x86_spillq(34 * 2 + dev_cop2));
-    }
+    // move accumulator section into vd
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
-    if (sax) as.movdqa(x86::xmm(sax), (low ? x86::xmm15 : x86::xmm14));
-    else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), (low ? x86::xmm15 : x86::xmm14));
+    if (sax) as.movdqa(x86::xmm(sax), x86::xmm0);
+    else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm0);
   }
 
   template <Op operation>
@@ -1407,19 +1462,22 @@ struct MipsJit {
 
   uint32_t cop2(uint32_t instr, uint32_t pc) {
     uint32_t next_pc = pc + 4;
+    if (((instr >> 25) & 0x1) != 1) {
+      printf("COP2 instruction %x\n", instr); return next_pc;
+    }
     switch (instr & 0x3f) {
-      case 0x00: vmudm<false, false, false, true>(instr); break; // VMULF
-      case 0x01: vmudm<false, false, false, true>(instr); break; // VMULU
-      case 0x04: vmudm<false, true, false, false>(instr); break; // VMUDL
-      case 0x05: vmudm<false, false, false, false>(instr); break; // VMUDM
-      case 0x06: vmudm<false, false, true, false>(instr); break; // VMUDN
-      case 0x07: vmudm<false, true, true, false>(instr); break; // VMUDH
-      case 0x08: vmudm<true, false, false, true>(instr); break; // VMACF
-      case 0x09: vmudm<true, false, false, true>(instr); break; // VMACU
-      case 0x0c: vmudm<false, true, false, false>(instr); break; // VMADL
-      case 0x0d: vmudm<false, false, false, false>(instr); break; // VMADM
-      case 0x0e: vmudm<false, false, true, false>(instr); break; // VMADN
-      case 0x0f: vmudm<false, true, true, false>(instr); break; // VMADH
+      case 0x00: vmudn<Mul::frac, false>(instr); break; // VMULF
+      case 0x01: vmudn<Mul::frac, false>(instr); break; // VMULU
+      case 0x04: vmudn<Mul::low, false>(instr); break; // VMUDL
+      case 0x05: vmudn<Mul::midm, false>(instr); break; // VMUDM
+      case 0x06: vmudn<Mul::midn, false>(instr); break; // VMUDN
+      case 0x07: vmudn<Mul::high, false>(instr); break; // VMUDH
+      case 0x08: vmudn<Mul::frac, true>(instr); break; // VMACF
+      case 0x09: vmudn<Mul::frac, true>(instr); break; // VMACU
+      case 0x0c: vmudn<Mul::low, true>(instr); break; // VMADL
+      case 0x0d: vmudn<Mul::midm, true>(instr); break; // VMADM
+      case 0x0e: vmudn<Mul::midn, true>(instr); break; // VMADN
+      case 0x0f: vmudn<Mul::high, true>(instr); break; // VMADH
       case 0x10: vadd<Op::add>(instr); break;
       case 0x11: vadd<Op::sub>(instr); break;
       case 0x13: vadd<Op::abs>(instr); break;
