@@ -1312,6 +1312,51 @@ struct MipsJit {
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm(acc));
   }
 
+  template <typename T>
+  void ldv(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
+    // LDV BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi); x86_store_caller();
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
+    x86_load_caller(); as.pop(x86::edi);
+    auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
+    if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
+    switch (sizeof(T)) {
+      case 1: as.pinsrb(result, x86::rax, sa(instr)); break;
+      case 2: as.pinsrw(result, x86::rax, sa(instr) >> 1); break;
+      case 3: as.pinsrd(result, x86::rax, sa(instr) >> 2); break;
+      case 4: as.pinsrq(result, x86::rax, sa(instr) >> 3); break;
+    }
+    if (!rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm0);
+  }
+
+  template <typename T>
+  void sdv(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
+    // SDV BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi); x86_store_caller();
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+    }
+    auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
+    if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
+    switch (sizeof(T)) {
+      case 1: as.pextrb(x86::rsi, result, sa(instr)); break;
+      case 2: as.pextrw(x86::rsi, result, sa(instr) >> 1); break;
+      case 3: as.pextrd(x86::rsi, result, sa(instr) >> 2); break;
+      case 4: as.pextrq(x86::rsi, result, sa(instr) >> 3); break;
+    }
+    as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
+    x86_load_caller(); as.pop(x86::edi);
+  }
+
   void lqv(uint32_t instr) {
     // only handles 128-bit aligned
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));

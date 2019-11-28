@@ -2,6 +2,7 @@
 #define R4300_H
 
 #include "rsp.h"
+#include "rdp.h"
 #include <SDL2/SDL.h>
 #include <sys/mman.h>
 #include <x86intrin.h>
@@ -13,6 +14,8 @@ namespace R4300 {
 
   template <typename T>
   int64_t read(uint32_t addr);
+  template <typename T>
+  void write(uint32_t addr, int64_t val);
 
   /* === MIPS Interface registers === */
 
@@ -55,7 +58,7 @@ namespace R4300 {
     if (vi_line_progress < 6150) return;
     vi_line_progress = 0;
     if (++vi_line == vi_irq) mi_irqs |= 0x8;
-    if (vi_line < 484) return;
+    if (vi_line < 584) return;
 
     vi_line = 0; mi_irqs |= 0x2; // SI INTR
     uint8_t format = vi_status & 0x3;
@@ -68,6 +71,9 @@ namespace R4300 {
         SDL_TEXTUREACCESS_STREAMING, vi_width, height);
       vi_dirty = false;
     }
+    uint32_t *rdp_out = RDP::update(cycles);
+    for (uint32_t i = 0; rdp_out && i < vi_width * height; ++i)
+      write<uint32_t>(vi_origin + (i << 2), rdp_out[i]);
     if (format == 2) {
       uint16_t *out = reinterpret_cast<uint16_t*>(pixels);
       for (uint32_t i = 0; i < vi_width * height; ++i)
@@ -103,9 +109,10 @@ namespace R4300 {
 
   /* === Reading and Writing === */
 
-  uint32_t mmio_read(uint32_t addr) {
+  template <typename T>
+  int64_t mmio_read(uint32_t addr) {
     if ((addr & addr_mask & ~0x1fff) == 0x4000000)
-      return RSP::read<uint32_t>(addr);
+      return RSP::read<T>(addr);
     switch (addr & addr_mask) {
       default: printf("[MMIO] read from %x\n", addr); return 0;
       // RSP Interface
@@ -114,6 +121,11 @@ namespace R4300 {
       case 0x4040010: return rsp_cop0[4];
       case 0x404001c: return (rsp_cop0[7] ? 0x1 : rsp_cop0[7]++);
       case 0x4080000: return RSP::pc;
+      // RDP Interface
+      case 0x4100000: return RDP::pc_start;
+      case 0x4100004: return RDP::pc_end;
+      case 0x4100008: return RDP::pc;
+      case 0x410000c: return RDP::status;
       // MIPS Interface
       case 0x4300004: return mi_version;
       case 0x4300008: return mi_irqs;
@@ -137,9 +149,10 @@ namespace R4300 {
     }
   }
 
+  template <typename T>
   void mmio_write(uint32_t addr, uint32_t val) {
     if ((addr & addr_mask & ~0x1fff) == 0x4000000)
-      return RSP::write<uint32_t>(addr, val);
+      return RSP::write<T>(addr, val);
     switch (addr & addr_mask) {
       default: printf("[MMIO] write to %x: %x\n", addr, val); return;
       // RSP Interface
@@ -150,6 +163,10 @@ namespace R4300 {
       case 0x4040010: RSP::set_status(val); return;
       case 0x404001c: rsp_cop0[7] = 0x0; return;
       case 0x4080000: RSP::pc = val & 0xfff; return;
+      // RDP Interface
+      case 0x4100000: RDP::pc_start = val; return;
+      case 0x4100004: RDP::pc_end = val; return;
+      case 0x410000c: RDP::status = _pext_u32(val, 0x2aa); return;
       // MIPS Interface
       case 0x430000c: mi_mask = _pext_u32(val, 0xaaa); return;
       // Video Interface
@@ -188,7 +205,7 @@ namespace R4300 {
   template <typename T>
   int64_t read(uint32_t addr) {
     uint8_t *page = pages[(addr >> 21) & 0xff];
-    if (!page) return static_cast<T>(mmio_read(addr));
+    if (!page) return mmio_read<T>(addr);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
     switch (sizeof(T)) {
       case 1: return *ptr;
@@ -201,7 +218,7 @@ namespace R4300 {
   template <typename T>
   void write(uint32_t addr, int64_t val) {
     uint8_t *page = pages[(addr >> 21) & 0xff];
-    if (!page) return mmio_write(addr, static_cast<T>(val));
+    if (!page) return mmio_write<T>(addr, val);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
     switch (sizeof(T)) {
       case 1: *ptr = val; return;
@@ -286,6 +303,10 @@ namespace R4300 {
     SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
     SDL_RenderClear(renderer);
+
+    file = fopen("rdp.spv", "r");
+    Vulkan::init(file);
+    fclose(file);
 
     // setup RSP
     RSP::dmem = pages[0] + 0x04000000;
