@@ -14,7 +14,9 @@ typedef struct RDPCommand {
   uint32_t xym[2];
   uint32_t xyl[2];
   uint32_t sh, sm, sl;
-  uint32_t color, lft, type;
+  uint32_t fill, lft, type;
+  uint32_t shade[4];
+  uint32_t de[4], dx[4];
 } cmd_t;
 
 namespace Vulkan {
@@ -296,7 +298,7 @@ namespace RDP {
     color = fetch(pc) & 0xffffffff; pc += 8;
   }
 
-  void draw_triangle() {
+  void fill_triangle() {
     uint64_t instr[4] = {
       fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24)
     };
@@ -305,9 +307,43 @@ namespace RDP {
       .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
       .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
       .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
-      .lft = uint32_t((instr[0] >> 55) & 0x1), .color = color, .type = 0
+      .lft = uint32_t((instr[0] >> 55) & 0x1), .fill = color, .type = 0
     });
     pc += 32;
+  }
+
+  void shade_triangle() {
+    uint64_t instr[12] = {
+      fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24),
+      fetch(pc + 32), fetch(pc + 40), fetch(pc + 48), fetch(pc + 56),
+      fetch(pc + 64), fetch(pc + 72), fetch(pc + 80), fetch(pc + 88)
+    };
+    Vulkan::add_rdp_cmd({
+      .xyh = { uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff) },
+      .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
+      .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
+      .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
+      .lft = uint32_t((instr[0] >> 55) & 0x1), .fill = color, .type = 2,
+      .shade = {
+        uint32_t(instr[4] >> 48) << 16 | uint32_t(instr[6] >> 48),
+        uint32_t((instr[4] >> 32) & 0xffff) << 16 | uint32_t((instr[6] >> 32) & 0xffff),
+        uint32_t((instr[4] >> 16) & 0xffff) << 16 | uint32_t((instr[6] >> 16) & 0xffff),
+        uint32_t(instr[4] & 0xffff) << 16 | uint32_t(instr[6] & 0xffff),
+      },
+      .de = {
+        uint32_t(instr[8] >> 48) << 16 | uint32_t(instr[10] >> 48),
+        uint32_t((instr[8] >> 32) & 0xffff) << 16 | uint32_t((instr[10] >> 32) & 0xffff),
+        uint32_t((instr[8] >> 16) & 0xffff) << 16 | uint32_t((instr[10] >> 16) & 0xffff),
+        uint32_t(instr[8] & 0xffff) << 16 | uint32_t(instr[10] & 0xffff),
+      },
+      .dx = {
+        uint32_t(instr[5] >> 48) << 16 | uint32_t(instr[7] >> 48),
+        uint32_t((instr[5] >> 32) & 0xffff) << 16 | uint32_t((instr[7] >> 32) & 0xffff),
+        uint32_t((instr[5] >> 16) & 0xffff) << 16 | uint32_t((instr[7] >> 16) & 0xffff),
+        uint32_t(instr[5] & 0xffff) << 16 | uint32_t(instr[7] & 0xffff),
+      }
+    });
+    pc += 96;
   }
 
   void fill_rectangle() {
@@ -315,7 +351,7 @@ namespace RDP {
     Vulkan::add_rdp_cmd({
       .xyh = { uint32_t((instr >> 12) & 0xfff), uint32_t(instr & 0xfff) },
       .xyl = { uint32_t((instr >> 44) & 0xfff), uint32_t((instr >> 32) & 0x3ff) },
-      .color = color, .type = 1
+      .fill = color, .type = 1
     });
     pc += 8;
   }
@@ -326,7 +362,8 @@ namespace RDP {
     while (pc != pc_end) {
       uint64_t instr = fetch(pc);
       switch (instr >> 56) {
-        case 0x08: draw_triangle(); break;
+        case 0x08: fill_triangle(); break;
+        case 0x0c: shade_triangle(); break;
         case 0x36: fill_rectangle(); break;
         case 0x37: set_fill_color(); break;
         default: printf("RDP instruction %llx\n", instr); pc += 8; break;
@@ -338,29 +375,3 @@ namespace RDP {
 }
 
 #endif
-
-/*int main() {
-  SDL_Window *window = nullptr;
-  SDL_Renderer *renderer = nullptr;
-
-  SDL_Init(SDL_INIT_VIDEO);
-  SDL_CreateWindowAndRenderer(320, 240, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
-  SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
-  SDL_RenderClear(renderer);
-
-  SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
-    SDL_TEXTUREACCESS_STREAMING, 320, 240);
-
-  FILE *file = fopen("rdp.spv", "r");
-  Vulkan::init(file);
-  fclose(file);
-
-  SDL_UpdateTexture(texture, nullptr, Vulkan::get_pixels(), 320 * sizeof(uint32_t));
-  SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-  SDL_RenderPresent(renderer);
-
-  while (true) {
-    for (SDL_Event e; SDL_PollEvent(&e);)
-      if (e.type == SDL_QUIT) exit(0);
-  }
-}*/
