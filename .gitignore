@@ -1,6 +1,5 @@
-# based on Makefile clean command
+# executables
 nmulator
-*~
 *.out
 *.dSYM
 *.stackdump
@@ -8,12 +7,24 @@ nmulator
 # precompiled artifacts
 *.o
 *.a
-*.gch
 *.pch
+*.dylib
+*.so
 
-# macOS stuff
+# for personal usage
 .DS_Store
 gdb-entitlement.xml
-
-# test roms
 roms/
+*~
+
+# cmake generated files
+CMakeFiles
+build*
+G__*
+*.pcm
+*.root
+*.rootmap
+Makefile
+cmake_install.cmake
+CMakeCache.txt
+CTestTestfile.cmake
