@@ -53,6 +53,12 @@ namespace R4300 {
   SDL_Texture *texture = nullptr;
   uint8_t *pixels = nullptr;
 
+  void write_rdp(uint32_t *rdp_out) {
+    uint32_t height = vi_height >> !(vi_status & 0x40);
+    for (uint32_t i = 0; rdp_out && i < vi_width * height; ++i)
+      write<uint32_t>(vi_origin + (i << 2), rdp_out[i]);
+  }
+
   void vi_update(uint32_t cycles) {
     vi_line_progress += cycles;
     if (vi_line_progress < 6150) return;
@@ -71,9 +77,7 @@ namespace R4300 {
         SDL_TEXTUREACCESS_STREAMING, vi_width, height);
       vi_dirty = false;
     }
-    uint32_t *rdp_out = RDP::update(cycles);
-    for (uint32_t i = 0; rdp_out && i < vi_width * height; ++i)
-      write<uint32_t>(vi_origin + (i << 2), rdp_out[i]);
+    write_rdp(RDP::update(cycles));
     if (format == 2) {
       uint16_t *out = reinterpret_cast<uint16_t*>(pixels);
       for (uint32_t i = 0; i < vi_width * height; ++i)
