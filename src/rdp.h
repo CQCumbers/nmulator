@@ -395,7 +395,7 @@ namespace RDP {
       .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
       .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
       .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
-      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0,
+      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0x0,
       .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux
     });
   }
@@ -412,7 +412,7 @@ namespace RDP {
       .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
       .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
       .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
-      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 2,
+      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0x1,
       .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
       .shade = {
         uint32_t(instr[4] >> 48) << 16 | uint32_t(instr[6] >> 48),
@@ -435,12 +435,41 @@ namespace RDP {
     });
   }
 
+  void tex_triangle() {
+    uint64_t instr[12] = {
+      fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24),
+      fetch(pc + 32), fetch(pc + 40), fetch(pc + 48), fetch(pc + 56),
+      fetch(pc + 64), fetch(pc + 72), fetch(pc + 80), fetch(pc + 88)
+    };
+    pc += 96;
+    Vulkan::add_rdp_cmd({
+      .xyh = { uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff) },
+      .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
+      .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
+      .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
+      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0x2,
+      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
+      .tex = {
+        uint32_t(instr[4] >> 48) << 16 | uint32_t(instr[6] >> 48),
+        uint32_t((instr[4] >> 32) & 0xffff) << 16 | uint32_t((instr[6] >> 32) & 0xffff),
+      },
+      .tde = {
+        uint32_t(instr[8] >> 48) << 16 | uint32_t(instr[10] >> 48),
+        uint32_t((instr[8] >> 32) & 0xffff) << 16 | uint32_t((instr[10] >> 32) & 0xffff),
+      },
+      .tdx = {
+        uint32_t(instr[5] >> 48) << 16 | uint32_t(instr[7] >> 48),
+        uint32_t((instr[5] >> 32) & 0xffff) << 16 | uint32_t((instr[7] >> 32) & 0xffff),
+      }
+    });
+  }
+
   void fill_rectangle() {
     uint64_t instr = fetch(pc); pc += 8;
     Vulkan::add_rdp_cmd({
       .xyh = { uint32_t((instr >> 12) & 0xfff), uint32_t(instr & 0xfff) },
       .xyl = { uint32_t((instr >> 44) & 0xfff), uint32_t((instr >> 32) & 0x3ff) },
-      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux, .type = 1
+      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux, .type = 0x8
     });
   }
 
@@ -450,7 +479,7 @@ namespace RDP {
       .xyh = { uint32_t((instr[0] >> 12) & 0xfff), uint32_t(instr[0] & 0xfff) },
       .xyl = { uint32_t((instr[0] >> 44) & 0xfff), uint32_t((instr[0] >> 32) & 0x3ff) },
       .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
-      .type = 3, .tile = uint32_t(instr[0] >> 24) & 0x7,
+      .type = 0xa, .tile = uint32_t(instr[0] >> 24) & 0x7,
       .tex = { uint32_t((instr[1] >> 48) & 0xffff), uint32_t((instr[1] >> 32) & 0xffff) },
       .tde = { uint32_t(instr[1] & 0xffff), uint32_t(instr[1] & 0xffff) },
       .tdx = { uint32_t((instr[1] >> 16) & 0xffff), uint32_t((instr[1] >> 16) & 0xffff) },
@@ -463,7 +492,7 @@ namespace RDP {
       .xyh = { uint32_t((instr[0] >> 12) & 0xfff), uint32_t(instr[0] & 0xfff) },
       .xyl = { uint32_t((instr[0] >> 44) & 0xfff), uint32_t((instr[0] >> 32) & 0x3ff) },
       .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
-      .type = 4, .tile = uint32_t(instr[0] >> 24) & 0x7,
+      .type = 0xb, .tile = uint32_t(instr[0] >> 24) & 0x7,
       .tex = { uint32_t((instr[1] >> 32) & 0xffff), uint32_t((instr[1] >> 48) & 0xffff) },
       .tde = { uint32_t(instr[1] & 0xffff), uint32_t(instr[1] & 0xffff) },
       .tdx = { uint32_t((instr[1] >> 16) & 0xffff), uint32_t((instr[1] >> 16) & 0xffff) },
@@ -477,6 +506,7 @@ namespace RDP {
       uint64_t instr = fetch(pc);
       switch (instr >> 56) {
         case 0x08: fill_triangle(); break;
+        case 0x0a: tex_triangle(); break;
         case 0x0c: shade_triangle(); break;
         case 0x24: tex_rectangle(); break;
         case 0x25: tex_rectangle_flip(); break;
