@@ -1162,6 +1162,17 @@ struct MipsJit {
     else as.movss(x86_spill(sa(instr) + dev_cop1), x86::xmm0);
   }
 
+  void cvt_w_fmt(uint32_t instr) {
+    uint8_t round_mode = 0; // read from FCSR
+    uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
+    if (rdx) as.roundss(x86::xmm0, x86::xmm(rdx), round_mode);
+    else as.roundss(x86::xmm0, x86_spill(rd(instr) + dev_cop1), round_mode);
+    as.cvtss2si(x86::eax, x86::xmm0);
+    as.mov(x86_spill(sa(instr) + dev_cop1), x86::eax);
+    uint8_t sax = x86_reg(sa(instr) + dev_cop1);
+    if (sax) as.movss(x86::xmm(sax), x86_spill(sa(instr) + dev_cop1));
+  }
+
   void invalid(uint32_t instr) {
     printf("Unimplemented instruction %x\n", instr);
     exit(0);
@@ -1516,6 +1527,8 @@ struct MipsJit {
           case 0x0f: round_w_fmt<1>(instr); break;
           case 0x20: cvt_fmt_w(instr); break;
           case 0x21: cvt_fmt_w(instr); break;
+          case 0x24: cvt_w_fmt(instr); break;
+          case 0x25: cvt_w_fmt(instr); break;
           case 0x30: case 0x32: case 0x34: case 0x36:
           case 0x31: case 0x33: case 0x35: case 0x37:
             c_fmt(instr); break;

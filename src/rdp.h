@@ -7,15 +7,15 @@
 
 typedef struct PerTileData {
   uint32_t n_cmds;
-  uint32_t cmd_idxs[7];
+  uint32_t cmd_idxs[31];
 } tile_t;
 
 typedef struct RDPCommand {
   uint32_t xyh[2], xym[2], xyl[2];
   uint32_t sh, sm, sl;
-  uint32_t fill, lft, type;
+  uint32_t fill, blend, fog, lft, type;
   uint32_t shade[4], sde[4], sdx[4];
-  uint32_t tile, pad;
+  uint32_t tile, bl_mux;
   uint32_t tex[2], tde[2], tdx[2];
 } cmd_t;
 
@@ -33,7 +33,7 @@ namespace Vulkan {
   /* === Descriptor Memory Access === */
 
   uint8_t *mapped_mem;
-  const uint32_t group_size = 8, max_cmds = 32;
+  const uint32_t group_size = 8, max_cmds = 64;
   uint32_t n_cmds = 0;
 
   const VkDeviceSize cmds_size = max_cmds * sizeof(cmd_t);
@@ -290,8 +290,9 @@ namespace Vulkan {
     uint32_t yh = (cmd.xyh[1] >> 2) / group_size;
     uint32_t yl = (cmd.xyl[1] >> 2) / group_size;
     for (uint32_t i = yh; i <= yl; ++i) {
-      for (uint32_t j = 0; j < (320 / group_size); ++j) {
+      for (uint32_t j = 0; j < 320 / group_size; ++j) {
         tile_t *tile = tiles_ptr() + i * (320 / group_size) + j;
+        if (tile->n_cmds >= 31) { printf("max cmds reached\n"); break; }
         tile->cmd_idxs[tile->n_cmds++] = n_cmds;
       }
     }
@@ -317,13 +318,29 @@ namespace R4300 {
 }
 
 namespace RDP {
-  uint32_t color = 0x0;
+  uint32_t fill = 0x0, blend = 0x0, fog = 0x0;
   uint32_t pc_start = 0x0, pc_end = 0x0;
-  uint32_t pc = 0x0, status = 0x0;
+  uint32_t pc = 0x0, status = 0x0, bl_mux = 0x0;
   uint32_t tex_size = 4, tex_width = 0, tex_addr = 0x0;
 
   uint64_t fetch(uint32_t addr) {
     return status & 0x1 ? RSP::read<uint64_t>(addr) : R4300::read<uint64_t>(addr);
+  }
+
+  void set_other_modes() {
+    bl_mux = (fetch(pc) >> 16) & 0xffff; pc += 8;
+  }
+
+  void set_fill() {
+    fill = fetch(pc) & 0xffffffff; pc += 8;
+  }
+
+  void set_fog() {
+    fog = fetch(pc) & 0xffffffff; pc += 8;
+  }
+
+  void set_blend() {
+    blend = fetch(pc) & 0xffffffff; pc += 8;
   }
 
   void set_texture() {
@@ -358,7 +375,6 @@ namespace RDP {
     uint32_t offset = (tl * tex_width + sl) * pix_size, width = (((sh - sl) >> 2) + 1) * pix_size;
     uint8_t *mem = Vulkan::tmem_ptr() + tex_mem; uint32_t ram = tex_addr + offset;
     uint32_t width_pad = (width + 0x7) & ~0x7;
-    printf("mem_width: %x, ram_width: %x\n", width_pad, tex_width * pix_size);
     for (uint32_t i = 0; i <= (th - tl) >> 2; ++i) {
       for (uint32_t j = 0; j < width; ++j) {
         //uint32_t k = (((j & ~0x3) >> 1) | (j & 0x1)) + ((j & 0x2) << 10);
@@ -368,21 +384,19 @@ namespace RDP {
     }
   }
 
-  void set_fill_color() {
-    color = fetch(pc) & 0xffffffff; pc += 8;
-  }
-
   void fill_triangle() {
     uint64_t instr[4] = {
       fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24)
     };
+    printf("filling triangle with xh = %x, yh = %x\n", uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff));
     pc += 32;
     Vulkan::add_rdp_cmd({
       .xyh = { uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff) },
       .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
       .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
       .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
-      .lft = uint32_t((instr[0] >> 55) & 0x1), .fill = color, .type = 0
+      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0,
+      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux
     });
   }
 
@@ -398,7 +412,8 @@ namespace RDP {
       .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
       .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
       .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
-      .lft = uint32_t((instr[0] >> 55) & 0x1), .fill = color, .type = 2,
+      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 2,
+      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
       .shade = {
         uint32_t(instr[4] >> 48) << 16 | uint32_t(instr[6] >> 48),
         uint32_t((instr[4] >> 32) & 0xffff) << 16 | uint32_t((instr[6] >> 32) & 0xffff),
@@ -425,7 +440,7 @@ namespace RDP {
     Vulkan::add_rdp_cmd({
       .xyh = { uint32_t((instr >> 12) & 0xfff), uint32_t(instr & 0xfff) },
       .xyl = { uint32_t((instr >> 44) & 0xfff), uint32_t((instr >> 32) & 0x3ff) },
-      .fill = color, .type = 1
+      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux, .type = 1
     });
   }
 
@@ -434,7 +449,8 @@ namespace RDP {
     Vulkan::add_rdp_cmd({
       .xyh = { uint32_t((instr[0] >> 12) & 0xfff), uint32_t(instr[0] & 0xfff) },
       .xyl = { uint32_t((instr[0] >> 44) & 0xfff), uint32_t((instr[0] >> 32) & 0x3ff) },
-      .fill = color, .type = 3, .tile = uint32_t(instr[0] >> 24) & 0x7,
+      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
+      .type = 3, .tile = uint32_t(instr[0] >> 24) & 0x7,
       .tex = { uint32_t((instr[1] >> 48) & 0xffff), uint32_t((instr[1] >> 32) & 0xffff) },
       .tde = { uint32_t(instr[1] & 0xffff), uint32_t(instr[1] & 0xffff) },
       .tdx = { uint32_t((instr[1] >> 16) & 0xffff), uint32_t((instr[1] >> 16) & 0xffff) },
@@ -446,7 +462,8 @@ namespace RDP {
     Vulkan::add_rdp_cmd({
       .xyh = { uint32_t((instr[0] >> 12) & 0xfff), uint32_t(instr[0] & 0xfff) },
       .xyl = { uint32_t((instr[0] >> 44) & 0xfff), uint32_t((instr[0] >> 32) & 0x3ff) },
-      .fill = color, .type = 4, .tile = uint32_t(instr[0] >> 24) & 0x7,
+      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
+      .type = 4, .tile = uint32_t(instr[0] >> 24) & 0x7,
       .tex = { uint32_t((instr[1] >> 32) & 0xffff), uint32_t((instr[1] >> 48) & 0xffff) },
       .tde = { uint32_t(instr[1] & 0xffff), uint32_t(instr[1] & 0xffff) },
       .tdx = { uint32_t((instr[1] >> 16) & 0xffff), uint32_t((instr[1] >> 16) & 0xffff) },
@@ -463,10 +480,13 @@ namespace RDP {
         case 0x0c: shade_triangle(); break;
         case 0x24: tex_rectangle(); break;
         case 0x25: tex_rectangle_flip(); break;
+        case 0x2f: set_other_modes(); break;
         case 0x34: load_tile(); break;
         case 0x35: set_tile(); break;
         case 0x36: fill_rectangle(); break;
-        case 0x37: set_fill_color(); break;
+        case 0x37: set_fill(); break;
+        case 0x38: set_fog(); break;
+        case 0x39: set_blend(); break;
         case 0x3d: set_texture(); break;
         default: printf("RDP instruction %llx\n", instr); pc += 8; break;
       }

@@ -1,14 +1,14 @@
 struct PerTileData {
   uint n_cmds;
-  uint cmd_idxs[7];
+  uint cmd_idxs[31];
 };
 
 struct RDPCommand {
   uint xyh[2], xym[2], xyl[2];
-  int sh, sm, sl;
-  uint fill, lft, type;
+  uint sh, sm, sl;
+  uint fill, blend, fog, lft, type;
   uint shade[4], sde[4], sdx[4];
-  uint tile, pad;
+  uint tile, bl_mux;
   uint tex[2], tde[2], tdx[2];
 };
 
@@ -91,9 +91,40 @@ uint visible(uint2 pos, RDPCommand cmd) {
          (!cmd.lft && x2 <= x && x < x1));
 }
 
-uint shade(uint pixel, uint color, uint coverage) {
-  //if ((color & 0xff) == 0) return pixel; 
-  return pixel * (1 - coverage) + color * coverage;
+uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
+  if (coverage == 0) return pixel;
+  uint a, p, b, m;
+  uint m1a = (cmd.bl_mux >> 14) & 0x3, m1b = (cmd.bl_mux >> 10) & 0x3;
+  uint m2a = (cmd.bl_mux >> 6) & 0x3, m2b = (cmd.bl_mux >> 2) & 0x3;
+  // select p 
+  if (m1a == 0) p = color;
+  else if (m1a == 1) p = pixel;
+  else if (m1a == 2) p = cmd.blend;
+  else if (m1a == 3) p = cmd.fog;
+  // select m
+  if (m2a == 0) m = color;
+  else if (m2a == 1) m = pixel;
+  else if (m2a == 2) m = cmd.blend;
+  else if (m2a == 3) m = cmd.fog;
+  // select a
+  if (m1b == 0) a = color & 0xff;
+  else if (m1b == 1) a = cmd.fog & 0xff;
+  else if (m1b == 2) a = color & 0xff; // should be shade, from before CC?
+  else if (m1b == 3) a = 0x0;
+  // select b
+  if (m2b == 0) b = 0xff - a;
+  else if (m2b == 1) p = pixel & 0xff;
+  else if (m2b == 2) p = 0xff;
+  else if (m2b == 3) p = 0x0;
+  // blend selected colors
+  uint output = 0x0;
+  for (uint i = 0; i < 4; ++i) {
+    uint pc = (p >> (i * 8)) & 0xff;
+    uint mc = (m >> (i * 8)) & 0xff;
+    uint oc = (a * pc + b * mc) / (a + b);
+    output |= (oc & 0xff) << (i * 8);
+  }
+  return output;
 }
 
 [numthreads(8, 8, 1)]
@@ -104,7 +135,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
     RDPCommand cmd = cmds[tile.cmd_idxs[i]];
     uint coverage = visible(GlobalID.xy, cmd);
     uint color = sample_color(GlobalID.xy, cmd);
-    pixel = shade(pixel, color, coverage);
+    pixel = shade(pixel, color, coverage, cmd);
   }
   pixels.Store((GlobalID.y * width + GlobalID.x) * pixel_size, pixel);
 }
