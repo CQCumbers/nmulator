@@ -35,6 +35,7 @@ namespace Vulkan {
 
   uint8_t *mapped_mem;
   const uint32_t group_size = 8, max_cmds = 64;
+  const uint32_t gwidth = 256 / group_size, gheight = 200 / group_size;
   uint32_t n_cmds = 0;
 
   const VkDeviceSize cmds_size = max_cmds * sizeof(cmd_t);
@@ -237,7 +238,7 @@ namespace Vulkan {
     vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE,
       layout, 0, 1, &descriptors, 0, 0);
-    vkCmdDispatch(commands, 320 / group_size, 240 / group_size, 1);
+    vkCmdDispatch(commands, gwidth, gheight, 1);
     vkEndCommandBuffer(commands);
   }
 
@@ -289,10 +290,11 @@ namespace Vulkan {
 
   void add_rdp_cmd(cmd_t cmd) {
     uint32_t yh = (cmd.xyh[1] >> 2) / group_size;
+    if (yh >> 13) yh = 0;
     uint32_t yl = (cmd.xyl[1] >> 2) / group_size;
     for (uint32_t i = yh; i <= yl; ++i) {
-      for (uint32_t j = 0; j < 320 / group_size; ++j) {
-        tile_t *tile = tiles_ptr() + i * (320 / group_size) + j;
+      for (uint32_t j = 0; j < gwidth; ++j) {
+        tile_t *tile = tiles_ptr() + i * gwidth + j;
         if (tile->n_cmds >= 31) { printf("max cmds reached\n"); break; }
         tile->cmd_idxs[tile->n_cmds++] = n_cmds;
       }
@@ -390,6 +392,7 @@ namespace RDP {
       fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24)
     };
     printf("filling triangle with xh = %x, yh = %x\n", uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff));
+    printf("blend: %x, bl_mux: %x\n", blend, bl_mux);
     pc += 32;
     Vulkan::add_rdp_cmd({
       .xyh = { uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff) },
@@ -542,6 +545,7 @@ namespace RDP {
       }
     }
     // rasterize on GPU according to config
+    status |= 0x80; // buffer ready
     return Vulkan::render();
   }
 }

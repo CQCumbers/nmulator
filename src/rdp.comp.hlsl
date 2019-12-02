@@ -22,11 +22,26 @@ struct RDPTile {
 StructuredBuffer<RDPCommand> cmds : register(t0);
 StructuredBuffer<PerTileData> tiles : register(t1);
 StructuredBuffer<RDPTile> texes : register(t2);
-static const uint width = 320;
-static const uint pixel_size = 4;
+static const uint width = 256;
+static const uint pixel_size = 2;
 
 ByteAddressBuffer tmem : register(t3);
 RWByteAddressBuffer pixels : register(t4);
+
+uint read_rgba16(uint input) {
+  // convert RGBA 5551 to RGBA8888
+  uint output = ((input >> 3) & 0x1f) << 27;
+  output |= (((input & 0x7) << 2) | ((input >> 14) & 0x3)) << 19;
+  output |= ((input >> 9) & 0x1f) << 11;
+  return output | ((input >> 8) & 0x1) * 0xff;
+}
+
+uint write_rgba16(uint input) {
+  uint output = ((input >> 27) & 0x1f) << 11;
+  output |= ((input >> 19) & 0x1f) << 6;
+  output |= ((input >> 11) & 0x1f) << 1;
+  return output | (input >> 7) & 0x1;
+}
 
 uint read_texel(RDPTile tex, uint s, uint t) {
   uint ms = s & (1 << tex.mask[0]), mt = t & (1 << tex.mask[1]);
@@ -36,13 +51,10 @@ uint read_texel(RDPTile tex, uint s, uint t) {
   if (tex.shift[1] < 10) { t >>= tex.shift[1]; } else { t <<= (16 - tex.shift[1]); }
   
   if (tex.format == 0 && tex.size == 2) { // 16 bit RGBA
-    uint texel = tmem.Load(tex.addr + t * tex.width + s * 2);
-    if ((tex.addr + t * tex.width + s * 2) & 0x2) texel = texel >> 16;
-    // convert big-endian RGBA 5551
-    uint color = ((texel >> 3) & 0x1f) << 27;
-    color |= (((texel & 0x7) << 2) | ((texel >> 14) & 0x3)) << 19;
-    color |= ((texel >> 9) & 0x1f) << 11;
-    return color | -((texel >> 8) & 0x1) & 0xff;
+    uint tex_pos = tex.addr + t * tex.width + s * 2;
+    uint texel = tmem.Load(tex_pos);
+    if (tex_pos & 0x2) texel = texel >> 16;
+    return read_rgba16(texel);
   } else if (tex.format == 0 && tex.size == 3) { // 32 bit RGBA
     uint texel = tmem.Load(tex.addr + t * tex.width * 2 + s * 4);
     //uint texel2 = tmem.Load(tex.addr + s * 4 + 2);// + t * tex.width + s * 2);
@@ -98,15 +110,15 @@ uint sample_z(uint2 pos, RDPCommand cmd) {
 uint visible(uint2 pos, RDPCommand cmd) {
   // convert to subpixels, check y bounds
   uint x = pos.x << 16, y = pos.y << 2;
-  if (cmd.xyh[1] > y || y >= cmd.xyl[1]) return 0;
+  if (cmd.xyh[1] > y || y > cmd.xyl[1]) return 0;
   if (cmd.type & 0x8) // rectangles
-    return (cmd.xyh[0] <= (pos.x << 2) && (pos.x << 2) < cmd.xyl[0]);
+    return (cmd.xyh[0] <= (pos.x << 2) && (pos.x << 2) <= cmd.xyl[0]);
   // calculate x bounds from slopes
   uint x1 = cmd.xyh[0] + cmd.sh * ((y - cmd.xyh[1]) >> 2), x2;
   if (y < cmd.xym[1]) x2 = cmd.xym[0] + cmd.sm * ((y - cmd.xyh[1]) >> 2);
   else x2 = cmd.xyl[0] + cmd.sl * ((y - cmd.xym[1]) >> 2);
-  return ((cmd.lft && x1 <= x && x < x2) ||
-         (!cmd.lft && x2 <= x && x < x1));
+  return ((cmd.lft && x1 <= x && x <= x2) ||
+         (!cmd.lft && x2 <= x && x <= x1));
 }
 
 uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
@@ -116,15 +128,15 @@ uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   // select p 
   if (m1a == 0) p = color;
   else if (m1a == 1) p = pixel;
-  else if (m1a == 2) p = cmd.blend;
+  else if (m1a == 2) p = write_rgba16(cmd.blend), p = (p << 16) | p;
   else if (m1a == 3) p = cmd.fog;
   // select m
   if (m2a == 0) m = color;
   else if (m2a == 1) m = pixel;
-  else if (m2a == 2) m = cmd.blend;
+  else if (m2a == 2) m = write_rgba16(cmd.blend), m = (m << 16) | m;
   else if (m2a == 3) m = cmd.fog;
   // select a
-  if (m1b == 0) a = color & 0xff;
+  if (m1b == 0) a = 0xff;//read_rgba16(color) & 0xff;
   else if (m1b == 1) a = cmd.fog & 0xff;
   else if (m1b == 2) a = color & 0xff; // should be shade, from before CC?
   else if (m1b == 3) a = 0x0;
@@ -146,7 +158,8 @@ uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
 
 [numthreads(8, 8, 1)]
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
-  uint pixel = pixels.Load((GlobalID.y * width + GlobalID.x) * pixel_size), zbuf = -1;
+  uint tile_pos = GlobalID.y * width + GlobalID.x;
+  uint pixel = pixels.Load(tile_pos * pixel_size), zbuf = -1;
   PerTileData tile = tiles[GroupID.y * (width / 8) + GroupID.x];
   for (uint i = 0; i < tile.n_cmds; ++i) {
     RDPCommand cmd = cmds[tile.cmd_idxs[i]];
@@ -156,5 +169,5 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
     if (coverage == 0 || z > zbuf) continue;
     pixel = shade(pixel, color, coverage, cmd), zbuf = z;
   }
-  pixels.Store((GlobalID.y * width + GlobalID.x) * pixel_size, pixel);
+  pixels.Store(tile_pos * pixel_size, pixel);
 }

@@ -77,7 +77,7 @@ namespace R4300 {
         SDL_TEXTUREACCESS_STREAMING, vi_width, height);
       vi_dirty = false;
     }
-    write_rdp(RDP::update(cycles));
+    //write_rdp(RDP::update(cycles));
     if (format == 2) {
       uint16_t *out = reinterpret_cast<uint16_t*>(pixels);
       for (uint32_t i = 0; i < vi_width * height; ++i)
@@ -168,8 +168,10 @@ namespace R4300 {
       case 0x404001c: rsp_cop0[7] = 0x0; return;
       case 0x4080000: RSP::pc = val & 0xfff; return;
       // RDP Interface
-      case 0x4100000: RDP::pc_start = val; return;
-      case 0x4100004: RDP::pc_end = val; return;
+      case 0x4100000: RDP::pc_start = val & addr_mask; return;
+      case 0x4100004:
+        RDP::pc_end = val & addr_mask;
+        write_rdp(RDP::update(1)); return;
       case 0x410000c: RDP::status = _pext_u32(val, 0x2aa); return;
       // MIPS Interface
       case 0x430000c: mi_mask = _pext_u32(val, 0xaaa); return;
