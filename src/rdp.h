@@ -16,6 +16,7 @@ typedef struct RDPCommand {
   uint32_t fill, blend, fog, lft, type;
   uint32_t shade[4], sde[4], sdx[4];
   uint32_t tile, bl_mux;
+  uint32_t zbuf, zde, zdx;
   uint32_t tex[2], tde[2], tdx[2];
 } cmd_t;
 
@@ -464,6 +465,24 @@ namespace RDP {
     });
   }
 
+  void zbuf_triangle() {
+    uint64_t instr[12] = {
+      fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24), fetch(pc + 32), fetch(pc + 40)
+    };
+    pc += 48;
+    printf("zbuf triangle at %x\n", uint32_t(instr[4] >> 32));
+    Vulkan::add_rdp_cmd({
+      .xyh = { uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff) },
+      .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
+      .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
+      .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
+      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0x4,
+      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
+      .zbuf = uint32_t(instr[4] >> 32), .zde = uint32_t(instr[5] >> 32),
+      .zdx = uint32_t(instr[4] & 0xffffffff)
+    });
+  }
+
   void fill_rectangle() {
     uint64_t instr = fetch(pc); pc += 8;
     Vulkan::add_rdp_cmd({
@@ -506,6 +525,7 @@ namespace RDP {
       uint64_t instr = fetch(pc);
       switch (instr >> 56) {
         case 0x08: fill_triangle(); break;
+        case 0x09: zbuf_triangle(); break;
         case 0x0a: tex_triangle(); break;
         case 0x0c: shade_triangle(); break;
         case 0x24: tex_rectangle(); break;

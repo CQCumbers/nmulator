@@ -25,7 +25,6 @@ add_dependencies(nmulator shader)
 target_compile_options(nmulator
     PRIVATE -Wall -Wextra -march=x86-64 -mavx -mbmi2
     PRIVATE -fno-exceptions -fno-rtti -fno-strict-aliasing)
-set_target_properties(nmulator PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 target_compile_features(nmulator PRIVATE cxx_std_17)
 
 # clean up generated files

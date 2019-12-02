@@ -9,6 +9,7 @@ struct RDPCommand {
   uint fill, blend, fog, lft, type;
   uint shade[4], sde[4], sdx[4];
   uint tile, bl_mux;
+  uint zbuf, zde, zdx;
   uint tex[2], tde[2], tdx[2];
 };
 
@@ -84,6 +85,16 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
   return cmd.fill;
 }
 
+uint sample_z(uint2 pos, RDPCommand cmd) {
+  if ((cmd.type & 0x4) == 0) return -1;
+  uint x1 = cmd.xyh[0] + cmd.sh * (pos.y - (cmd.xyh[1] >> 2));
+  uint x = pos.x - (x1 >> 16), y = pos.y - (cmd.xyh[1] >> 2);
+  uint output = cmd.zbuf, o1 = x * cmd.zdx, o2 = y * cmd.zde;
+  if (o1 != 0) output += max(o1, -output);
+  if (o2 != 0) output += max(o2, -output);
+  return output;
+}
+
 uint visible(uint2 pos, RDPCommand cmd) {
   // convert to subpixels, check y bounds
   uint x = pos.x << 16, y = pos.y << 2;
@@ -99,7 +110,6 @@ uint visible(uint2 pos, RDPCommand cmd) {
 }
 
 uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
-  if (coverage == 0) return pixel;
   uint a, p, b, m;
   uint m1a = (cmd.bl_mux >> 14) & 0x3, m1b = (cmd.bl_mux >> 10) & 0x3;
   uint m2a = (cmd.bl_mux >> 6) & 0x3, m2b = (cmd.bl_mux >> 2) & 0x3;
@@ -136,13 +146,15 @@ uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
 
 [numthreads(8, 8, 1)]
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
-  uint pixel = pixels.Load((GlobalID.y * width + GlobalID.x) * pixel_size);
+  uint pixel = pixels.Load((GlobalID.y * width + GlobalID.x) * pixel_size), zbuf = -1;
   PerTileData tile = tiles[GroupID.y * (width / 8) + GroupID.x];
   for (uint i = 0; i < tile.n_cmds; ++i) {
     RDPCommand cmd = cmds[tile.cmd_idxs[i]];
     uint coverage = visible(GlobalID.xy, cmd);
     uint color = sample_color(GlobalID.xy, cmd);
-    pixel = shade(pixel, color, coverage, cmd);
+    uint z = sample_z(GlobalID.xy, cmd);
+    if (coverage == 0 || z > zbuf) continue;
+    pixel = shade(pixel, color, coverage, cmd), zbuf = z;
   }
   pixels.Store((GlobalID.y * width + GlobalID.x) * pixel_size, pixel);
 }
