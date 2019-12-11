@@ -128,12 +128,12 @@ uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   // select p 
   if (m1a == 0) p = color;
   else if (m1a == 1) p = pixel;
-  else if (m1a == 2) p = write_rgba16(cmd.blend), p = (p << 16) | p;
+  else if (m1a == 2) p = write_rgba16(cmd.blend);
   else if (m1a == 3) p = cmd.fog;
   // select m
   if (m2a == 0) m = color;
   else if (m2a == 1) m = pixel;
-  else if (m2a == 2) m = write_rgba16(cmd.blend), m = (m << 16) | m;
+  else if (m2a == 2) m = write_rgba16(cmd.blend);
   else if (m2a == 3) m = cmd.fog;
   // select a
   if (m1b == 0) a = 0xff;//read_rgba16(color) & 0xff;
@@ -169,5 +169,13 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
     if (coverage == 0 || z > zbuf) continue;
     pixel = shade(pixel, color, coverage, cmd), zbuf = z;
   }
-  pixels.Store(tile_pos * pixel_size, pixel);
+  if (pixel_size == 4) pixels.Store(tile_pos * pixel_size, pixel);
+  else if (tile_pos & 0x1) {
+    pixels.InterlockedAnd(tile_pos * pixel_size, 0xffff0000);
+    pixels.InterlockedOr(tile_pos * pixel_size, pixel & 0xffff);
+  } else {
+    pixels.InterlockedAnd(tile_pos * pixel_size, 0x0000ffff);
+    pixels.InterlockedOr(tile_pos * pixel_size, (pixel & 0xffff) << 16);
+  }
+  //pixels.Store(tile_pos * pixel_size, pixel);
 }

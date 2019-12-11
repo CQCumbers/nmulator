@@ -208,6 +208,10 @@ namespace R4300 {
     }
   }
 
+  void map_page(uint32_t virt, uint32_t phys) {
+    pages[(virt >> 21) & 0xff] = pages[0] + (phys & addr_mask);
+  }
+
   template <typename T>
   int64_t read(uint32_t addr) {
     uint8_t *page = pages[(addr >> 21) & 0xff];
