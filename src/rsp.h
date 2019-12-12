@@ -33,7 +33,8 @@ namespace RSP {
   }
   
   uint32_t fetch(uint32_t addr) {
-    return __builtin_bswap32(*reinterpret_cast<uint32_t*>(imem + addr));
+    uint32_t *ptr = reinterpret_cast<uint32_t*>(imem + (addr & 0xfff));
+    return __builtin_bswap32(*ptr);
   }
 
   uint64_t reg_array[0x86] = {0};

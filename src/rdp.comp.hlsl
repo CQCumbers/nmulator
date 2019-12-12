@@ -22,8 +22,8 @@ struct RDPTile {
 StructuredBuffer<RDPCommand> cmds : register(t0);
 StructuredBuffer<PerTileData> tiles : register(t1);
 StructuredBuffer<RDPTile> texes : register(t2);
-static const uint width = 256;
-static const uint pixel_size = 2;
+static const uint width = 320;
+static const uint pixel_size = 4;
 
 ByteAddressBuffer tmem : register(t3);
 RWByteAddressBuffer pixels : register(t4);
@@ -128,12 +128,14 @@ uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   // select p 
   if (m1a == 0) p = color;
   else if (m1a == 1) p = pixel;
-  else if (m1a == 2) p = write_rgba16(cmd.blend);
+  else if (m1a == 2 && pixel_size == 2) p = write_rgba16(cmd.blend);
+  else if (m1a == 2 && pixel_size == 4) p = cmd.blend;
   else if (m1a == 3) p = cmd.fog;
   // select m
   if (m2a == 0) m = color;
   else if (m2a == 1) m = pixel;
-  else if (m2a == 2) m = write_rgba16(cmd.blend);
+  else if (m2a == 2 && pixel_size == 2) m = write_rgba16(cmd.blend);
+  else if (m2a == 2 && pixel_size == 4) m = cmd.blend;
   else if (m2a == 3) m = cmd.fog;
   // select a
   if (m1b == 0) a = 0xff;//read_rgba16(color) & 0xff;
@@ -177,5 +179,4 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
     pixels.InterlockedAnd(tile_pos * pixel_size, 0x0000ffff);
     pixels.InterlockedOr(tile_pos * pixel_size, (pixel & 0xffff) << 16);
   }
-  //pixels.Store(tile_pos * pixel_size, pixel);
 }

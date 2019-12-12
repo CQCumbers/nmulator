@@ -35,7 +35,7 @@ namespace Vulkan {
 
   uint8_t *mapped_mem;
   const uint32_t group_size = 8, max_cmds = 64;
-  const uint32_t gwidth = 256 / group_size, gheight = 200 / group_size;
+  const uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0;
 
   const VkDeviceSize cmds_size = max_cmds * sizeof(cmd_t);

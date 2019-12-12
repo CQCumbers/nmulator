@@ -16,6 +16,7 @@ namespace R4300 {
   int64_t read(uint32_t addr);
   template <typename T>
   void write(uint32_t addr, int64_t val);
+  void joy_update(SDL_Event &event);
 
   /* === MIPS Interface registers === */
 
@@ -92,8 +93,10 @@ namespace R4300 {
     SDL_RenderCopy(renderer, texture, nullptr, nullptr);
     SDL_RenderPresent(renderer);
 
-    for (SDL_Event e; SDL_PollEvent(&e);)
+    for (SDL_Event e; SDL_PollEvent(&e);) {
       if (e.type == SDL_QUIT) exit(0);
+      joy_update(e);
+    }
   }
 
   /* === Audio Interface registers === */
@@ -106,10 +109,84 @@ namespace R4300 {
     if (ai_run && ai_used < 10000 && (ai_used += cycles) >= 10000) mi_irqs |= 0x4;
   }
 
-  /* === Peripheral Interface registers === */
+  /* === Peripheral & Serial Interface registers === */
 
   constexpr uint32_t pi_status = 0x0;
   uint32_t pi_ram = 0x0, pi_rom = 0x0;
+  int8_t stick_x = 0x0, stick_y = 0x0;
+  uint16_t buttons = 0x0;
+  uint32_t si_ram = 0x0;
+
+  void joy_status(uint32_t channel, uint32_t addr) {
+    if (channel != 0) return;
+    write<uint16_t>(addr, 0x0500); // standard controller type
+    write<uint8_t>(addr + 16, 0x02); // no mempack slot
+  }
+
+  void joy_read(uint32_t channel, uint32_t addr) {
+    if (channel != 0) return;
+    printf("[SI] buttons: %x, stick_x: %d, stick_y %d\n", buttons, stick_x, stick_y);
+    write<uint16_t>(addr, buttons);
+    write<int8_t>(addr + 16, 0);//stick_x);
+    write<int8_t>(addr + 24, 0);//stick_y);
+  }
+
+  void joy_update(SDL_Event &event) {
+    if (event.type == SDL_KEYDOWN) {
+      switch (event.key.keysym.sym) {
+        case SDLK_x: buttons |= (1 << 15); break;  // A
+        case SDLK_c: buttons |= (1 << 14); break;  // B
+        case SDLK_z: buttons |= (1 << 13); break;  // Z
+        case SDLK_RETURN: buttons |= (1 << 12); break;  // Start
+        case SDLK_k: buttons |= (1 << 11); break;  // D Up
+        case SDLK_j: buttons |= (1 << 10); break;  // D Down
+        case SDLK_h: buttons |= (1 << 9); break;   // D Left
+        case SDLK_l: buttons |= (1 << 8); break;   // D Right
+        case SDLK_a: buttons |= (1 << 5); break;   // Trigger Left
+        case SDLK_s: buttons |= (1 << 4); break;   // Trigger Right
+        case SDLK_UP: stick_y += 80; break;        // Stick Up
+        case SDLK_DOWN: stick_y -= 80; break;      // Stick Down
+        case SDLK_LEFT: stick_x -= 80; break;      // Stick Left
+        case SDLK_RIGHT: stick_x += 80; break;     // Stick Right
+      }
+    } else if (event.type == SDL_KEYUP) {
+      switch (event.key.keysym.sym) {
+        case SDLK_x: buttons &= ~(1 << 15); break;  // A
+        case SDLK_c: buttons &= ~(1 << 14); break;  // B
+        case SDLK_z: buttons &= ~(1 << 13); break;  // Z
+        case SDLK_RETURN: buttons &= ~(1 << 12); break;  // Start
+        case SDLK_k: buttons &= ~(1 << 11); break;  // D Up
+        case SDLK_j: buttons &= ~(1 << 10); break;  // D Down
+        case SDLK_h: buttons &= ~(1 << 9); break;   // D Left
+        case SDLK_l: buttons &= ~(1 << 8); break;   // D Right
+        case SDLK_a: buttons &= ~(1 << 5); break;   // Trigger Left
+        case SDLK_s: buttons &= ~(1 << 4); break;   // Trigger Right
+        case SDLK_UP: stick_y -= 80; break;         // Stick Up
+        case SDLK_DOWN: stick_y += 80; break;       // Stick Down
+        case SDLK_LEFT: stick_x += 80; break;       // Stick Left
+        case SDLK_RIGHT: stick_x -= 80; break;      // Stick Right
+      }
+    }
+  }
+
+  void si_update() {
+    uint32_t status = 0x1fc007ff;
+    uint32_t pc = 0x1fc007c0, channel = 0;
+    //if ((read<uint8_t>(status) & 0x1) == 0) return;
+    write<uint8_t>(status, 0x0);
+    while (pc < status) {
+      uint8_t t = read<uint8_t>(pc++);
+      if (t == 0xfe) return;
+      if (t >> 7) continue;
+      uint8_t r = read<uint8_t>(pc++);
+      switch (read<uint8_t>(pc++)) {
+        case 0x00: joy_status(channel, pc); break;
+        case 0x01: joy_read(channel, pc); break;
+        case 0xff: joy_status(channel, pc); break;
+      }
+      pc += r, ++channel;
+    }
+  }
 
   /* === Reading and Writing === */
 
@@ -204,9 +281,18 @@ namespace R4300 {
         mi_irqs |= 0x10; return;
       case 0x4600010: mi_irqs &= ~0x10; return;
       // Serial Interface
+      case 0x4800000: si_ram = val & 0xffffff; return;
+      case 0x4800004:
+        si_update();
+        memcpy(pages[0] + si_ram, pages[0xfe] + 0x7c0, 0x40);
+        return;
+      case 0x4800010:
+        memcpy(pages[0xfe] + 0x7c0, pages[0] + si_ram, 0x40);
+        return;
       case 0x4800018: mi_irqs &= ~0x2; return;
     }
   }
+
 
   void map_page(uint32_t virt, uint32_t phys) {
     pages[(virt >> 21) & 0xff] = pages[0] + (phys & addr_mask);
@@ -293,7 +379,6 @@ namespace R4300 {
     for (uint32_t i = 0x1; i < 0x100; ++i) {
       if (i < 0x20 || i > 0x24) pages[i] = pages[0] + i * (page_mask + 1);
     }
-    pages[0xfe] = nullptr; // PIF range
 
     // read ROM file into memory
     fseek(file, 0, SEEK_END);
