@@ -1341,7 +1341,7 @@ struct MipsJit {
     exit(0);
   }
 
-  template <Mul mul_type, bool accumulate>
+  template <Mul mul_type, bool accumulate, bool sat_sgn = true>
   void vmudn(uint32_t instr) {
     // add rounding value
     if (mul_type == Mul::frac && !accumulate) {
@@ -1351,7 +1351,7 @@ struct MipsJit {
     // save old accumulator values
     if (accumulate || mul_type == Mul::frac) x86_store_acc();
     // move vt into accumulator
-    uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     elem_spec(rs(instr)); as.movdqa(x86::xmm14, x86::xmm15);
@@ -1377,31 +1377,34 @@ struct MipsJit {
       as.pmullw(x86::xmm15, x86::xmm0);
       as.pmulhw(x86::xmm14, x86::xmm0);
       // shift product up by 1 bit
-      as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
       as.psllw(x86::xmm14, 1);
       as.movdqa(x86::xmm0, x86::xmm15); as.psrlw(x86::xmm0, 15);
       as.por(x86::xmm14, x86::xmm0);
-      as.psllw(x86::xmm15, 1);
-    } else {
+      as.psllw(x86::xmm15, 1); update_acc();
+      as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
+    } else { // midm or midn
       // save sign of vt, to fix unsigned multiply
-      as.movdqa(x86::xmm1, x86::xmm15); as.psraw(x86::xmm1, 15);
+      as.movdqa(x86::xmm1, x86::xmm15);
       // multiply unsigned vt by unsigned vs
       as.pmullw(x86::xmm15, x86::xmm0);
       as.pmulhuw(x86::xmm14, x86::xmm0);
       // subtract vs where vt was negative
-      as.pand(x86::xmm0, x86::xmm1);
-      as.psubw(x86::xmm14, x86::xmm0);
+      if (mul_type == Mul::midn) as.psraw(x86::xmm1, 15);
+      else as.psraw(x86::xmm0, 15);
+      as.pand(x86::xmm1, x86::xmm0);
+      as.psubw(x86::xmm14, x86::xmm1);
       // sign extend to upper accumulator
       as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
     }
-    if (accumulate || mul_type == Mul::frac) update_acc();
-    // saturate signed value
+    if (accumulate && mul_type != Mul::frac) update_acc();
     if (mul_type == Mul::midn || mul_type == Mul::low) {
       as.movdqa(x86::xmm0, x86::xmm15);
     } else {
+      // saturate signed value
       as.movdqa(x86::xmm0, x86::xmm14); as.movdqa(x86::xmm1, x86::xmm14);
       as.punpcklwd(x86::xmm0, x86::xmm13); as.punpckhwd(x86::xmm1, x86::xmm13);
-      as.packssdw(x86::xmm0, x86::xmm1);
+      if (sat_sgn) as.packssdw(x86::xmm0, x86::xmm1);
+      else as.packusdw(x86::xmm0, x86::xmm1);
     }
     // move accumulator section into vd
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
@@ -1411,7 +1414,7 @@ struct MipsJit {
 
   template <Op operation>
   void vadd(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
@@ -1437,9 +1440,21 @@ struct MipsJit {
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
   }
 
+  void vmov(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), e = rs(instr) >> 1;
+    if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
+    else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
+    as.pextrw(x86::eax, x86::xmm15, 7 - e);
+    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2), de = rd(instr) >> 1;
+    auto result = (sax ? x86::xmm(sax) : x86::xmm0);
+    if (!sax) as.movdqa(x86::xmm0, x86_spillq(sa(instr) * 2 + dev_cop2));
+    as.pinsrw(result, x86::eax, 7 - de);
+    if (!sax) as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm0);
+  }
+
   template <bool eq, bool invert>
   void veq(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) + dev_cop2);
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
@@ -1486,9 +1501,28 @@ struct MipsJit {
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm(acc));
   }
 
+  void mfc2(uint32_t instr) {
+    printf("Read from COP2 reg %d\n", rd(instr));
+    uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    auto result = (rdx ? x86::xmm(rdx) : x86::xmm0);
+    if (!rdx) as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
+    as.pextrw(x86::eax, result, 7 - (sa(instr) >> 1));
+    from_eax(rt(instr));
+  }
+
+  void mtc2(uint32_t instr) {
+    printf("Write to COP2 reg %d\n", rd(instr));
+    uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2), rtx = x86_reg(rt(instr));
+    auto result = (rdx ? x86::xmm(rdx) : x86::xmm0);
+    if (!rdx) as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
+    if (rtx) as.pinsrw(result, x86::gpd(rtx), 7 - (sa(instr) >> 1));
+    else as.pinsrw(result, x86_spill(rt(instr)), 7 - (sa(instr) >> 1));
+    if (!rdx) as.movdqa(x86_spillq(rd(instr) * 2 + dev_cop2), x86::xmm0);
+  }
+
   template <typename T>
   void ldv(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     // LDV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
@@ -1501,17 +1535,17 @@ struct MipsJit {
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
     switch (sizeof(T)) {
-      case 1: as.pinsrb(result, x86::rax, sa(instr)); break;
-      case 2: as.pinsrw(result, x86::rax, sa(instr) >> 1); break;
-      case 3: as.pinsrd(result, x86::rax, sa(instr) >> 2); break;
-      case 4: as.pinsrq(result, x86::rax, sa(instr) >> 3); break;
+      case 1: as.pinsrb(result, x86::rax, 7 - sa(instr)); break;
+      case 2: as.pinsrw(result, x86::rax, 7 - (sa(instr) >> 1)); break;
+      case 3: as.pinsrd(result, x86::rax, 7 - (sa(instr) >> 2)); break;
+      case 4: as.pinsrq(result, x86::rax, 7 - (sa(instr) >> 3)); break;
     }
     if (!rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm0);
   }
 
   template <typename T>
   void sdv(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     // SDV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
@@ -1522,10 +1556,10 @@ struct MipsJit {
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
     switch (sizeof(T)) {
-      case 1: as.pextrb(x86::rsi, result, sa(instr)); break;
-      case 2: as.pextrw(x86::rsi, result, sa(instr) >> 1); break;
-      case 3: as.pextrd(x86::rsi, result, sa(instr) >> 2); break;
-      case 4: as.pextrq(x86::rsi, result, sa(instr) >> 3); break;
+      case 1: as.pextrb(x86::rsi, result, 7 - sa(instr)); break;
+      case 2: as.pextrw(x86::rsi, result, 7 - (sa(instr) >> 1)); break;
+      case 3: as.pextrd(x86::rsi, result, 7 - (sa(instr) >> 2)); break;
+      case 4: as.pextrq(x86::rsi, result, 7 - (sa(instr) >> 3)); break;
     }
     as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
     x86_load_caller(); as.pop(x86::edi);
@@ -1719,38 +1753,48 @@ struct MipsJit {
 
   uint32_t cop2(uint32_t instr, uint32_t pc) {
     uint32_t next_pc = pc + 4;
-    if (((instr >> 25) & 0x1) != 1) {
-      printf("COP2 instruction %x\n", instr); return next_pc;
-    }
-    switch (instr & 0x3f) {
-      case 0x00: vmudn<Mul::frac, false>(instr); break; // VMULF (buggy)
-      case 0x01: vmudn<Mul::frac, false>(instr); break; // VMULU (buggy)
-      case 0x04: vmudn<Mul::low, false>(instr); break; // VMUDL
-      case 0x05: vmudn<Mul::midm, false>(instr); break; // VMUDM
-      case 0x06: vmudn<Mul::midn, false>(instr); break; // VMUDN
-      case 0x07: vmudn<Mul::high, false>(instr); break; // VMUDH
-      case 0x08: vmudn<Mul::frac, true>(instr); break; // VMACF (buggy)
-      case 0x09: vmudn<Mul::frac, true>(instr); break; // VMACU (buggy)
-      case 0x0c: vmudn<Mul::low, true>(instr); break; // VMADL
-      case 0x0d: vmudn<Mul::midm, true>(instr); break; // VMADM
-      case 0x0e: vmudn<Mul::midn, true>(instr); break; // VMADN
-      case 0x0f: vmudn<Mul::high, true>(instr); break; // VMADH
-      case 0x10: vadd<Op::add>(instr); break;
-      case 0x11: vadd<Op::sub>(instr); break;
-      case 0x13: vadd<Op::abs>(instr); break;
-      case 0x14: vadd<Op::addc>(instr); break;
-      case 0x15: vadd<Op::subc>(instr); break;
-      case 0x1d: vsar(instr); break;
-      case 0x20: veq<false, false>(instr); break;
-      case 0x21: veq<true, false>(instr); break;
-      case 0x22: veq<true, true>(instr); break;
-      case 0x23: veq<false, true>(instr); break;
-      case 0x28: vand<Op::and_, false>(instr); break;
-      case 0x29: vand<Op::and_, true>(instr); break;
-      case 0x2a: vand<Op::or_, false>(instr); break;
-      case 0x2b: vand<Op::or_, true>(instr); break;
-      case 0x2c: vand<Op::xor_, false>(instr); break;
-      case 0x2d: vand<Op::xor_, true>(instr); break;
+    switch ((instr >> 24) & 0x3) {
+      case 0x0: // COP2/0
+        switch (rs(instr)) {
+          case 0x0: mfc2(instr); break;
+          case 0x4: mtc2(instr); break;
+          default: printf("COP2 instruction %x\n", instr); break;
+        }
+        break;
+      case 0x2: case 0x3: // COP2/2
+        switch (instr & 0x3f) {
+          case 0x00: vmudn<Mul::frac, false, true>(instr); break; // VMULF
+          case 0x01: vmudn<Mul::frac, false, false>(instr); break; // VMULU (buggy)
+          case 0x04: vmudn<Mul::low, false>(instr); break; // VMUDL
+          case 0x05: vmudn<Mul::midm, false>(instr); break; // VMUDM
+          case 0x06: vmudn<Mul::midn, false>(instr); break; // VMUDN
+          case 0x07: vmudn<Mul::high, false>(instr); break; // VMUDH
+          case 0x08: vmudn<Mul::frac, true, true>(instr); break; // VMACF
+          case 0x09: vmudn<Mul::frac, true, false>(instr); break; // VMACU (buggy)
+          case 0x0c: vmudn<Mul::low, true>(instr); break; // VMADL
+          case 0x0d: vmudn<Mul::midm, true>(instr); break; // VMADM
+          case 0x0e: vmudn<Mul::midn, true>(instr); break; // VMADN
+          case 0x0f: vmudn<Mul::high, true>(instr); break; // VMADH
+          case 0x10: vadd<Op::add>(instr); break;
+          case 0x11: vadd<Op::sub>(instr); break;
+          case 0x13: vadd<Op::abs>(instr); break;
+          case 0x14: vadd<Op::addc>(instr); break;
+          case 0x15: vadd<Op::subc>(instr); break;
+          case 0x1d: vsar(instr); break;
+          case 0x20: veq<false, false>(instr); break;
+          case 0x21: veq<true, false>(instr); break;
+          case 0x22: veq<true, true>(instr); break;
+          case 0x23: veq<false, true>(instr); break;
+          case 0x28: vand<Op::and_, false>(instr); break;
+          case 0x29: vand<Op::and_, true>(instr); break;
+          case 0x2a: vand<Op::or_, false>(instr); break;
+          case 0x2b: vand<Op::or_, true>(instr); break;
+          case 0x2c: vand<Op::xor_, false>(instr); break;
+          case 0x2d: vand<Op::xor_, true>(instr); break;
+          case 0x33: vmov(instr); break;
+          default: printf("COP2 instruction %x\n", instr); break;
+        }
+        break;
       default: printf("COP2 instruction %x\n", instr); break;
     }
     return next_pc;
