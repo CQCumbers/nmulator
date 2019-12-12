@@ -49,9 +49,9 @@ int main(int argc, char* argv[]) {
         runtime.add(&block2.code, &code);
       }
       RSP::pc = block2.code();
+      R4300::rsp_update();
     } else rsp_blocks.clear();
 
-    R4300::rsp_update();
     R4300::ai_update(block.cycles);
     R4300::vi_update(block.cycles);
     R4300::irqs_update(block.cycles);

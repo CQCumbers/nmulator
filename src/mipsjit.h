@@ -1145,16 +1145,21 @@ struct MipsJit {
   }
 
   void mfc0(uint32_t instr) {
-    printf("Read from COP0 reg %d\n", rd(instr));
+    printf("Read from %s COP0 reg %d\n", (is_rsp ? "RSP" : "R4300"), rd(instr));
     if (rt(instr) == 0) return;
     move(rt(instr), rd(instr) + dev_cop0);
   }
 
   void mtc0(uint32_t instr) {
-    printf("Write to COP0 reg %d\n", rd(instr));
-    if (is_rsp && rd(instr) == 4) {
-      as.push(x86::edi); x86_store_caller(); as.mov(x86::edi, rt(instr));
-      as.call(reinterpret_cast<uint64_t>(RSP::set_status));
+    printf("Write to %s COP0 reg %d\n", (is_rsp ? "RSP" : "R4300"), rd(instr));
+    if (is_rsp) {
+      as.push(x86::edi); x86_store_caller();
+      if (rd(instr) & 0x8) as.mov(x86::edi, 0x4100000 + (rd(instr) & 0x7) * 4);
+      else as.mov(x86::edi, 0x4040000 + (rd(instr) & 0x7) * 4);
+      uint32_t rtx = x86_reg(rt(instr));
+      if (rtx) as.mov(x86::esi, x86::gpd(rtx));
+      else as.mov(x86::esi, x86_spill(rt(instr)));
+      as.call(reinterpret_cast<uint64_t>(R4300::mmio_write<uint32_t>));
       x86_load_caller(); as.pop(x86::edi); return;
     } else if (!is_rsp && rd(instr) == 11) {
       as.and_(x86_spilld(13 + dev_cop0), ~0x8000);

@@ -5,6 +5,10 @@
 #include <x86intrin.h>
 #include <stdint.h>
 
+namespace R4300 {
+  extern uint32_t mi_irqs;
+}
+
 namespace RSP {
   uint8_t *dmem = nullptr;
   uint8_t *imem = nullptr;
@@ -51,8 +55,11 @@ namespace RSP {
 
   void set_status(uint32_t val) {
     printf("Setting RSP STATUS to %x\n", val);
-    reg_array[4 + dev_cop0] &= ~(val & 0x1);
+    reg_array[4 + dev_cop0] &= ~(val & 0x1);       // HALT
     reg_array[4 + dev_cop0] |= (val & 0x2) >> 1;
+    reg_array[4 + dev_cop0] &= ~(val & 0x4) >> 1;  // BROKE
+    R4300::mi_irqs &= ~(val & 0x8) >> 3;           // IRQ
+    R4300::mi_irqs |= (val & 0x10) >> 4;
     reg_array[4 + dev_cop0] &= ~(_pext_u32(val, 0xaaaaa0) << 5);
     reg_array[4 + dev_cop0] |= _pext_u32(val, 0x1555540) << 5;
   }

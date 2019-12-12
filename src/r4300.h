@@ -253,6 +253,7 @@ namespace R4300 {
         write_rdp(RDP::update(1)); return;
       case 0x410000c: RDP::status = _pext_u32(val, 0x2aa); return;
       // MIPS Interface
+      case 0x4300000: if (val & 0x800) mi_irqs &= ~0x20; return;
       case 0x430000c: mi_mask = _pext_u32(val, 0xaaa); return;
       // Video Interface
       case 0x4400000: 

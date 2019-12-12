@@ -310,20 +310,25 @@ namespace Vulkan {
 }
 
 namespace RSP {
+  extern uint64_t reg_array[0x86];
+  extern const uint8_t dev_cop0;
   template <typename T>
   int64_t read(uint32_t addr);
 }
 
 namespace R4300 {
+  extern uint32_t mi_irqs;
   template <typename T>
   int64_t read(uint32_t addr);
   void write_rdp(uint32_t *rdp_out);
 }
 
 namespace RDP {
-  uint32_t fill = 0x0, blend = 0x0, fog = 0x0;
-  uint32_t pc_start = 0x0, pc_end = 0x0;
-  uint32_t pc = 0x0, status = 0x0, bl_mux = 0x0;
+  uint64_t *rsp_cop0 = RSP::reg_array + RSP::dev_cop0;
+  uint64_t &pc_start = rsp_cop0[8], &pc_end = rsp_cop0[9];
+  uint64_t &pc = rsp_cop0[10], &status = rsp_cop0[11];
+
+  uint32_t fill = 0x0, blend = 0x0, fog = 0x0, bl_mux = 0x0;
   uint32_t tex_size = 4, tex_width = 0, tex_addr = 0x0;
 
   uint64_t fetch(uint32_t addr) {
@@ -545,7 +550,8 @@ namespace RDP {
       }
     }
     // rasterize on GPU according to config
-    status |= 0x80; // buffer ready
+    printf("[RDP] finished!\n");
+    status |= 0x80, R4300::mi_irqs |= 0x20;
     return Vulkan::render();
   }
 }
