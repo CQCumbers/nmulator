@@ -67,7 +67,7 @@ namespace R4300 {
     if (++vi_line == vi_irq) mi_irqs |= 0x8;
     if (vi_line < 584) return;
 
-    vi_line = 0; mi_irqs |= 0x2; // SI INTR
+    vi_line = 0;
     uint8_t format = vi_status & 0x3;
     uint32_t height = vi_height >> !(vi_status & 0x40);
 
@@ -124,11 +124,13 @@ namespace R4300 {
   }
 
   void joy_read(uint32_t channel, uint32_t addr) {
-    if (channel != 0) return;
-    printf("[SI] buttons: %x, stick_x: %d, stick_y %d\n", buttons, stick_x, stick_y);
+    if (channel != 0) {
+      write<uint8_t>(addr - 2, 0x84); return;
+    }
+    printf("[SI] buttons: %x stick: %x\n", buttons, stick_y);
     write<uint16_t>(addr, buttons);
-    write<int8_t>(addr + 16, 0);//stick_x);
-    write<int8_t>(addr + 24, 0);//stick_y);
+    write<int8_t>(addr + 2, stick_x);
+    write<int8_t>(addr + 3, stick_y);
   }
 
   void joy_update(SDL_Event &event) {
@@ -144,10 +146,10 @@ namespace R4300 {
         case SDLK_l: buttons |= (1 << 8); break;   // D Right
         case SDLK_a: buttons |= (1 << 5); break;   // Trigger Left
         case SDLK_s: buttons |= (1 << 4); break;   // Trigger Right
-        case SDLK_UP: stick_y += 80; break;        // Stick Up
-        case SDLK_DOWN: stick_y -= 80; break;      // Stick Down
-        case SDLK_LEFT: stick_x -= 80; break;      // Stick Left
-        case SDLK_RIGHT: stick_x += 80; break;     // Stick Right
+        case SDLK_UP: stick_y = 80; break;         // Stick Up
+        case SDLK_DOWN: stick_y = -80; break;      // Stick Down
+        case SDLK_LEFT: stick_x = -80; break;      // Stick Left
+        case SDLK_RIGHT: stick_x = 80; break ;     // Stick Right
       }
     } else if (event.type == SDL_KEYUP) {
       switch (event.key.keysym.sym) {
@@ -161,10 +163,10 @@ namespace R4300 {
         case SDLK_l: buttons &= ~(1 << 8); break;   // D Right
         case SDLK_a: buttons &= ~(1 << 5); break;   // Trigger Left
         case SDLK_s: buttons &= ~(1 << 4); break;   // Trigger Right
-        case SDLK_UP: stick_y -= 80; break;         // Stick Up
-        case SDLK_DOWN: stick_y += 80; break;       // Stick Down
-        case SDLK_LEFT: stick_x += 80; break;       // Stick Left
-        case SDLK_RIGHT: stick_x -= 80; break;      // Stick Right
+        case SDLK_UP: stick_y = 0; break;           // Stick Up
+        case SDLK_DOWN: stick_y = 0; break;         // Stick Down
+        case SDLK_LEFT: stick_x = 0; break;         // Stick Left
+        case SDLK_RIGHT: stick_x = 0; break;        // Stick Right
       }
     }
   }
@@ -285,14 +287,13 @@ namespace R4300 {
       case 0x4800004:
         si_update();
         memcpy(pages[0] + si_ram, pages[0xfe] + 0x7c0, 0x40);
-        return;
+        mi_irqs |= 0x2; return;
       case 0x4800010:
         memcpy(pages[0xfe] + 0x7c0, pages[0] + si_ram, 0x40);
-        return;
+        mi_irqs |= 0x2; return;
       case 0x4800018: mi_irqs &= ~0x2; return;
     }
   }
-
 
   void map_page(uint32_t virt, uint32_t phys) {
     pages[(virt >> 21) & 0xff] = pages[0] + (phys & addr_mask);
