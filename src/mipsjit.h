@@ -1276,15 +1276,15 @@ struct MipsJit {
     uint8_t cc = sa(instr) >> 2;
     uint32_t mask = (cc ? (0x1000 << cc) : 0x800);
     as.bind(after_set); as.sub(x86::eax, 1);
-    as.and_(x86::eax, mask); as.and_(x86_spill(31 + dev_cop1), ~mask);
-    as.or_(x86_spill(31 + dev_cop1), x86::eax);
+    as.and_(x86::eax, mask); as.and_(x86_spill(32 + dev_cop1), ~mask);
+    as.or_(x86_spill(32 + dev_cop1), x86::eax);
   }
 
   template <bool cond>
   uint32_t bc1f(uint32_t instr, uint32_t pc) {
     uint8_t cc = rt(instr) >> 2;
     uint32_t mask = (cc ? 0x800 : (0x1000 << cc));
-    as.and_(x86_spill(31 + dev_cop1), ~mask);
+    as.and_(x86_spill(32 + dev_cop1), ~mask);
     as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     if (cond) as.cmovnz(x86::edi, x86::eax);
@@ -1296,7 +1296,7 @@ struct MipsJit {
   uint32_t bc1fl(uint32_t instr, uint32_t pc) {
     uint8_t cc = rt(instr) >> 2;
     uint32_t mask = (cc ? 0x800 : (0x1000 << cc));
-    as.and_(x86_spill(31 + dev_cop1), ~mask);
+    as.and_(x86_spill(32 + dev_cop1), ~mask);
     as.mov(x86::edi, pc + 4);
     if (cond) as.jz(end_label);
     else as.jnz(end_label);
@@ -1304,26 +1304,40 @@ struct MipsJit {
     return block_end;
   }
 
+  template <bool dword>
   void mfc1(uint32_t instr) {
     printf("Read from COP1 reg %d\n", rd(instr));
     if (rt(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
-    if (rdx) as.movss(x86::xmm0, x86::xmm(rdx));
-    else as.movss(x86::xmm0, x86_spill(rd(instr) + dev_cop1));
-    as.movss(x86_spill(rt(instr)), x86::xmm0);
+    if (rdx) as.movsd(x86::xmm0, x86::xmm(rdx));
+    else as.movsd(x86::xmm0, x86_spilld(rd(instr) + dev_cop1));
+    as.movsd(x86_spilld(rt(instr)), x86::xmm0);
     uint8_t rtx = x86_reg(rt(instr));
-    if (rtx) as.mov(x86::gpd(rtx), x86_spill(rt(instr)));
-    to_eax(rt(instr)); from_eax(rt(instr));
+    if (rtx) as.mov(x86::gpq(rtx), x86_spilld(rt(instr)));
+    if (!dword) to_eax(rt(instr)), from_eax(rt(instr));
   }
 
+  template <bool dword>
   void mtc1(uint32_t instr) {
     printf("Write to COP1 reg %d\n", rd(instr));
     uint8_t rtx = x86_reg(rt(instr));
-    if (rtx) as.mov(x86_spill(rt(instr)), x86::gpd(rtx));
-    as.movss(x86::xmm0, x86_spill(rt(instr)));
+    if (rtx) as.mov(x86_spilld(rt(instr)), x86::gpq(rtx));
+    if (dword) as.movsd(x86::xmm0, x86_spilld(rt(instr)));
+    else as.movss(x86::xmm0, x86_spill(rt(instr)));
     uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
-    if (rdx) as.movss(x86::xmm(rdx), x86::xmm0);
-    else as.movss(x86_spill(rd(instr) + dev_cop1), x86::xmm0);
+    if (rdx) as.movsd(x86::xmm(rdx), x86::xmm0);
+    else as.movsd(x86_spilld(rd(instr) + dev_cop1), x86::xmm0);
+  }
+
+  void cfc1(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    if (rd(instr) == 31) move(rt(instr), 32 + dev_cop1);
+  }
+
+  void ctc1(uint32_t instr) {
+    if (rd(instr) != 31) return;
+    if (rt(instr) == 0) as.mov(x86_spilld(32 + dev_cop1), 0);
+    else move(32 + dev_cop1, rt(instr));
   }
 
   template <typename T>
@@ -1787,14 +1801,17 @@ struct MipsJit {
   }
 
   uint32_t cop1(uint32_t instr, uint32_t pc) {
-    // only handles single-precision float (no fixed points or doubles)
     uint32_t next_pc = pc + 4;
     switch ((instr >> 24) & 0x3) {
       case 0x0: // COP1/0
         switch (rs(instr)) {
-          case 0x0: mfc1(instr); break;
-          case 0x4: mtc1(instr); break;
-          default: printf("COP1 instruction %x\n", instr); break;
+          case 0x0: mfc1<false>(instr); break;
+          case 0x1: mfc1<true>(instr); break;
+          case 0x2: cfc1(instr); break;
+          case 0x4: mtc1<false>(instr); break;
+          case 0x5: mtc1<true>(instr); break;
+          case 0x6: ctc1(instr); break;
+          default: invalid(instr); break;
         }
         break;
       case 0x1: // COP1/3
@@ -1834,7 +1851,7 @@ struct MipsJit {
           case 0x38: case 0x3a: case 0x3c: case 0x3e:
           case 0x39: case 0x3b: case 0x3d: case 0x3f:
             c_fmt(instr); break;
-          default: printf("COP1 instruction %x\n", instr); break;
+          default: invalid(instr); break; 
         }
         break;
       default: printf("COP1 instruction %x\n", instr); break;
