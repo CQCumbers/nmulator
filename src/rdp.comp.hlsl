@@ -23,7 +23,7 @@ StructuredBuffer<RDPCommand> cmds : register(t0);
 StructuredBuffer<PerTileData> tiles : register(t1);
 StructuredBuffer<RDPTile> texes : register(t2);
 static const uint width = 320;
-static const uint pixel_size = 4;
+static const uint pixel_size = 2;
 
 ByteAddressBuffer tmem : register(t3);
 RWByteAddressBuffer pixels : register(t4);

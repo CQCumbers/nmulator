@@ -31,7 +31,7 @@ namespace R4300 {
   template <bool write>
   void rsp_dma(uint32_t val) {
     uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
-    printf("RSP DMA with skip %d, count %d, len %d\n", skip, count, len);
+    printf("RSP DMA with count %d, len %d, rdram %x, mem %x\n", count, len, rsp_cop0[1], rsp_cop0[0]);
     uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
     for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
       if (write) memcpy(ram, mem, len + 1); else memcpy(mem, ram, len + 1);
@@ -269,7 +269,7 @@ namespace R4300 {
         if ((val &= 0x3ff) == vi_height) return;
         vi_height = val; vi_dirty = true; return;
       // Audio Interface
-      case 0x4500000: ai_used = 0; ai_run = 1; return;
+      case 0x4500000: ai_used = 0; ai_run = true; return;
       case 0x4500004: ai_len = val & 0x3ff8; return;
       case 0x4500008: ai_run = val & 0x1; return;
       case 0x450000c: mi_irqs &= ~0x4; return;
@@ -405,7 +405,7 @@ namespace R4300 {
     // setup RSP
     RSP::dmem = pages[0] + 0x04000000;
     RSP::imem = pages[0] + 0x04001000;
-    rsp_cop0[4] = 0x1;
+    rsp_cop0[4] = 0x1, rsp_cop0[11] = 0x88;
   }
 }
 
