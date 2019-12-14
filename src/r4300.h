@@ -31,7 +31,7 @@ namespace R4300 {
   template <bool write>
   void rsp_dma(uint32_t val) {
     uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
-    printf("RSP DMA with count %d, len %d, rdram %x, mem %x\n", count, len, rsp_cop0[1], rsp_cop0[0]);
+    printf("RSP DMA with count %d, len %d, rdram %llx, mem %llx\n", count, len, rsp_cop0[1], rsp_cop0[0]);
     uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
     for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
       if (write) memcpy(ram, mem, len + 1); else memcpy(mem, ram, len + 1);
@@ -53,12 +53,6 @@ namespace R4300 {
   SDL_Renderer *renderer = nullptr;
   SDL_Texture *texture = nullptr;
   uint8_t *pixels = nullptr;
-
-  void write_rdp(uint32_t *rdp_out) {
-    uint32_t height = vi_height >> !(vi_status & 0x40);
-    for (uint32_t i = 0; rdp_out && i < vi_width * height; ++i)
-      write<uint32_t>(vi_origin + (i << 2), rdp_out[i]);
-  }
 
   void vi_update(uint32_t cycles) {
     vi_line_progress += cycles;
@@ -248,9 +242,7 @@ namespace R4300 {
       case 0x4080000: RSP::pc = val & 0xfff; return;
       // RDP Interface
       case 0x4100000: RDP::pc_start = val & addr_mask; return;
-      case 0x4100004:
-        RDP::pc_end = val & addr_mask;
-        write_rdp(RDP::update(1)); return;
+      case 0x4100004: RDP::pc_end = val & addr_mask; RDP::update(1); return;
       case 0x410000c: RDP::status = _pext_u32(val, 0x2aa); return;
       // MIPS Interface
       case 0x4300000: if (val & 0x800) mi_irqs &= ~0x20; return;

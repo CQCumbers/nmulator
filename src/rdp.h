@@ -26,6 +26,10 @@ typedef struct RDPTile {
   uint32_t mask[2], shift[2];
 } tex_t;
 
+typedef struct GlobalData {
+  uint32_t width, size;
+} global_t;
+
 namespace Vulkan {
   VkDevice device = VK_NULL_HANDLE;
   uint32_t queue_idx = 0;
@@ -35,7 +39,7 @@ namespace Vulkan {
 
   uint8_t *mapped_mem;
   const uint32_t group_size = 8, max_cmds = 64;
-  const uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
+  uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0;
 
   const VkDeviceSize cmds_size = max_cmds * sizeof(cmd_t);
@@ -52,7 +56,12 @@ namespace Vulkan {
   tex_t *texes_ptr() { return reinterpret_cast<tex_t*>(mapped_mem + texes_offset); }
   VkBuffer texes = VK_NULL_HANDLE;
 
-  const VkDeviceSize tmem_offset = texes_offset + texes_size;
+  const VkDeviceSize globals_offset = texes_offset + texes_size;
+  const VkDeviceSize globals_size = sizeof(global_t);
+  global_t *globals_ptr() { return reinterpret_cast<global_t*>(mapped_mem + globals_offset); }
+  VkBuffer globals = VK_NULL_HANDLE;
+
+  const VkDeviceSize tmem_offset = globals_offset + globals_size;
   const VkDeviceSize tmem_size = 0x1000;
   uint8_t *tmem_ptr() { return mapped_mem + tmem_offset; }
   VkBuffer tmem = VK_NULL_HANDLE;
@@ -111,11 +120,12 @@ namespace Vulkan {
       {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
       {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
       {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
-      {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0}
+      {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
+      {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0}
     };
     const VkDescriptorSetLayoutCreateInfo desc_layout_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 5, .pBindings = bindings
+      .bindingCount = 6, .pBindings = bindings
     };
     vkCreateDescriptorSetLayout(device, &desc_layout_info, 0, desc_layout);
     // create compute pipeline with shader and descriptor set layout
@@ -169,6 +179,10 @@ namespace Vulkan {
     buffer_info.size = texes_size;
     vkCreateBuffer(device, &buffer_info, 0, &texes);
     vkBindBufferMemory(device, texes, *memory, texes_offset);
+    // create globals buffer
+    buffer_info.size = globals_size;
+    vkCreateBuffer(device, &buffer_info, 0, &globals);
+    vkBindBufferMemory(device, globals, *memory, globals_offset);
     // create tmem buffer
     buffer_info.size = tmem_size;
     vkCreateBuffer(device, &buffer_info, 0, &tmem);
@@ -182,7 +196,7 @@ namespace Vulkan {
   void init_descriptors(const VkDescriptorSetLayout &layout, VkDescriptorSet *descriptors) {
     // allocate descriptor set from descriptor pool
     const VkDescriptorPoolSize pool_size = {
-      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 5
+      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 6
     };
     const VkDescriptorPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -200,11 +214,12 @@ namespace Vulkan {
       { .buffer = cmds, .offset = 0, .range = VK_WHOLE_SIZE },
       { .buffer = tiles, .offset = 0, .range = VK_WHOLE_SIZE },
       { .buffer = texes, .offset = 0, .range = VK_WHOLE_SIZE },
+      { .buffer = globals, .offset = 0, .range = VK_WHOLE_SIZE },
       { .buffer = tmem, .offset = 0, .range = VK_WHOLE_SIZE },
       { .buffer = pixels, .offset = 0, .range = VK_WHOLE_SIZE }
     };
-    VkWriteDescriptorSet write_descriptors[5];
-    for (uint8_t i = 0; i < 5; ++i) {
+    VkWriteDescriptorSet write_descriptors[6];
+    for (uint8_t i = 0; i < 6; ++i) {
       write_descriptors[i] = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = *descriptors, .dstBinding = i,
@@ -212,7 +227,7 @@ namespace Vulkan {
         .descriptorCount = 1, .pBufferInfo = &buffer_info[i]
       };
     }
-    vkUpdateDescriptorSets(device, 5, write_descriptors, 0, 0);
+    vkUpdateDescriptorSets(device, 6, write_descriptors, 0, 0);
   }
   
   void record_commands(const VkPipelineLayout &layout, const VkPipeline &pipeline,
@@ -320,7 +335,8 @@ namespace R4300 {
   extern uint32_t mi_irqs;
   template <typename T>
   int64_t read(uint32_t addr);
-  void write_rdp(uint32_t *rdp_out);
+  template <typename T>
+  void write(uint32_t addr, int64_t val);
 }
 
 namespace RDP {
@@ -328,11 +344,39 @@ namespace RDP {
   uint64_t &pc_start = rsp_cop0[8], &pc_end = rsp_cop0[9];
   uint64_t &pc = rsp_cop0[10], &status = rsp_cop0[11];
 
+  uint32_t img_size = 0x0, img_width = 0, img_addr = 0x0;
+  uint32_t height = 240;
   uint32_t fill = 0x0, blend = 0x0, fog = 0x0, bl_mux = 0x0;
-  uint32_t tex_size = 4, tex_width = 0, tex_addr = 0x0;
+  uint32_t tex_size = 0x0, tex_width = 0, tex_addr = 0x0;
 
   uint64_t fetch(uint32_t addr) {
     return status & 0x1 ? RSP::read<uint64_t>(addr) : R4300::read<uint64_t>(addr);
+  }
+
+  void write_image(uint32_t *rdp_out) {
+    for (uint32_t i = 0; rdp_out && i < img_width * height; ++i)
+      R4300::write<uint32_t>(img_addr + (i << 2), rdp_out[i]);
+  }
+
+  /* === Instruction Translations === */
+
+  void set_image() {
+    uint64_t instr = fetch(pc); pc += 8;
+    img_size = (instr >> 51) & 0x3;
+    img_width = ((instr >> 32) & 0x3ff) + 1;
+    img_addr = instr & 0x3ffffff;
+
+    uint32_t pix_size = 1 << (img_size - 1);
+    global_t *globals = Vulkan::globals_ptr();
+    globals->width = img_width, globals->size = pix_size;
+    Vulkan::gwidth = img_width / Vulkan::group_size;
+  }
+
+  void set_scissor() {
+    uint64_t instr = fetch(pc); pc += 8;
+    uint32_t yh = (instr >> 32) & 0xfff, yl = instr & 0xfff;
+    height = (yl >> 2) - (yh >> 2);
+    Vulkan::gheight = height / Vulkan::group_size;
   }
 
   void set_other_modes() {
@@ -362,7 +406,7 @@ namespace RDP {
 
   void set_tile() {
     // render existing tile dependent commands
-    R4300::write_rdp(Vulkan::render());
+    write_image(Vulkan::render());
     // update tile
     uint64_t instr = fetch(pc); pc += 8;
     Vulkan::texes_ptr()[(instr >> 24) & 0x7] = {
@@ -526,19 +570,24 @@ namespace RDP {
     });
   }
 
-  uint32_t *update(uint32_t cycles) {
+  void update(uint32_t cycles) {
     // interpret config instructions 
     pc = pc_start;
     while (pc != pc_end) {
       uint64_t instr = fetch(pc);
-      switch (instr >> 56) {
+      switch ((instr >> 56) & 0x3f) {
         case 0x08: fill_triangle(); break;
         case 0x09: zbuf_triangle(); break;
         case 0x0a: tex_triangle(); break;
         case 0x0c: shade_triangle(); break;
         case 0x24: tex_rectangle(); break;
         case 0x25: tex_rectangle_flip(); break;
+        case 0x27: printf("[RDP] SYNC PIPE\n"); pc += 8; break;
+        case 0x28: printf("[RDP] SYNC TILE\n"); pc += 8; break;
+        case 0x29: printf("[RDP] SYNC FULL\n"); pc += 8; break;
+        case 0x2d: set_scissor(); break;
         case 0x2f: set_other_modes(); break;
+        case 0x31: printf("[RDP] SYNC LOAD\n"); pc += 8; break;
         case 0x34: load_tile(); break;
         case 0x35: set_tile(); break;
         case 0x36: fill_rectangle(); break;
@@ -546,13 +595,14 @@ namespace RDP {
         case 0x38: set_fog(); break;
         case 0x39: set_blend(); break;
         case 0x3d: set_texture(); break;
+        case 0x3f: set_image(); break;
         default: printf("RDP instruction %llx\n", instr); pc += 8; break;
       }
     }
     // rasterize on GPU according to config
     printf("[RDP] finished!\n");
     status |= 0x80, R4300::mi_irqs |= 0x20;
-    return Vulkan::render();
+    write_image(Vulkan::render());
   }
 }
 
