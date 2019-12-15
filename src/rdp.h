@@ -339,9 +339,9 @@ namespace Vulkan {
 }
 
 namespace RSP {
-  extern uint64_t reg_array[0x86];
+  extern uint64_t reg_array[0x89];
   extern const uint8_t dev_cop0;
-  template <typename T>
+  template <typename T, bool all>
   int64_t read(uint32_t addr);
 }
 
@@ -377,6 +377,8 @@ namespace RDP {
     global_t *globals = Vulkan::globals_ptr();
     globals->width = img_width, globals->size = img_size;
     Vulkan::gwidth = img_width / Vulkan::group_size;
+    printf("RDP set image addr %llx\n", (instr & 0x3ffffff));
+    printf("RDP set image format %d\n", uint32_t(instr >> 53) & 0x7);
   }
 
   void set_scissor() {
@@ -408,6 +410,7 @@ namespace RDP {
   void set_zbuf() {
     uint64_t instr = fetch(pc); pc += 8;
     zbuf_addr = R4300::pages[0] + (instr & 0x3ffffff);
+    printf("RDP set ZBUF addr %llx\n", (instr & 0x3ffffff));
   }
 
   void set_texture() {
@@ -417,11 +420,13 @@ namespace RDP {
     tex_size = 1 << (((instr >> 51) & 0x3) - 1);
     tex_width = ((instr >> 32) & 0x3f) + 1;
     tex_addr = instr & 0x3ffffff;
+    printf("RDP set texture format %d\n", uint32_t(instr >> 53) & 0x7);
   }
 
   void set_tile() {
     Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
     uint64_t instr = fetch(pc); pc += 8; // update tile
+    printf("RDP set tile format %d\n", uint32_t(instr >> 53) & 0x7);
     Vulkan::texes_ptr()[(instr >> 24) & 0x7] = {
       .format = uint32_t(instr >> 53) & 0x7, .size = uint32_t(instr >> 51) & 0x3,
       .width = uint32_t((instr >> 41) & 0xff) << 3, .addr = uint32_t((instr >> 32) & 0x1ff) << 3,

@@ -187,10 +187,11 @@ namespace R4300 {
 
   template <typename T>
   int64_t mmio_read(uint32_t addr) {
+    printf("[MMIO] read from %x\n", addr);
     if ((addr & addr_mask & ~0x1fff) == 0x4000000)
-      return RSP::read<T>(addr);
+      return RSP::read<T, true>(addr);
     switch (addr & addr_mask) {
-      default: printf("[MMIO] read from %x\n", addr); return 0;
+      default:/* printf("[MMIO] read from %x\n", addr); */return 0;
       // RSP Interface
       case 0x4040000: return rsp_cop0[0];
       case 0x4040004: return rsp_cop0[1];
@@ -228,7 +229,7 @@ namespace R4300 {
   template <typename T>
   void mmio_write(uint32_t addr, uint32_t val) {
     if ((addr & addr_mask & ~0x1fff) == 0x4000000)
-      return RSP::write<T>(addr, val);
+      return RSP::write<T, true>(addr, val);
     switch (addr & addr_mask) {
       default: printf("[MMIO] write to %x: %x\n", addr, val); return;
       // RSP Interface
@@ -337,7 +338,8 @@ namespace R4300 {
     uint64_t &count = reg_array[9 + dev_cop0];
     uint64_t compare = reg_array[11 + dev_cop0];
     uint64_t new_c = (count + cycles) & 0xffffffff;
-    if ((count >= compare) ^ (new_c >= compare)) reg_array[13 + dev_cop0] |= 0x8000;
+    if (((count >= compare) ^ (new_c >= compare)) || (compare == 0 && new_c < count))
+      reg_array[13 + dev_cop0] |= 0x8000;
     count = new_c;
 
     // if interrupt enabled and triggered, set pc to handler address

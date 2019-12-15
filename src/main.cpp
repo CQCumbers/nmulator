@@ -38,7 +38,6 @@ int main(int argc, char* argv[]) {
     R4300::pc = block.code();
 
     if (!RSP::halted()) {
-      printf("RD P status: %llx\n", RDP::status);
       Block &block2 = rsp_blocks[RSP::pc];
       if (!block2.valid(RSP::fetch(RSP::pc))) {
         block2.hash = RSP::fetch(RSP::pc);

@@ -168,16 +168,16 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   if (GlobalID.x >= global.width) return;
   uint tile_pos = GlobalID.y * global.width + GlobalID.x;
   uint pixel = pixels.Load(tile_pos * global.size);
-  uint zval = zbuf.Load(tile_pos * global.size);
+  //uint zval = zbuf.Load(tile_pos * global.size);
   PerTileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < tile.n_cmds; ++i) {
     RDPCommand cmd = cmds[tile.cmd_idxs[i]];
     uint coverage = visible(GlobalID.xy, cmd);
     uint color = sample_color(GlobalID.xy, cmd);
-    uint z = sample_z(GlobalID.xy, cmd);
-    if (coverage == 0 || z < zval) continue;
+    //uint z = sample_z(GlobalID.xy, cmd);
+    if (coverage == 0/* || z < zval*/) continue;
     pixel = shade(pixel, color, coverage, cmd);
-    if (cmd.type & 0x4) zval = z;
+    //if (cmd.type & 0x4) zval = z;
   }
   if (global.size == 4) pixels.Store(tile_pos * global.size, pixel);
   else if (tile_pos & 0x1) {
@@ -187,11 +187,11 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
     pixels.InterlockedAnd(tile_pos * global.size, 0xffff0000);
     pixels.InterlockedOr(tile_pos * global.size, pixel & 0xffff);
   }
-  if (tile_pos & 0x1) {
+  /*if (tile_pos & 0x1) {
     zbuf.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
     zbuf.InterlockedOr(tile_pos * global.size, (zval & 0xffff) << 16);
   } else {
     zbuf.InterlockedAnd(tile_pos * global.size, 0xffff0000);
     zbuf.InterlockedOr(tile_pos * global.size, zval & 0xffff);
-  }
+  }*/
 }

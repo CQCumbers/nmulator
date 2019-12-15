@@ -12,11 +12,12 @@ namespace R4300 {
 namespace RSP {
   uint8_t *dmem = nullptr;
   uint8_t *imem = nullptr;
-  constexpr uint32_t addr_mask = 0x1fff;
+  constexpr uint32_t addr_mask = 0xfff;
 
-  template <typename T>
+  template <typename T, bool all = false>
   int64_t read(uint32_t addr) {
-    T *ptr = reinterpret_cast<T*>(dmem + (addr & addr_mask));
+    const uint32_t mask = (all ? 0x1fff : addr_mask);
+    T *ptr = reinterpret_cast<T*>(dmem + (addr & mask));
     switch (sizeof(T)) {
       case 1: return *ptr;
       case 2: return static_cast<T>(__builtin_bswap16(*ptr));
@@ -25,9 +26,10 @@ namespace RSP {
     }
   }
 
-  template <typename T>
+  template <typename T, bool all = false>
   void write(uint32_t addr, T val) {
-    T *ptr = reinterpret_cast<T*>(dmem + (addr & addr_mask));
+    const uint32_t mask = (all ? 0x1fff : addr_mask);
+    T *ptr = reinterpret_cast<T*>(dmem + (addr & mask));
     switch (sizeof(T)) {
       case 1: *ptr = val; return;
       case 2: *ptr = __builtin_bswap16(val); return;
@@ -37,13 +39,13 @@ namespace RSP {
   }
   
   uint32_t fetch(uint32_t addr) {
-    uint32_t *ptr = reinterpret_cast<uint32_t*>(imem + (addr & 0xfff));
+    uint32_t *ptr = reinterpret_cast<uint32_t*>(imem + (addr & addr_mask));
     return __builtin_bswap32(*ptr);
   }
 
-  uint64_t reg_array[0x86] = {0};
+  uint64_t reg_array[0x89] = {0};
   uint32_t pc = 0x0;
-  constexpr uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40;
+  constexpr uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
 
   bool halted() {
     return reg_array[4 + dev_cop0] & 0x1;

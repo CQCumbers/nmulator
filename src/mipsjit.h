@@ -26,6 +26,7 @@ struct MipsJit {
   static constexpr uint8_t hi = R4300::hi, lo = R4300::lo;
   static constexpr uint8_t dev_cop0 = (is_rsp ? RSP::dev_cop0 : R4300::dev_cop0);
   static constexpr uint8_t dev_cop1 = R4300::dev_cop1, dev_cop2 = RSP::dev_cop2;
+  static constexpr uint8_t dev_cop2c = RSP::dev_cop2c;
 
   MipsJit(CodeHolder &code) : as(&code) {}
 
@@ -203,7 +204,6 @@ struct MipsJit {
       case 2: base = 0x0e0e0a0a06060202; offset = (e & 0x1) * 2; break;
       default: return;
     }
-    printf("[COP2] element broadcast\n");
     as.mov(x86::rax, base); as.movq(x86::xmm0, x86::rax);
     if (offset) {
       as.pxor(x86::xmm2, x86::xmm2);
@@ -1127,11 +1127,10 @@ struct MipsJit {
     return block_end;
   }
 
-  uint32_t eret() {
-    printf("Returning from interrupt\n");
-    as.and_(x86_spilld(12 + dev_cop0), ~0x2);
-    as.mov(x86::edi, x86_spill(14 + dev_cop0));
-    as.jmp(end_label);
+  uint32_t break_(uint32_t instr, uint32_t pc) {
+    if (!is_rsp) invalid(instr);
+    as.or_(x86_spilld(4 + dev_cop0), 0x3);
+    as.mov(x86::edi, pc + 4);
     return block_end;
   }
 
@@ -1139,10 +1138,24 @@ struct MipsJit {
     printf("CACHE instruction %x\n", instr);
   }
 
-  uint32_t break_(uint32_t instr, uint32_t pc) {
-    if (!is_rsp) invalid(instr);
-    as.or_(x86_spilld(4 + dev_cop0), 0x3);
-    as.mov(x86::edi, pc + 4);
+  void tlbr(uint32_t instr) {
+    printf("TLB read\n");
+  }
+
+  template <bool random>
+  void tlbwi(uint32_t instr) {
+    printf("TLB write\n");
+  }
+
+  void tlbp(uint32_t instr) {
+    printf("TLB probe\n");
+  }
+
+  uint32_t eret() {
+    printf("Returning from interrupt\n");
+    as.and_(x86_spilld(12 + dev_cop0), ~0x2);
+    as.mov(x86::edi, x86_spill(14 + dev_cop0));
+    as.jmp(end_label);
     return block_end;
   }
 
@@ -1518,7 +1531,7 @@ struct MipsJit {
     } else if (operation == Op::add) { // doesn't handle VCO carry-in/clear
       if (rdx) as.paddsw(x86::xmm15, x86::xmm(rdx));
       else as.paddsw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
-    } else if (operation == Op::addc) { // doesn't handle VCO carry-out
+    } else if (operation == Op::addc) { // doesn't handle VCO carry-out/equal
       if (rdx) as.paddw(x86::xmm15, x86::xmm(rdx));
       else as.paddw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
     } else if (operation == Op::sub) {
@@ -1591,7 +1604,7 @@ struct MipsJit {
   }
 
   void vsar(uint32_t instr) {
-    printf("COP2 Right Shift\n");
+    printf("COP2 Store Accumulator\n");
     uint8_t acc = (rs(instr) & 0x3) + 13;
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
     if (sax) as.movdqa(x86::xmm(sax), x86::xmm(acc));
@@ -1617,55 +1630,70 @@ struct MipsJit {
     if (!rdx) as.movdqa(x86_spillq(rd(instr) * 2 + dev_cop2), x86::xmm0);
   }
 
+  void cfc2(uint32_t instr) {
+    if (rt(instr) == 0) return;
+    move(rt(instr), (rd(instr) & 0x3) + dev_cop2c);
+  }
+
+  void ctc2(uint32_t instr) {
+    if (rt(instr) == 0)
+      as.mov(x86_spilld((rd(instr) & 0x3) + dev_cop2), 0);
+    else move((rd(instr) & 0x3) + dev_cop2c, rt(instr));
+  }
+
   template <typename T>
   void ldv(uint32_t instr) {
-    printf("COP2 LDV\n");
+    // only handles T-bit aligned elements
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
+    uint32_t offset = (instr & 0x7) << __builtin_ctz(sizeof(T));
     // LDV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, offset));
     }
     as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
     x86_load_caller(); as.pop(x86::edi);
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
+    printf("COP2 LDV offset: %x, size: %lx\n", sa(instr) >> 1, sizeof(T));
     switch (sizeof(T)) {
-      case 1: as.pinsrb(result, x86::rax, 7 - sa(instr)); break;
-      case 2: as.pinsrw(result, x86::rax, 7 - (sa(instr) >> 1)); break;
-      case 3: as.pinsrd(result, x86::rax, 7 - (sa(instr) >> 2)); break;
-      case 4: as.pinsrq(result, x86::rax, 7 - (sa(instr) >> 3)); break;
+      case 1: as.pinsrb(result, x86::rax, 0xf - (sa(instr) >> 1)); break;
+      case 2: as.pinsrw(result, x86::rax, 0x7 - (sa(instr) >> 2)); break;
+      case 4: as.pinsrd(result, x86::rax, 0x3 - (sa(instr) >> 3)); break;
+      case 8: as.pinsrq(result, x86::rax, 0x1 - (sa(instr) >> 4)); break;
     }
     if (!rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm0);
   }
 
   template <typename T>
   void sdv(uint32_t instr) {
-    printf("COP2 SDV\n");
+    // only handles T-bit aligned elements
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
+    uint32_t offset = (instr & 0x7) << __builtin_ctz(sizeof(T));
     // SDV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
     else {
       as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, offset));
     }
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
+    printf("COP2 SDV offset: %x, size: %lx\n", sa(instr) >> 1, sizeof(T));
     switch (sizeof(T)) {
-      case 1: as.pextrb(x86::rsi, result, 7 - sa(instr)); break;
-      case 2: as.pextrw(x86::rsi, result, 7 - (sa(instr) >> 1)); break;
-      case 3: as.pextrd(x86::rsi, result, 7 - (sa(instr) >> 2)); break;
-      case 4: as.pextrq(x86::rsi, result, 7 - (sa(instr) >> 3)); break;
+      case 1: as.pextrb(x86::rsi, result, 0xf - (sa(instr) >> 1)); break;
+      case 2: as.pextrw(x86::rsi, result, 0x7 - (sa(instr) >> 2)); break;
+      case 4: as.pextrd(x86::rsi, result, 0x3 - (sa(instr) >> 3)); break;
+      case 8: as.pextrq(x86::rsi, result, 0x1 - (sa(instr) >> 4)); break;
     }
     as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
     x86_load_caller(); as.pop(x86::edi);
   }
 
   void lqv(uint32_t instr) {
-    // only handles 128-bit aligned
+    // only handles 128-bit aligned elements and addresses
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     uint32_t offset = (instr & 0x7) << 4;
     printf("COP2 LQV offset: %x\n", offset);
@@ -1687,7 +1715,7 @@ struct MipsJit {
   }
 
   void sqv(uint32_t instr) {
-    // only handles 128-bit aligned
+    // only handles 128-bit aligned elements and addresses
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     uint32_t offset = (instr & 0x7) << 4;
     printf("COP2 SQV offset: %x\n", offset);
@@ -1706,6 +1734,30 @@ struct MipsJit {
     as.pop(x86::edi); as.add(x86::edi, 8);
     as.call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
     x86_load_caller(); as.pop(x86::edi);
+  }
+
+  void lwc2(uint32_t instr) {
+    switch (rd(instr)) {
+      case 0x0: ldv<uint8_t>(instr); break;
+      case 0x1: ldv<uint16_t>(instr); break;
+      case 0x2: ldv<uint32_t>(instr); break;
+      case 0x3: ldv<uint64_t>(instr); break;
+      case 0x4: lqv(instr); break;
+      case 0x5: printf("COP2 instruction LQR\n"); break;
+      default: invalid(instr); break;
+    }
+  }
+
+  void swc2(uint32_t instr) {
+    switch (rd(instr)) {
+      case 0x0: sdv<uint8_t>(instr); break;
+      case 0x1: sdv<uint16_t>(instr); break;
+      case 0x2: sdv<uint32_t>(instr); break;
+      case 0x3: sdv<uint64_t>(instr); break;
+      case 0x4: sqv(instr); break;
+      case 0x5: printf("COP2 instruction SQR\n"); break;
+      default: invalid(instr); break;
+    }
   }
 
   /* === Basic Block Translation ==*/
@@ -1785,17 +1837,23 @@ struct MipsJit {
       case 0x0: // COP0/0
         switch (rs(instr)) {
           case 0x0: mfc0(instr); break;
+          case 0x1: mfc0(instr); break;
           case 0x4: mtc0(instr); break;
-          default: printf("COP0 instruction %x\n", instr); break;
+          case 0x5: mtc0(instr); break;
+          default: invalid(instr); break;
         }
         break;
       case 0x2: // COP0/2
         switch (instr & 0x3f) {
+          case 0x01: tlbr(instr); break;
+          case 0x02: tlbwi<false>(instr); break;
+          case 0x06: tlbwi<true>(instr); break;
+          case 0x08: tlbp(instr); break;
           case 0x18: next_pc = eret(); break;
-          default: printf("COP0 instruction %x\n", instr); break;
+          default: invalid(instr); break;
         }
         break;
-      default: printf("COP0 instruction %x\n", instr); break;
+      default: invalid(instr); break;
     }
     return next_pc;
   }
@@ -1854,7 +1912,7 @@ struct MipsJit {
           default: invalid(instr); break; 
         }
         break;
-      default: printf("COP1 instruction %x\n", instr); break;
+      default: invalid(instr); break;
     }
     return next_pc;
   }
@@ -1865,8 +1923,10 @@ struct MipsJit {
       case 0x0: // COP2/0
         switch (rs(instr)) {
           case 0x0: mfc2(instr); break;
+          case 0x2: cfc2(instr); break;
           case 0x4: mtc2(instr); break;
-          default: printf("COP2 instruction %x\n", instr); break;
+          case 0x6: cfc2(instr); break;
+          default: invalid(instr); break;
         }
         break;
       case 0x2: case 0x3: // COP2/2
@@ -1903,7 +1963,7 @@ struct MipsJit {
           default: printf("COP2 instruction %x\n", instr); break;
         }
         break;
-      default: printf("COP2 instruction %x\n", instr); break;
+      default: invalid(instr); break;
     }
     return next_pc;
   }
@@ -1918,7 +1978,7 @@ struct MipsJit {
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
-      if (is_rsp) printf("%x: %x\n", pc, instr);
+      //if (is_rsp) printf("%x: %x\n", pc, instr);
       pc = next_pc, next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
@@ -1966,12 +2026,12 @@ struct MipsJit {
         case 0x2f: cache(instr); break;
         case 0x30: lw<int32_t>(instr); break; // LL
         case 0x31: lwc1<int32_t>(instr); break;
-        case 0x32: lqv(instr); break;
+        case 0x32: lwc2(instr); break;
         case 0x35: lwc1<uint64_t>(instr); break;
         case 0x37: lw<uint64_t>(instr); break;
         case 0x38: sw<uint32_t>(instr); break; // SC
         case 0x39: swc1<uint32_t>(instr); break;
-        case 0x3a: sqv(instr); break;
+        case 0x3a: swc2(instr); break;
         case 0x3d: swc1<uint64_t>(instr); break;
         case 0x3f: sw<uint64_t>(instr); break;
         default: invalid(instr); break;
