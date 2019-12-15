@@ -94,12 +94,23 @@ namespace R4300 {
 
   /* === Audio Interface registers === */
 
-  constexpr uint32_t ai_status = 0xffffffff;
-  uint32_t ai_used = 0, ai_len = 0;
-  bool ai_run = false;
+  uint32_t ai_status = ~0x0, ai_ram = 0x0, ai_len = 0;
+  uint8_t ai_run = 0x1, ai_start = 0;
+  SDL_AudioDeviceID audio_dev;
+
+  void ai_dma(uint32_t len) {
+    if (!ai_run || ai_start != 0) return;
+    ai_start = ai_len, ai_len = len & 0x3ff8; 
+    if (ai_start != 0) ai_status |= 0x80000001;
+    SDL_QueueAudio(audio_dev, pages[0] + ai_ram, ai_len);
+  }
 
   void ai_update(uint32_t cycles) {
-    if (ai_run && ai_used < 10000 && (ai_used += cycles) >= 10000) mi_irqs |= 0x4;
+    if (!ai_run || ai_len == 0) return;
+    uint32_t new_len = SDL_GetQueuedAudioSize(audio_dev);
+    if (new_len <= ai_start)
+      ai_status &= ~0x80000001, ai_start = 0, mi_irqs |= 0x4;
+    ai_len = new_len - ai_start;
   }
 
   /* === Peripheral & Serial Interface registers === */
@@ -187,11 +198,12 @@ namespace R4300 {
 
   template <typename T>
   int64_t mmio_read(uint32_t addr) {
-    printf("[MMIO] read from %x\n", addr);
     if ((addr & addr_mask & ~0x1fff) == 0x4000000)
       return RSP::read<T, true>(addr);
+    printf("[MMIO] read from %x\n", addr);
     switch (addr & addr_mask) {
-      default:/* printf("[MMIO] read from %x\n", addr); */return 0;
+      //default: printf("[MMIO] read from %x\n", addr); return 0;
+      default: return 0;
       // RSP Interface
       case 0x4040000: return rsp_cop0[0];
       case 0x4040004: return rsp_cop0[1];
@@ -261,8 +273,8 @@ namespace R4300 {
         if ((val &= 0x3ff) == vi_height) return;
         vi_height = val; vi_dirty = true; return;
       // Audio Interface
-      case 0x4500000: ai_used = 0; ai_run = true; return;
-      case 0x4500004: ai_len = val & 0x3ff8; return;
+      case 0x4500000: ai_ram = val & 0xfffff8; return;
+      case 0x4500004: ai_dma(val); return;
       case 0x4500008: ai_run = val & 0x1; return;
       case 0x450000c: mi_irqs &= ~0x4; return;
       // Peripheral Interface
@@ -389,11 +401,19 @@ namespace R4300 {
       nullptr, 0x200000, PROT_READ | PROT_WRITE,
       MAP_ANONYMOUS | MAP_SHARED, 0, 0
     ));
-    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
     SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
     SDL_RenderClear(renderer);
     Vulkan::init();
+
+    // setup AI
+    SDL_AudioSpec spec = {
+      .freq = 44100, .format = AUDIO_S16MSB,
+      .channels = 2, .samples = 512, .callback = nullptr
+    };
+    audio_dev = SDL_OpenAudioDevice(nullptr, 0, &spec, nullptr, 0);
+    SDL_PauseAudioDevice(audio_dev, 0);
 
     // setup RSP
     RSP::dmem = pages[0] + 0x04000000;
