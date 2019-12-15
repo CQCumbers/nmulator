@@ -16,7 +16,7 @@ typedef struct RDPCommand {
   uint32_t fill, blend, fog, lft, type;
   uint32_t shade[4], sde[4], sdx[4];
   uint32_t tile, bl_mux;
-  uint32_t zbuf, zde, zdx;
+  uint32_t zpos, zde, zdx;
   uint32_t tex[2], tde[2], tdx[2];
 } cmd_t;
 
@@ -70,7 +70,12 @@ namespace Vulkan {
   const VkDeviceSize pixels_size = 320 * 240 * sizeof(uint32_t);
   uint8_t *pixels_ptr() { return mapped_mem + pixels_offset; }
   VkBuffer pixels = VK_NULL_HANDLE;
-  const VkDeviceSize total_size = pixels_offset + pixels_size;
+
+  const VkDeviceSize zbuf_offset = pixels_offset + pixels_size;
+  const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint16_t);
+  uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
+  VkBuffer zbuf = VK_NULL_HANDLE;
+  const VkDeviceSize total_size = zbuf_offset + zbuf_size;
 
   /* === Vulkan Initialization == */
 
@@ -121,11 +126,12 @@ namespace Vulkan {
       {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
       {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
       {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
-      {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0}
+      {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
+      {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0}
     };
     const VkDescriptorSetLayoutCreateInfo desc_layout_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 6, .pBindings = bindings
+      .bindingCount = 7, .pBindings = bindings
     };
     vkCreateDescriptorSetLayout(device, &desc_layout_info, 0, desc_layout);
     // create compute pipeline with shader and descriptor set layout
@@ -191,12 +197,16 @@ namespace Vulkan {
     buffer_info.size = pixels_size;
     vkCreateBuffer(device, &buffer_info, 0, &pixels);
     vkBindBufferMemory(device, pixels, *memory, pixels_offset);
+    // create zbuf buffer
+    buffer_info.size = zbuf_size;
+    vkCreateBuffer(device, &buffer_info, 0, &zbuf);
+    vkBindBufferMemory(device, zbuf, *memory, zbuf_offset);
   }
 
   void init_descriptors(const VkDescriptorSetLayout &layout, VkDescriptorSet *descriptors) {
     // allocate descriptor set from descriptor pool
     const VkDescriptorPoolSize pool_size = {
-      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 6
+      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 7
     };
     const VkDescriptorPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -216,10 +226,11 @@ namespace Vulkan {
       { .buffer = texes, .offset = 0, .range = VK_WHOLE_SIZE },
       { .buffer = globals, .offset = 0, .range = VK_WHOLE_SIZE },
       { .buffer = tmem, .offset = 0, .range = VK_WHOLE_SIZE },
-      { .buffer = pixels, .offset = 0, .range = VK_WHOLE_SIZE }
+      { .buffer = pixels, .offset = 0, .range = VK_WHOLE_SIZE },
+      { .buffer = zbuf, .offset = 0, .range = VK_WHOLE_SIZE }
     };
-    VkWriteDescriptorSet write_descriptors[6];
-    for (uint8_t i = 0; i < 6; ++i) {
+    VkWriteDescriptorSet write_descriptors[7];
+    for (uint8_t i = 0; i < 7; ++i) {
       write_descriptors[i] = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = *descriptors, .dstBinding = i,
@@ -227,7 +238,7 @@ namespace Vulkan {
         .descriptorCount = 1, .pBufferInfo = &buffer_info[i]
       };
     }
-    vkUpdateDescriptorSets(device, 6, write_descriptors, 0, 0);
+    vkUpdateDescriptorSets(device, 7, write_descriptors, 0, 0);
   }
   
   void record_commands(const VkPipelineLayout &layout, const VkPipeline &pipeline,
@@ -317,10 +328,13 @@ namespace Vulkan {
     cmds_ptr()[n_cmds++] = cmd;
   }
 
-  uint32_t *render() {
-    if (n_cmds == 0) return nullptr;
+  void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
+    if (!pixels || n_cmds == 0) return;
+    memcpy(pixels_ptr(), pixels, len);
+    //if (zbuf) memcpy(zbuf_ptr(), zbuf, len);
     run_commands(); n_cmds = 0; memset(tiles_ptr(), 0, tiles_size);
-    return reinterpret_cast<uint32_t*>(Vulkan::pixels_ptr());
+    memcpy(pixels, pixels_ptr(), len);
+    //if (zbuf) memcpy(zbuf, zbuf_ptr(), len);
   }
 }
 
@@ -333,10 +347,9 @@ namespace RSP {
 
 namespace R4300 {
   extern uint32_t mi_irqs;
+  extern uint8_t *pages[0x100];
   template <typename T>
   int64_t read(uint32_t addr);
-  template <typename T>
-  void write(uint32_t addr, int64_t val);
 }
 
 namespace RDP {
@@ -344,8 +357,8 @@ namespace RDP {
   uint64_t &pc_start = rsp_cop0[8], &pc_end = rsp_cop0[9];
   uint64_t &pc = rsp_cop0[10], &status = rsp_cop0[11];
 
-  uint32_t img_size = 0x0, img_width = 0, img_addr = 0x0;
-  uint32_t height = 240;
+  uint32_t img_size = 0x0, img_width = 0, height = 240;
+  uint8_t *img_addr = nullptr, *zbuf_addr = nullptr;
   uint32_t fill = 0x0, blend = 0x0, fog = 0x0, bl_mux = 0x0;
   uint32_t tex_size = 0x0, tex_width = 0, tex_addr = 0x0;
 
@@ -353,22 +366,16 @@ namespace RDP {
     return status & 0x1 ? RSP::read<uint64_t>(addr) : R4300::read<uint64_t>(addr);
   }
 
-  void write_image(uint32_t *rdp_out) {
-    for (uint32_t i = 0; rdp_out && i < img_width * height; ++i)
-      R4300::write<uint32_t>(img_addr + (i << 2), rdp_out[i]);
-  }
-
   /* === Instruction Translations === */
 
   void set_image() {
     uint64_t instr = fetch(pc); pc += 8;
-    img_size = (instr >> 51) & 0x3;
+    img_size = 1 << (((instr >> 51) & 0x3) - 1);
     img_width = ((instr >> 32) & 0x3ff) + 1;
-    img_addr = instr & 0x3ffffff;
+    img_addr = R4300::pages[0] + (instr & 0x3ffffff);
 
-    uint32_t pix_size = 1 << (img_size - 1);
     global_t *globals = Vulkan::globals_ptr();
-    globals->width = img_width, globals->size = pix_size;
+    globals->width = img_width, globals->size = img_size;
     Vulkan::gwidth = img_width / Vulkan::group_size;
   }
 
@@ -384,31 +391,37 @@ namespace RDP {
   }
 
   void set_fill() {
-    fill = fetch(pc) & 0xffffffff; pc += 8;
+    uint64_t instr = fetch(pc); pc += 8;
+    fill = __builtin_bswap32(instr & 0xffffffff);
   }
 
   void set_fog() {
-    fog = fetch(pc) & 0xffffffff; pc += 8;
+    uint64_t instr = fetch(pc); pc += 8;
+    fog = __builtin_bswap32(instr & 0xffffffff);
   }
 
   void set_blend() {
-    blend = fetch(pc) & 0xffffffff; pc += 8;
+    uint64_t instr = fetch(pc); pc += 8;
+    blend = __builtin_bswap32(instr & 0xffffffff);
+  }
+
+  void set_zbuf() {
+    uint64_t instr = fetch(pc); pc += 8;
+    zbuf_addr = R4300::pages[0] + (instr & 0x3ffffff);
   }
 
   void set_texture() {
     // maybe send to gpu here, and do load_tile on gpu with native textures?
     // handling mid-frame tmem changes, formats, etc. might be easier
     uint64_t instr = fetch(pc); pc += 8;
-    tex_size = (instr >> 51) & 0x3;
+    tex_size = 1 << (((instr >> 51) & 0x3) - 1);
     tex_width = ((instr >> 32) & 0x3f) + 1;
     tex_addr = instr & 0x3ffffff;
   }
 
   void set_tile() {
-    // render existing tile dependent commands
-    write_image(Vulkan::render());
-    // update tile
-    uint64_t instr = fetch(pc); pc += 8;
+    Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
+    uint64_t instr = fetch(pc); pc += 8; // update tile
     Vulkan::texes_ptr()[(instr >> 24) & 0x7] = {
       .format = uint32_t(instr >> 53) & 0x7, .size = uint32_t(instr >> 51) & 0x3,
       .width = uint32_t((instr >> 41) & 0xff) << 3, .addr = uint32_t((instr >> 32) & 0x1ff) << 3,
@@ -422,17 +435,13 @@ namespace RDP {
     uint32_t sh = (instr >> 12) & 0xfff, th = instr & 0xfff;
     uint32_t sl = (instr >> 44) & 0xfff, tl = (instr >> 32) & 0xfff;
     uint32_t tex_mem = Vulkan::texes_ptr()[(instr >> 24) & 0x7].addr;
-    uint32_t pix_size = 1 << (tex_size - 1);
     // copy tile from dram to tmem
-    uint32_t offset = (tl * tex_width + sl) * pix_size, width = (((sh - sl) >> 2) + 1) * pix_size;
+    uint32_t offset = (tl * tex_width + sl) * tex_size, width = (((sh - sl) >> 2) + 1) * tex_size;
     uint8_t *mem = Vulkan::tmem_ptr() + tex_mem; uint32_t ram = tex_addr + offset;
     uint32_t width_pad = (width + 0x7) & ~0x7;
     for (uint32_t i = 0; i <= (th - tl) >> 2; ++i) {
-      for (uint32_t j = 0; j < width; ++j) {
-        //uint32_t k = (((j & ~0x3) >> 1) | (j & 0x1)) + ((j & 0x2) << 10);
-        mem[j] = R4300::read<uint8_t>(ram + j);
-      }
-      mem += width_pad, ram += tex_width * pix_size;
+      memcpy(mem, R4300::pages[0] + ram, width);
+      mem += width_pad, ram += tex_width * tex_size;
     }
   }
 
@@ -530,7 +539,7 @@ namespace RDP {
       .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
       .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0x4,
       .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
-      .zbuf = uint32_t(instr[4] >> 32), .zde = uint32_t(instr[5] >> 32),
+      .zpos = uint32_t(instr[4] >> 32), .zde = uint32_t(instr[5] >> 32),
       .zdx = uint32_t(instr[4] & 0xffffffff)
     });
   }
@@ -576,6 +585,7 @@ namespace RDP {
     while (pc != pc_end) {
       uint64_t instr = fetch(pc);
       switch ((instr >> 56) & 0x3f) {
+        case 0x00: pc += 8; break;
         case 0x08: fill_triangle(); break;
         case 0x09: zbuf_triangle(); break;
         case 0x0a: tex_triangle(); break;
@@ -595,6 +605,7 @@ namespace RDP {
         case 0x38: set_fog(); break;
         case 0x39: set_blend(); break;
         case 0x3d: set_texture(); break;
+        case 0x3e: set_zbuf(); break;
         case 0x3f: set_image(); break;
         default: printf("RDP instruction %llx\n", instr); pc += 8; break;
       }
@@ -602,7 +613,7 @@ namespace RDP {
     // rasterize on GPU according to config
     printf("[RDP] finished!\n");
     status |= 0x80, R4300::mi_irqs |= 0x20;
-    write_image(Vulkan::render());
+    Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
   }
 }
 

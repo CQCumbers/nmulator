@@ -72,7 +72,6 @@ namespace R4300 {
         SDL_TEXTUREACCESS_STREAMING, vi_width, height);
       vi_dirty = false;
     }
-    //write_rdp(RDP::update(cycles));
     if (format == 2) {
       uint16_t *out = reinterpret_cast<uint16_t*>(pixels);
       for (uint32_t i = 0; i < vi_width * height; ++i)

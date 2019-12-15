@@ -9,7 +9,7 @@ struct RDPCommand {
   uint fill, blend, fog, lft, type;
   uint shade[4], sde[4], sdx[4];
   uint tile, bl_mux;
-  uint zbuf, zde, zdx;
+  uint zpos, zde, zdx;
   uint tex[2], tde[2], tdx[2];
 };
 
@@ -30,20 +30,22 @@ struct GlobalData {
 
 [[vk::binding(4)]] ByteAddressBuffer tmem;
 [[vk::binding(5)]] RWByteAddressBuffer pixels;
+[[vk::binding(6)]] RWByteAddressBuffer zbuf;
 
 uint read_rgba16(uint input) {
-  // convert RGBA 5551 to RGBA8888
-  uint output = ((input >> 3) & 0x1f) << 27;
-  output |= (((input & 0x7) << 2) | ((input >> 14) & 0x3)) << 19;
-  output |= ((input >> 9) & 0x1f) << 11;
-  return output | ((input >> 8) & 0x1) * 0xff;
+  // GBARG25153 to ABGR8888
+  uint output = ((input >> 3) & 0x1f) << 3;
+  output |= ((input & 0x7) << 2 | ((input >> 14) & 0x3)) << 11;
+  output |= ((input >> 9) & 0x1f) << 19;
+  return output | (((input >> 8) & 0x1) * 0xff) << 24;
 }
 
 uint write_rgba16(uint input) {
-  uint output = ((input >> 27) & 0x1f) << 11;
-  output |= ((input >> 19) & 0x1f) << 6;
-  output |= ((input >> 11) & 0x1f) << 1;
-  return output | (input >> 7) & 0x1;
+  // ABGR8888 to GBARG25153
+  uint output = ((input >> 3) & 0x1f) << 3;
+  output |= ((input >> 13) & 0x7) | (((input >> 11) & 0x3) << 14);
+  output |= ((input >> 19) & 0x1f) << 9;
+  return output | (((input >> 31) & 0x1) << 8);
 }
 
 uint read_texel(RDPTile tex, uint s, uint t) {
@@ -93,7 +95,7 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
       channel += cmd.sde[i] * ((y - cmd.xyh[1]) >> 2);
       uint c2 = cmd.sdx[i] * ((x - x1) >> 16);
       if (c2 != 0) channel += max(c2, -channel);
-      color |= ((channel >> 16) & 0xff) << (24 - i * 8);
+      color |= ((channel >> 16) & 0xff) << (i * 8);
     }
     return color;
   }
@@ -101,13 +103,13 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
 }
 
 uint sample_z(uint2 pos, RDPCommand cmd) {
-  if ((cmd.type & 0x4) == 0) return -1;
+  if ((cmd.type & 0x4) == 0) return 0;
   uint x1 = cmd.xyh[0] + cmd.sh * (pos.y - (cmd.xyh[1] >> 2));
   uint x = pos.x - (x1 >> 16), y = pos.y - (cmd.xyh[1] >> 2);
-  uint output = cmd.zbuf, o1 = x * cmd.zdx, o2 = y * cmd.zde;
-  if (o1 != 0) output += max(o1, -output);
-  if (o2 != 0) output += max(o2, -output);
-  return output;
+  uint output = cmd.zpos, o1 = x * cmd.zdx, o2 = y * cmd.zde;
+  if (o1 != 0) output -= max(o1, -output);
+  if (o2 != 0) output -= max(o2, -output);
+  return output >> 16;
 }
 
 uint visible(uint2 pos, RDPCommand cmd) {
@@ -163,23 +165,33 @@ uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
 
 [numthreads(8, 8, 1)]
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
+  if (GlobalID.x >= global.width) return;
   uint tile_pos = GlobalID.y * global.width + GlobalID.x;
-  uint pixel = pixels.Load(tile_pos * global.size), zbuf = -1;
+  uint pixel = pixels.Load(tile_pos * global.size);
+  uint zval = zbuf.Load(tile_pos * global.size);
   PerTileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < tile.n_cmds; ++i) {
     RDPCommand cmd = cmds[tile.cmd_idxs[i]];
     uint coverage = visible(GlobalID.xy, cmd);
     uint color = sample_color(GlobalID.xy, cmd);
     uint z = sample_z(GlobalID.xy, cmd);
-    if (coverage == 0 || z > zbuf) continue;
-    pixel = shade(pixel, color, coverage, cmd), zbuf = z;
+    if (coverage == 0 || z < zval) continue;
+    pixel = shade(pixel, color, coverage, cmd);
+    if (cmd.type & 0x4) zval = z;
   }
   if (global.size == 4) pixels.Store(tile_pos * global.size, pixel);
   else if (tile_pos & 0x1) {
-    pixels.InterlockedAnd(tile_pos * global.size, 0xffff0000);
-    pixels.InterlockedOr(tile_pos * global.size, pixel & 0xffff);
-  } else {
     pixels.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
     pixels.InterlockedOr(tile_pos * global.size, (pixel & 0xffff) << 16);
+  } else {
+    pixels.InterlockedAnd(tile_pos * global.size, 0xffff0000);
+    pixels.InterlockedOr(tile_pos * global.size, pixel & 0xffff);
+  }
+  if (tile_pos & 0x1) {
+    zbuf.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
+    zbuf.InterlockedOr(tile_pos * global.size, (zval & 0xffff) << 16);
+  } else {
+    zbuf.InterlockedAnd(tile_pos * global.size, 0xffff0000);
+    zbuf.InterlockedOr(tile_pos * global.size, zval & 0xffff);
   }
 }
