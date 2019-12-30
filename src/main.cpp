@@ -25,9 +25,12 @@ int main(int argc, char* argv[]) {
   robin_hood::unordered_map<uint32_t, Block> r4300_blocks;
   robin_hood::unordered_map<uint32_t, Block> rsp_blocks;
   while (true) {
-    Block &block = r4300_blocks[R4300::pc];
-    if (!block.valid(R4300::fetch(R4300::pc))) {
-      block.hash = R4300::fetch(R4300::pc);
+    Block &block = r4300_blocks[R4300::pc & R4300::addr_mask];
+    uint32_t hash = R4300::fetch(R4300::pc);
+    //if ((R4300::pc & R4300::addr_mask) == 0x180)
+    //  printf("0x180 hash %x vs block hash %x\n", hash, block.hash);
+    if (!block.valid(hash)) {
+      block.hash = hash;
       CodeHolder code;
       code.init(runtime.codeInfo());
       MipsJit<Device::r4300> jit(code);
@@ -38,9 +41,10 @@ int main(int argc, char* argv[]) {
     R4300::pc = block.code();
 
     if (!RSP::halted()) {
-      Block &block2 = rsp_blocks[RSP::pc];
-      if (!block2.valid(RSP::fetch(RSP::pc))) {
-        block2.hash = RSP::fetch(RSP::pc);
+      Block &block2 = rsp_blocks[RSP::pc & RSP::addr_mask];
+      uint32_t hash2 = RSP::fetch(RSP::pc);
+      if (!block2.valid(hash2)) {
+        block2.hash = hash2;
         CodeHolder code;
         code.init(runtime.codeInfo());
         MipsJit<Device::rsp> jit(code);

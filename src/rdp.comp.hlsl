@@ -6,11 +6,13 @@ struct PerTileData {
 struct RDPCommand {
   uint xyh[2], xym[2], xyl[2];
   uint sh, sm, sl;
-  uint fill, blend, fog, lft, type;
   uint shade[4], sde[4], sdx[4];
-  uint tile, bl_mux;
   uint zpos, zde, zdx;
   uint tex[2], tde[2], tdx[2];
+  uint fill, fog, blend;
+  uint env, prim, zprim;
+  uint bl_mux, cc_mux, keys[3];
+  uint lft, type, tile;
 };
 
 struct RDPTile {
@@ -85,7 +87,7 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
       t = (x * cmd.tdx[1] + y * cmd.tde[1] + cmd.tex[1]) >> 21;
     }
     return (cmd.type & 0xb) ? read_texel(tex, t, s) : read_texel(tex, s, t);
-  } else if (cmd.type & 0x1) { // shaded
+  } else if (cmd.type & 0x4) { // shaded
     // convert to subpixel, calc major edge
     uint x = pos.x << 16, y = pos.y << 2, color = 0x0;
     uint x1 = cmd.xyh[0] + cmd.sh * ((y - cmd.xyh[1]) >> 2);
@@ -103,7 +105,7 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
 }
 
 uint sample_z(uint2 pos, RDPCommand cmd) {
-  if ((cmd.type & 0x4) == 0) return 0;
+  if (~cmd.type & 0x1) return 0;
   uint x1 = cmd.xyh[0] + cmd.sh * (pos.y - (cmd.xyh[1] >> 2));
   uint x = pos.x - (x1 >> 16), y = pos.y - (cmd.xyh[1] >> 2);
   uint output = cmd.zpos, o1 = x * cmd.zdx, o2 = y * cmd.zde;
@@ -126,6 +128,46 @@ uint visible(uint2 pos, RDPCommand cmd) {
          (!cmd.lft && x2 <= x && x <= x1));
 }
 
+/*uint combine(RDPCommand cmd) {
+  uint a, b, c, d;
+  uint ma = (cmd.cc_mux >> 14) & 0x3, mb = (cmd.cc_mux >> 10) & 0x3;
+  uint mc = (cmd.cc_mux >> 6) & 0x3, md = (cmd.cc_mux >> 2) & 0x3;
+  // select a
+  if (ma == 0) a = color;
+  else if (ma == 3) a = cmd.prim;
+  else if (ma == 4) a = shaded;
+  else if (ma == 5) a = cmd.env;
+  else if (ma == 6) a = 0xff;
+  // select b
+  if (mb == 0) b = color;
+  else if (mb == 3) b = cmd.prim;
+  else if (mb == 4) b = shaded;
+  else if (mb == 5) b = cmd.env;
+  else if (mb == 6) b = 0xff;
+  // select c
+  if (mc == 0) c = color;
+  else if (mc == 3) c = cmd.prim;
+  else if (mc == 4) c = shaded;
+  else if (mc == 5) c = cmd.env;
+  else if (mc == 6) c = 0xff;
+  // select d
+  if (md == 0) d = color;
+  else if (md == 3) d = cmd.prim;
+  else if (md == 4) d = shaded;
+  else if (md == 5) d = cmd.env;
+  else if (md == 6) d = 0xff;
+  // combine selected sources
+  uint output = 0x0;
+  for (uint i = 0; i < 4; ++i) {
+    uint pc = (p >> (i * 8)) & 0xff;
+    uint mc = (m >> (i * 8)) & 0xff;
+    uint oc = (a * pc + b * mc) / (a + b);
+    output |= (oc & 0xff) << (i * 8);
+  }
+  return output;
+}*/
+
+// rename blend
 uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   uint a, p, b, m;
   uint m1a = (cmd.bl_mux >> 14) & 0x3, m1b = (cmd.bl_mux >> 10) & 0x3;

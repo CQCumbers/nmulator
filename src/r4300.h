@@ -56,7 +56,7 @@ namespace R4300 {
 
   void vi_update(uint32_t cycles) {
     vi_line_progress += cycles;
-    if (vi_line_progress < 6150) return;
+    if (vi_line_progress < 6510) return;
     vi_line_progress = 0;
     if (++vi_line == vi_irq) mi_irqs |= 0x8;
     if (vi_line < 584) return;
@@ -73,6 +73,7 @@ namespace R4300 {
       vi_dirty = false;
     }
     if (format == 2) {
+      //printf("VI ORIGIN: %x\n", vi_origin);
       uint16_t *out = reinterpret_cast<uint16_t*>(pixels);
       for (uint32_t i = 0; i < vi_width * height; ++i)
         out[i] = read<uint16_t>(vi_origin + (i << 1));
@@ -94,22 +95,35 @@ namespace R4300 {
 
   /* === Audio Interface registers === */
 
-  uint32_t ai_status = ~0x0, ai_ram = 0x0, ai_len = 0;
-  uint8_t ai_run = 0x1, ai_start = 0;
+  constexpr uint32_t ntsc_clock = 48681812;
+  uint32_t ai_status = 0x0, ai_ram = 0x0;
+  uint32_t ai_len = 0, ai_start = 0;
+  uint32_t ai_rate = 0, ai_bits = 0;
+  bool ai_run = false, ai_dirty = false;
   SDL_AudioDeviceID audio_dev;
 
   void ai_dma(uint32_t len) {
     if (!ai_run || ai_start != 0) return;
-    ai_start = ai_len, ai_len = len & 0x3ff8; 
+    printf("AI DMA started with len %x\n", len);
+    if (ai_dirty) {
+      SDL_AudioFormat fmt = (ai_bits ? AUDIO_S16MSB : AUDIO_S8);
+      SDL_AudioSpec spec = {
+        .freq = static_cast<int>(ntsc_clock / (ai_rate + 1)) << !ai_bits,
+        .format = fmt, .channels = 2, .samples = 0x100
+      };
+      audio_dev = SDL_OpenAudioDevice(nullptr, 0, &spec, nullptr, 0);
+      SDL_PauseAudioDevice(audio_dev, 0); ai_dirty = false;
+    }
+    ai_start = ai_len, ai_len = len & 0x1fff8;
     if (ai_start != 0) ai_status |= 0x80000001;
-    SDL_QueueAudio(audio_dev, pages[0] + ai_ram, ai_len);
+    SDL_QueueAudio(audio_dev, pages[0] + ai_ram, ai_len << ai_bits);
   }
 
   void ai_update(uint32_t cycles) {
     if (!ai_run || ai_len == 0) return;
-    uint32_t new_len = SDL_GetQueuedAudioSize(audio_dev);
-    if (new_len <= ai_start)
-      ai_status &= ~0x80000001, ai_start = 0, mi_irqs |= 0x4;
+    uint32_t new_len = SDL_GetQueuedAudioSize(audio_dev) >> ai_bits;
+    if (new_len <= ai_start || new_len < 0x100)
+      ai_status &= ~0x00000001, ai_start = 0, mi_irqs |= 0x4;
     ai_len = new_len - ai_start;
   }
 
@@ -122,15 +136,13 @@ namespace R4300 {
   uint32_t si_ram = 0x0;
 
   void joy_status(uint32_t channel, uint32_t addr) {
-    if (channel != 0) return;
+    if (channel != 0) return write<uint8_t>(addr - 2, 0x83);
     write<uint16_t>(addr, 0x0500); // standard controller type
-    write<uint8_t>(addr + 16, 0x02); // no mempack slot
+    write<uint8_t>(addr + 2, 0x02); // no mempack slot
   }
 
   void joy_read(uint32_t channel, uint32_t addr) {
-    if (channel != 0) {
-      write<uint8_t>(addr - 2, 0x84); return;
-    }
+    if (channel != 0) return write<uint8_t>(addr - 2, 0x84);
     printf("[SI] buttons: %x stick: %x\n", buttons, stick_y);
     write<uint16_t>(addr, buttons);
     write<int8_t>(addr + 2, stick_x);
@@ -200,10 +212,8 @@ namespace R4300 {
   int64_t mmio_read(uint32_t addr) {
     if ((addr & addr_mask & ~0x1fff) == 0x4000000)
       return RSP::read<T, true>(addr);
-    printf("[MMIO] read from %x\n", addr);
     switch (addr & addr_mask) {
-      //default: printf("[MMIO] read from %x\n", addr); return 0;
-      default: return 0;
+      default: printf("[MMIO] read from %x\n", addr); return 0;
       // RSP Interface
       case 0x4040000: return rsp_cop0[0];
       case 0x4040004: return rsp_cop0[1];
@@ -228,11 +238,16 @@ namespace R4300 {
       case 0x4400018: return vi_height;
       // Audio Interface
       case 0x4500004: return ai_len;
-      case 0x450000c: return ai_status;
+      case 0x450000c: printf("Getting AI status: %x\n", ai_status); return ai_status;
       // Peripheral Interface
       case 0x4600000: return pi_ram;
       case 0x4600004: return pi_rom;
       case 0x4600010: return pi_status;
+      // RDRAM Interface
+      case 0x4700000: return 0xe;      // RI_MODE
+      case 0x4700004: return 0x40;     // RI_CONFIG
+      case 0x470000c: return 0x14;     // RI_SELECT
+      case 0x4700010: return 0x63634;  // RI_REFRESH
       // Serial Interface
       case 0x4800018: return (mi_irqs & 0x2) << 11;
     }
@@ -255,35 +270,47 @@ namespace R4300 {
       // RDP Interface
       case 0x4100000: RDP::pc_start = val & addr_mask; return;
       case 0x4100004: RDP::pc_end = val & addr_mask; RDP::update(1); return;
-      case 0x410000c: RDP::status = _pext_u32(val, 0x2aa); return;
+      case 0x410000c:
+        RDP::status &= ~_pext_u32(val, 0x155);
+        RDP::status |= _pext_u32(val, 0x2aa); return;
       // MIPS Interface
       case 0x4300000: if (val & 0x800) mi_irqs &= ~0x20; return;
-      case 0x430000c: mi_mask = _pext_u32(val, 0xaaa); return;
+      case 0x430000c:
+        mi_mask &= ~_pext_u32(val, 0x555);
+        mi_mask |= _pext_u32(val, 0xaaa); return;
       // Video Interface
       case 0x4400000: 
         if (val == vi_status) return;
         vi_status = val; vi_dirty = true; return;
-      case 0x4400004: vi_origin = val & 0xffffff; return;
+      case 0x4400004: /*printf("origin set to %x\n", val); */vi_origin = val & 0xffffff; return;
       case 0x4400008:
-        if ((val &= 0xfff) == vi_width) return;
-        vi_width = val; vi_dirty = true; return;
+        if ((val & 0xfff) == vi_width) return;
+        vi_width = val & 0xfff; vi_dirty = true; return;
       case 0x440000c: vi_irq = val & 0x3ff; return;
       case 0x4400010: mi_irqs &= ~0x8; return;
       case 0x4400018:
-        if ((val &= 0x3ff) == vi_height) return;
-        vi_height = val; vi_dirty = true; return;
+        if ((val & 0x3ff) == vi_height) return;
+        vi_height = val & 0x3ff; vi_dirty = true; return;
       // Audio Interface
       case 0x4500000: ai_ram = val & 0xfffff8; return;
       case 0x4500004: ai_dma(val); return;
       case 0x4500008: ai_run = val & 0x1; return;
       case 0x450000c: mi_irqs &= ~0x4; return;
+      case 0x4500010:
+        if ((val & 0xfff) == ai_rate) return;
+        ai_rate = val & 0xfff; ai_dirty = true; return;
+      case 0x4500014:
+        if (((val >> 3) & 0x1) == ai_bits) return;
+        ai_bits = (val >> 3) & 0x1; ai_dirty = true; return;
       // Peripheral Interface
       case 0x4600000: pi_ram = val & 0xffffff; return;
       case 0x4600004: pi_rom = val & addr_mask; return;
       case 0x4600008:
-        memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1);
+        printf("PI DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, val + 1);
+        memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val + 1);
         mi_irqs |= 0x10; return;
       case 0x460000c:
+        printf("PI DMA from %x to %x, of %x bytes\n", pi_rom, pi_ram, val + 1);
         memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1);
         mi_irqs |= 0x10; return;
       case 0x4600010: mi_irqs &= ~0x10; return;
@@ -309,6 +336,8 @@ namespace R4300 {
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if (!page) return mmio_read<T>(addr);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
+    //if ((addr & addr_mask) == 0x318)
+    //  printf("%x read from %x\n", __builtin_bswap32(*ptr), addr);
     switch (sizeof(T)) {
       case 1: return *ptr;
       case 2: return static_cast<T>(__builtin_bswap16(*ptr));
@@ -320,6 +349,8 @@ namespace R4300 {
   template <typename T>
   void write(uint32_t addr, int64_t val) {
     uint8_t *page = pages[(addr >> 21) & 0xff];
+    if ((addr & addr_mask) == 0x180)
+      printf("!!! %llx written to %x\n", val, addr);
     if (!page) return mmio_write<T>(addr, val);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
     switch (sizeof(T)) {
@@ -341,6 +372,8 @@ namespace R4300 {
   constexpr uint8_t hi = 0x20, lo = 0x21;
   constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
 
+  int64_t last_thread = 0;
+
   void irqs_update(uint32_t cycles) {
     // update IP2 based on MI_INTR and MI_MASK
     if (mi_irqs & mi_mask) reg_array[13 + dev_cop0] |= 0x400;
@@ -349,30 +382,52 @@ namespace R4300 {
     // check ++COUNT against COMPARE, set IP7
     uint64_t &count = reg_array[9 + dev_cop0];
     uint64_t compare = reg_array[11 + dev_cop0];
-    uint64_t new_c = (count + cycles) & 0xffffffff;
-    if (((count >= compare) ^ (new_c >= compare)) || (compare == 0 && new_c < count))
-      reg_array[13 + dev_cop0] |= 0x8000;
-    count = new_c;
+    if (count > compare) compare += 0x100000000;
+    if (count + cycles >= compare) reg_array[13 + dev_cop0] |= 0x8000;
+    count = (count + cycles) & 0xffffffff;
+
+    /*if (pc == 0x800d18c4 || pc == 0x800d17cc) {
+      // pc after/before __osEnqueueThread at __osEnqueueAndYield
+      int64_t thread = read<uint32_t>(0x800eb3b0);
+      printf("Queue %s __osEnqueueThread:\n", (pc == 0x800d18c4 ? "After" : "Before"));
+      printf("Current thread %llx, param1 = %llx\n", thread, reg_array[4]);
+      int64_t queue = read<uint32_t>(0x800eb3a8);
+      while (queue != 0) {
+        printf("Thread: %llx, Priority: %llx\n", queue, read<uint32_t>(queue + 4));
+        queue = read<uint32_t>(queue);
+      }
+    } else if (pc == 0x800cd750) { // pc at osRecvMesg
+      int64_t thread = read<uint32_t>(0x800eb3b0);
+      printf("at osRecvMesg - Current thread %llx, param1 = %llx\n", thread, reg_array[4]);
+    }*/
+    //printf("PC: %x\n", pc);
+    //printf("COP0_STATUS: %x\n", reg_array[12 + dev_cop0]);
+    //printf("COP0_CAUSE: %llx, MI_MASK: %x\n", reg_array[13 + dev_cop0], mi_mask);
+    //for (uint8_t i = 0; i < 32; ++i) printf("Reg $%d: %llx\n", i, reg_array[i]);
+    /*if (pc == (reg_array[14 + dev_cop0] & 0xffffffff)) { // pc == EPC, aka after ERET
+      printf("Loading thread %llx\n", thread);
+      printf("pc: %x COUNT: %llx COMPARE: %llx\n", pc, reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
+      for (uint8_t i = 0; i < 0x63; ++i) printf("$%x: %llx\n", i, reg_array[i]);
+    }*/
 
     // if interrupt enabled and triggered, set pc to handler address
     uint8_t ip = (reg_array[13 + dev_cop0] >> 8) & 0xff;
     uint8_t im = (reg_array[12 + dev_cop0] >> 8) & 0xff;
     if ((reg_array[12 + dev_cop0] & 0x3) == 0x1 && (ip & im)) {
-      printf("Jumping to interrupt instead of %x\n", pc);
+      printf("Jumping to interrupt instead of %x: %x\n", pc, fetch(pc));
       printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_irqs, mi_mask, vi_irq);
-      printf("COUNT: %llx COMPARE: %llx\n", reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
       reg_array[14 + dev_cop0] = pc; pc = 0x80000180; reg_array[12 + dev_cop0] |= 0x2;
     }
 
     // Debug sign extension
-    /*for (uint8_t i = 0; i < 32; ++i) {
-      if ((reg_array[i] & 0x80000000) ^ ((reg_array[i] & 0x100000000) >> 1))
-        printf("Sign extension violation on $%x\n", i);
-    }*/
+    //for (uint8_t i = 0; i < 32; ++i) {
+      //if ((reg_array[i] & 0x80000000) ^ ((reg_array[i] & 0x100000000) >> 1))
+      //  printf("Sign extension violation on $%x : %x\n", i, reg_array[i]);
+    //}
   }
 
   void init(FILE *file) {
-    // setup registers
+    // setup registers (assumes CIC-NUS-6102)
     reg_array[20] = 0x1;
     reg_array[22] = 0x3f;
     reg_array[29] = 0xffffffffa4001ff0;
@@ -391,10 +446,8 @@ namespace R4300 {
     fseek(file, 0, SEEK_END);
     long fsize = ftell(file);
     fseek(file, 0, SEEK_SET);
-    fread(pages[0] + 0x04000000, 1, fsize, file);
-
-    // Cartridge Header at 0x10000000
-    memcpy(pages[0] + 0x10000000, pages[0] + 0x04000000, fsize);
+    fread(pages[0] + 0x10000000, 1, fsize, file);
+    memcpy(pages[0] + 0x04000000, pages[0] + 0x10000000, 0x40000);
 
     // setup VI
     pixels = reinterpret_cast<uint8_t*>(mmap(
@@ -407,18 +460,14 @@ namespace R4300 {
     SDL_RenderClear(renderer);
     Vulkan::init();
 
-    // setup AI
-    SDL_AudioSpec spec = {
-      .freq = 44100, .format = AUDIO_S16MSB,
-      .channels = 2, .samples = 512, .callback = nullptr
-    };
-    audio_dev = SDL_OpenAudioDevice(nullptr, 0, &spec, nullptr, 0);
-    SDL_PauseAudioDevice(audio_dev, 0);
-
     // setup RSP
     RSP::dmem = pages[0] + 0x04000000;
     RSP::imem = pages[0] + 0x04001000;
     rsp_cop0[4] = 0x1, rsp_cop0[11] = 0x88;
+
+    // setup SI (assumes CIC-NUS-6102)
+    write<uint32_t>(0x1fc007e4, 0x3f3f);
+    write<uint32_t>(0x318, 0x800000);
   }
 }
 

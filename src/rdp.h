@@ -13,11 +13,13 @@ typedef struct PerTileData {
 typedef struct RDPCommand {
   uint32_t xyh[2], xym[2], xyl[2];
   uint32_t sh, sm, sl;
-  uint32_t fill, blend, fog, lft, type;
   uint32_t shade[4], sde[4], sdx[4];
-  uint32_t tile, bl_mux;
   uint32_t zpos, zde, zdx;
   uint32_t tex[2], tde[2], tdx[2];
+  uint32_t fill, fog, blend;
+  uint32_t env, prim, zprim;
+  uint32_t bl_mux, cc_mux, keys[3];
+  uint32_t lft, type, tile;
 } cmd_t;
 
 typedef struct RDPTile {
@@ -359,264 +361,275 @@ namespace RDP {
 
   uint32_t img_size = 0x0, img_width = 0, height = 240;
   uint8_t *img_addr = nullptr, *zbuf_addr = nullptr;
-  uint32_t fill = 0x0, blend = 0x0, fog = 0x0, bl_mux = 0x0;
   uint32_t tex_size = 0x0, tex_width = 0, tex_addr = 0x0;
 
-  uint64_t fetch(uint32_t addr) {
-    return status & 0x1 ? RSP::read<uint64_t>(addr) : R4300::read<uint64_t>(addr);
+  uint32_t fill = 0x0, fog = 0x0, blend = 0x0;
+  uint32_t env = 0x0, prim = 0x0, zprim = 0x0;
+  uint32_t bl_mux = 0x0, cc_mux = 0x0, keys[3] = {0};
+
+  uint8_t opcode(uint64_t addr) {
+    uint32_t out = 0;
+    if (status & 0x1) out = RSP::read<uint32_t>(addr);
+    else out = R4300::read<uint32_t>(addr);
+    return (out >> 24) & 0x3f;
+  }
+
+  std::vector<uint32_t> fetch(uint64_t &addr, uint8_t len) {
+    std::vector<uint32_t> out(len);
+    for (uint8_t i = 0; i < len; ++i, addr += 4) {
+      if (status & 0x1) out[i] = RSP::read<uint32_t>(addr);
+      else out[i] = R4300::read<uint32_t>(addr);
+    }
+    return out;
   }
 
   /* === Instruction Translations === */
 
   void set_image() {
-    uint64_t instr = fetch(pc); pc += 8;
-    img_size = 1 << (((instr >> 51) & 0x3) - 1);
-    img_width = ((instr >> 32) & 0x3ff) + 1;
-    img_addr = R4300::pages[0] + (instr & 0x3ffffff);
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
+    img_width = (instr[0] & 0x3ff) + 1;
+    img_addr = R4300::pages[0] + (instr[1] & 0x3ffffff);
 
     global_t *globals = Vulkan::globals_ptr();
     globals->width = img_width, globals->size = img_size;
     Vulkan::gwidth = img_width / Vulkan::group_size;
-    printf("RDP set image addr %llx\n", (instr & 0x3ffffff));
-    printf("RDP set image format %d\n", uint32_t(instr >> 53) & 0x7);
   }
 
   void set_scissor() {
-    uint64_t instr = fetch(pc); pc += 8;
-    uint32_t yh = (instr >> 32) & 0xfff, yl = instr & 0xfff;
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    uint32_t yh = instr[0] & 0xfff, yl = instr[1] & 0xfff;
     height = (yl >> 2) - (yh >> 2);
     Vulkan::gheight = height / Vulkan::group_size;
   }
 
   void set_other_modes() {
-    bl_mux = (fetch(pc) >> 16) & 0xffff; pc += 8;
+    bl_mux = fetch(pc, 2)[1] >> 16;
   }
 
   void set_fill() {
-    uint64_t instr = fetch(pc); pc += 8;
-    fill = __builtin_bswap32(instr & 0xffffffff);
+    fill = __builtin_bswap32(fetch(pc, 2)[1]);
   }
 
   void set_fog() {
-    uint64_t instr = fetch(pc); pc += 8;
-    fog = __builtin_bswap32(instr & 0xffffffff);
+    fog = __builtin_bswap32(fetch(pc, 2)[1]);
   }
 
   void set_blend() {
-    uint64_t instr = fetch(pc); pc += 8;
-    blend = __builtin_bswap32(instr & 0xffffffff);
+    blend = __builtin_bswap32(fetch(pc, 2)[1]);
+  }
+
+  void set_combine() {
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    cc_mux = ((instr[0] >> 31) & 0x7fff) << 16;
+    cc_mux |= (instr[1] >> 9) & 0x1ff;
+  }
+
+  void set_env() {
+    env = __builtin_bswap32(fetch(pc, 2)[1]);
+  }
+
+  void set_prim() {
+    prim = __builtin_bswap32(fetch(pc, 2)[1]);
+  }
+
+  void set_zprim() {
+    zprim = __builtin_bswap32(fetch(pc, 2)[1]);
   }
 
   void set_zbuf() {
-    uint64_t instr = fetch(pc); pc += 8;
-    zbuf_addr = R4300::pages[0] + (instr & 0x3ffffff);
-    printf("RDP set ZBUF addr %llx\n", (instr & 0x3ffffff));
+    zbuf_addr = R4300::pages[0] + (fetch(pc, 2)[1] & 0x3ffffff);
+  }
+
+  void set_key_r() {
+    keys[0] = __builtin_bswap32(fetch(pc, 2)[1]);
+  }
+
+  void set_key_gb() {
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    keys[2] = (instr[1] & 0xffff) | ((instr[0] & 0xfff) << 16);
+    keys[1] = (instr[1] >> 16) | ((instr[0] & 0xfff000) >> 4);
   }
 
   void set_texture() {
-    // maybe send to gpu here, and do load_tile on gpu with native textures?
-    // handling mid-frame tmem changes, formats, etc. might be easier
-    uint64_t instr = fetch(pc); pc += 8;
-    tex_size = 1 << (((instr >> 51) & 0x3) - 1);
-    tex_width = ((instr >> 32) & 0x3f) + 1;
-    tex_addr = instr & 0x3ffffff;
-    printf("RDP set texture format %d\n", uint32_t(instr >> 53) & 0x7);
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    tex_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
+    tex_width = (instr[0] & 0x3ff) + 1;
+    tex_addr = instr[1] & 0x3ffffff;
   }
 
   void set_tile() {
     Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
-    uint64_t instr = fetch(pc); pc += 8; // update tile
-    printf("RDP set tile format %d\n", uint32_t(instr >> 53) & 0x7);
-    Vulkan::texes_ptr()[(instr >> 24) & 0x7] = {
-      .format = uint32_t(instr >> 53) & 0x7, .size = uint32_t(instr >> 51) & 0x3,
-      .width = uint32_t((instr >> 41) & 0xff) << 3, .addr = uint32_t((instr >> 32) & 0x1ff) << 3,
-      .mask = { uint32_t(instr >> 4) & 0xf, uint32_t(instr >> 14) & 0xf },
-      .shift = { uint32_t(instr) & 0xf, uint32_t(instr >> 10) & 0xf }
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7] = {
+      .format = (instr[0] >> 21) & 0x7, .size = (instr[0] >> 19) & 0x3,
+      .width = ((instr[0] >> 9) & 0xff) << 3, .addr = (instr[0] & 0x1ff) << 3,
+      .mask = { (instr[1] >> 4) & 0xf, (instr[1] >> 14) & 0xf },
+      .shift = { instr[1] & 0xf, (instr[1] >> 10) & 0xf }
     };
   }
 
   void load_tile() {
-    uint64_t instr = fetch(pc); pc += 8;
-    uint32_t sh = (instr >> 12) & 0xfff, th = instr & 0xfff;
-    uint32_t sl = (instr >> 44) & 0xfff, tl = (instr >> 32) & 0xfff;
-    uint32_t tex_mem = Vulkan::texes_ptr()[(instr >> 24) & 0x7].addr;
-    // copy tile from dram to tmem
-    uint32_t offset = (tl * tex_width + sl) * tex_size, width = (((sh - sl) >> 2) + 1) * tex_size;
-    uint8_t *mem = Vulkan::tmem_ptr() + tex_mem; uint32_t ram = tex_addr + offset;
-    uint32_t width_pad = (width + 0x7) & ~0x7;
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    uint32_t sh = (instr[1] >> 12) & 0xfff, th = instr[1] & 0xfff;
+    uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
+    tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+    uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
+
+    uint32_t offset = (tl * tex_width + sl) * tex_size;
+    uint32_t width = (((sh - sl) >> 2) + 1) * tex_size;
+    uint32_t ram = tex_addr + offset, width_pad = (width + 0x7) & ~0x7;
     for (uint32_t i = 0; i <= (th - tl) >> 2; ++i) {
       memcpy(mem, R4300::pages[0] + ram, width);
       mem += width_pad, ram += tex_width * tex_size;
     }
   }
 
-  void fill_triangle() {
-    uint64_t instr[4] = {
-      fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24)
+  void load_block() {
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    uint32_t sh = (instr[1] >> 12) & 0xfff, dxt = instr[1] & 0xfff;
+    uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
+    tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+    uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
+
+    uint32_t offset = (tl * tex_width + sl) * tex_size;
+    uint32_t size = (((sh - sl) >> 2) + 1) * tex_size;
+    uint32_t width = (dxt == 0 ? size : 0x4000 / dxt);
+    for (uint32_t i = 0, ram = tex_addr + offset; i < size; i += width) {
+      memcpy(mem, R4300::pages[0] + ram, width);
+      mem += tex.width, ram += width;
+    }
+  }
+
+  void shade_triangle(cmd_t &cmd) {
+    std::vector<uint32_t> instr = fetch(pc, 16);
+    cmd.shade[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
+    cmd.shade[1] = (instr[0] << 16) | (instr[4] & 0xffff);
+    cmd.shade[2] = (instr[1] & 0xffff0000) | (instr[5] >> 16);
+    cmd.shade[3] = (instr[1] << 16) | (instr[5] & 0xffff);
+    cmd.sde[0] = (instr[8] & 0xffff0000) | (instr[12] >> 16);
+    cmd.sde[1] = (instr[8] << 16) | (instr[12] & 0xffff);
+    cmd.sde[2] = (instr[9] & 0xffff0000) | (instr[13] >> 16);
+    cmd.sde[3] = (instr[9] << 16) | (instr[13] & 0xffff);
+    cmd.sdx[0] = (instr[2] & 0xffff0000) | (instr[6] >> 16);
+    cmd.sdx[1] = (instr[2] << 16) | (instr[6] & 0xffff);
+    cmd.sdx[2] = (instr[3] & 0xffff0000) | (instr[7] >> 16);
+    cmd.sdx[3] = (instr[3] << 16) | (instr[7] & 0xffff);
+  }
+
+  void tex_triangle(cmd_t &cmd) {
+    std::vector<uint32_t> instr = fetch(pc, 16);
+    cmd.tex[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
+    cmd.tex[1] = (instr[0] << 16) | (instr[4] & 0xffff);
+    cmd.tde[0] = (instr[8] & 0xffff0000) | (instr[12] >> 16);
+    cmd.tde[1] = (instr[8] << 16) | (instr[12] & 0xffff);
+    cmd.tdx[0] = (instr[2] & 0xffff0000) | (instr[6] >> 16);
+    cmd.tdx[1] = (instr[2] << 16) | (instr[6] & 0xffff);
+  }
+
+  void zbuf_triangle(cmd_t &cmd) {
+    std::vector<uint32_t> instr = fetch(pc, 4);
+    cmd.zpos = instr[0], cmd.zde = instr[2];
+    cmd.zdx = instr[1];
+  }
+
+  template <uint8_t type>
+  void triangle() {
+    printf("Triangle of type %x\n", type);
+    std::vector<uint32_t> instr = fetch(pc, 8);
+    cmd_t cmd = {
+      .xyh = { instr[4], instr[1] & 0x3fff },
+      .xym = { instr[6], (instr[1] >> 16) & 0x3fff },
+      .xyl = { instr[2], instr[0] & 0x3fff },
+      .sh = instr[5], .sm = instr[7], .sl = instr[3],
+      .fill = fill, .fog = fog, .blend = blend,
+      .env = env, .prim = prim, .zprim = zprim,
+      .bl_mux = bl_mux, .cc_mux = cc_mux,
+      .keys = { keys[0], keys[1], keys[2] },
+      .lft = (instr[0] >> 23) & 0x1, .type = type,
     };
-    printf("filling triangle with xh = %x, yh = %x\n", uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff));
-    printf("blend: %x, bl_mux: %x\n", blend, bl_mux);
-    pc += 32;
-    Vulkan::add_rdp_cmd({
-      .xyh = { uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff) },
-      .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
-      .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
-      .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
-      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0x0,
-      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux
-    });
+    if (type & 0x4) shade_triangle(cmd);
+    if (type & 0x2) tex_triangle(cmd);
+    if (type & 0x1) zbuf_triangle(cmd);
+    Vulkan::add_rdp_cmd(cmd);
   }
 
-  void shade_triangle() {
-    uint64_t instr[12] = {
-      fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24),
-      fetch(pc + 32), fetch(pc + 40), fetch(pc + 48), fetch(pc + 56),
-      fetch(pc + 64), fetch(pc + 72), fetch(pc + 80), fetch(pc + 88)
+  template <bool flip>
+  void tex_rectangle(cmd_t &cmd) {
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    cmd.tex[0] = (flip ? instr[0] & 0xffff : instr[0] >> 16);
+    cmd.tex[1] = (flip ? instr[0] >> 16 : instr[0] & 0xffff);
+    cmd.tde[0] = instr[1] & 0xffff, cmd.tde[1] = instr[1] & 0xffff;
+    cmd.tdx[0] = instr[1] >> 16, cmd.tdx[1] = instr[1] >> 16;
+  }
+
+  template <uint8_t type>
+  void rectangle() {
+    printf("Rectangle of type %x\n", type);
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    cmd_t cmd = {
+      .xyh = { (instr[1] >> 12) & 0xfff, instr[1] & 0xfff },
+      .xyl = { (instr[0] >> 12) & 0xfff, instr[0] & 0xfff },
+      .fill = fill, .fog = fog, .blend = blend,
+      .env = env, .prim = prim, .zprim = zprim,
+      .bl_mux = bl_mux, .cc_mux = cc_mux,
+      .keys = { keys[0], keys[1], keys[2] },
+      .type = type, .tile = (instr[1] >> 24) & 0x7,
     };
-    pc += 96;
-    Vulkan::add_rdp_cmd({
-      .xyh = { uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff) },
-      .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
-      .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
-      .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
-      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0x1,
-      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
-      .shade = {
-        uint32_t(instr[4] >> 48) << 16 | uint32_t(instr[6] >> 48),
-        uint32_t((instr[4] >> 32) & 0xffff) << 16 | uint32_t((instr[6] >> 32) & 0xffff),
-        uint32_t((instr[4] >> 16) & 0xffff) << 16 | uint32_t((instr[6] >> 16) & 0xffff),
-        uint32_t(instr[4] & 0xffff) << 16 | uint32_t(instr[6] & 0xffff),
-      },
-      .sde = {
-        uint32_t(instr[8] >> 48) << 16 | uint32_t(instr[10] >> 48),
-        uint32_t((instr[8] >> 32) & 0xffff) << 16 | uint32_t((instr[10] >> 32) & 0xffff),
-        uint32_t((instr[8] >> 16) & 0xffff) << 16 | uint32_t((instr[10] >> 16) & 0xffff),
-        uint32_t(instr[8] & 0xffff) << 16 | uint32_t(instr[10] & 0xffff),
-      },
-      .sdx = {
-        uint32_t(instr[5] >> 48) << 16 | uint32_t(instr[7] >> 48),
-        uint32_t((instr[5] >> 32) & 0xffff) << 16 | uint32_t((instr[7] >> 32) & 0xffff),
-        uint32_t((instr[5] >> 16) & 0xffff) << 16 | uint32_t((instr[7] >> 16) & 0xffff),
-        uint32_t(instr[5] & 0xffff) << 16 | uint32_t(instr[7] & 0xffff),
-      }
-    });
+    if (type == 0xa) tex_rectangle<false>(cmd);
+    if (type == 0xb) tex_rectangle<true>(cmd);
+    Vulkan::add_rdp_cmd(cmd);
   }
 
-  void tex_triangle() {
-    uint64_t instr[12] = {
-      fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24),
-      fetch(pc + 32), fetch(pc + 40), fetch(pc + 48), fetch(pc + 56),
-      fetch(pc + 64), fetch(pc + 72), fetch(pc + 80), fetch(pc + 88)
-    };
-    pc += 96;
-    Vulkan::add_rdp_cmd({
-      .xyh = { uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff) },
-      .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
-      .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
-      .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
-      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0x2,
-      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
-      .tex = {
-        uint32_t(instr[4] >> 48) << 16 | uint32_t(instr[6] >> 48),
-        uint32_t((instr[4] >> 32) & 0xffff) << 16 | uint32_t((instr[6] >> 32) & 0xffff),
-      },
-      .tde = {
-        uint32_t(instr[8] >> 48) << 16 | uint32_t(instr[10] >> 48),
-        uint32_t((instr[8] >> 32) & 0xffff) << 16 | uint32_t((instr[10] >> 32) & 0xffff),
-      },
-      .tdx = {
-        uint32_t(instr[5] >> 48) << 16 | uint32_t(instr[7] >> 48),
-        uint32_t((instr[5] >> 32) & 0xffff) << 16 | uint32_t((instr[7] >> 32) & 0xffff),
-      }
-    });
-  }
-
-  void zbuf_triangle() {
-    uint64_t instr[12] = {
-      fetch(pc), fetch(pc + 8), fetch(pc + 16), fetch(pc + 24), fetch(pc + 32), fetch(pc + 40)
-    };
-    pc += 48;
-    printf("zbuf triangle at %x\n", uint32_t(instr[4] >> 32));
-    Vulkan::add_rdp_cmd({
-      .xyh = { uint32_t(instr[2] >> 32), uint32_t(instr[0] & 0x3fff) },
-      .xym = { uint32_t(instr[3] >> 32), uint32_t((instr[0] >> 16) & 0x3fff) },
-      .xyl = { uint32_t(instr[1] >> 32), uint32_t((instr[0] >> 32) & 0x3fff) },
-      .sh = uint32_t(instr[2]), .sm = uint32_t(instr[3]), .sl = uint32_t(instr[1]),
-      .lft = uint32_t((instr[0] >> 55) & 0x1), .type = 0x4,
-      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
-      .zpos = uint32_t(instr[4] >> 32), .zde = uint32_t(instr[5] >> 32),
-      .zdx = uint32_t(instr[4] & 0xffffffff)
-    });
-  }
-
-  void fill_rectangle() {
-    uint64_t instr = fetch(pc); pc += 8;
-    Vulkan::add_rdp_cmd({
-      .xyh = { uint32_t((instr >> 12) & 0xfff), uint32_t(instr & 0xfff) },
-      .xyl = { uint32_t((instr >> 44) & 0xfff), uint32_t((instr >> 32) & 0x3ff) },
-      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux, .type = 0x8
-    });
-  }
-
-  void tex_rectangle() {
-    uint64_t instr[2] = { fetch(pc), fetch(pc + 8) }; pc += 16;
-    Vulkan::add_rdp_cmd({
-      .xyh = { uint32_t((instr[0] >> 12) & 0xfff), uint32_t(instr[0] & 0xfff) },
-      .xyl = { uint32_t((instr[0] >> 44) & 0xfff), uint32_t((instr[0] >> 32) & 0x3ff) },
-      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
-      .type = 0xa, .tile = uint32_t(instr[0] >> 24) & 0x7,
-      .tex = { uint32_t((instr[1] >> 48) & 0xffff), uint32_t((instr[1] >> 32) & 0xffff) },
-      .tde = { uint32_t(instr[1] & 0xffff), uint32_t(instr[1] & 0xffff) },
-      .tdx = { uint32_t((instr[1] >> 16) & 0xffff), uint32_t((instr[1] >> 16) & 0xffff) },
-    });
-  }
-  
-  void tex_rectangle_flip() {
-    uint64_t instr[2] = { fetch(pc), fetch(pc + 8) }; pc += 16;
-    Vulkan::add_rdp_cmd({
-      .xyh = { uint32_t((instr[0] >> 12) & 0xfff), uint32_t(instr[0] & 0xfff) },
-      .xyl = { uint32_t((instr[0] >> 44) & 0xfff), uint32_t((instr[0] >> 32) & 0x3ff) },
-      .fill = fill, .fog = fog, .blend = blend, .bl_mux = bl_mux,
-      .type = 0xb, .tile = uint32_t(instr[0] >> 24) & 0x7,
-      .tex = { uint32_t((instr[1] >> 32) & 0xffff), uint32_t((instr[1] >> 48) & 0xffff) },
-      .tde = { uint32_t(instr[1] & 0xffff), uint32_t(instr[1] & 0xffff) },
-      .tdx = { uint32_t((instr[1] >> 16) & 0xffff), uint32_t((instr[1] >> 16) & 0xffff) },
-    });
+  void invalid() {
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    printf("[RDP] Unimplemented instruction %x%x\n", instr[0], instr[1]);
+    exit(1);
   }
 
   void update(uint32_t cycles) {
     // interpret config instructions 
     pc = pc_start;
-    while (pc != pc_end) {
-      uint64_t instr = fetch(pc);
-      switch ((instr >> 56) & 0x3f) {
+    while (pc < pc_end) {
+      switch (opcode(pc)) {
         case 0x00: pc += 8; break;
-        case 0x08: fill_triangle(); break;
-        case 0x09: zbuf_triangle(); break;
-        case 0x0a: tex_triangle(); break;
-        case 0x0c: shade_triangle(); break;
-        case 0x24: tex_rectangle(); break;
-        case 0x25: tex_rectangle_flip(); break;
-        case 0x27: printf("[RDP] SYNC PIPE\n"); pc += 8; break;
-        case 0x28: printf("[RDP] SYNC TILE\n"); pc += 8; break;
-        case 0x29: printf("[RDP] SYNC FULL\n"); pc += 8; break;
+        case 0x08: triangle<0x0>(); break;
+        case 0x09: triangle<0x1>(); break;
+        case 0x0a: triangle<0x2>(); break;
+        case 0x0b: triangle<0x3>(); break;
+        case 0x0c: triangle<0x4>(); break;
+        case 0x0d: triangle<0x5>(); break;
+        case 0x0e: triangle<0x6>(); break;
+        case 0x0f: triangle<0x7>(); break;
+        case 0x24: rectangle<0xa>(); break;
+        case 0x25: rectangle<0xb>(); break;
+        case 0x2a: set_key_gb(); break;
+        case 0x2b: set_key_r(); break;
+        case 0x2c: printf("[RDP] SET CONVERT\n"); pc += 8; break;
         case 0x2d: set_scissor(); break;
+        case 0x2e: set_zprim(); break;
         case 0x2f: set_other_modes(); break;
-        case 0x31: printf("[RDP] SYNC LOAD\n"); pc += 8; break;
+        case 0x30: load_tile(); break;  // LOAD TLUT
+        case 0x32: printf("[RDP] SET TILE SIZE\n"); pc += 8; break;
+        case 0x33: load_block(); break;
         case 0x34: load_tile(); break;
         case 0x35: set_tile(); break;
-        case 0x36: fill_rectangle(); break;
+        case 0x36: rectangle<0x8>(); break;
         case 0x37: set_fill(); break;
         case 0x38: set_fog(); break;
         case 0x39: set_blend(); break;
+        case 0x3a: set_prim(); break;
+        case 0x3b: set_env(); break;
+        case 0x3c: set_combine(); break;
         case 0x3d: set_texture(); break;
         case 0x3e: set_zbuf(); break;
         case 0x3f: set_image(); break;
-        default: printf("RDP instruction %llx\n", instr); pc += 8; break;
+        case 0x26: case 0x27: case 0x28: case 0x29:
+          printf("[RDP] SYNC\n"); pc += 8; break;
+        default: invalid(); break;
       }
     }
     // rasterize on GPU according to config
-    printf("[RDP] finished!\n");
     status |= 0x80, R4300::mi_irqs |= 0x20;
     Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
   }

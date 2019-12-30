@@ -67,7 +67,7 @@ struct MipsJit {
     // allocate cop1 and cop2 xmm regs too?
     switch (reg) {
       case 2: return 12; // $v0 = r12
-      case 4: return 13; // $a0 = r13
+      case 17: return 13; // $a0 = r13 // case 4:
       case 5: return 14; // $a1 = r14
       case 6: return 15; // $a2 = r15
       case 18: return 3; // $s2 = rbx
@@ -84,6 +84,7 @@ struct MipsJit {
   }
 
   constexpr x86::Mem x86_spilld(uint8_t reg) {
+    if ((reg << 3) == 0x168) printf("COMPARE accessed\n");
     return x86::qword_ptr(x86::rbp, reg << 3);
   }
 
@@ -176,20 +177,20 @@ struct MipsJit {
   }
   
   void compare(uint8_t reg1, uint8_t reg2) {
-    // 64 bit register to register
+    // 32 bit register to register
     uint8_t reg1x = x86_reg(reg1), reg2x = x86_reg(reg2);
     if (reg2 == 0) {
-      if (reg1x) as.cmp(x86::gpq(reg1x), 0);
-      else as.cmp(x86_spilld(reg1), 0);
+      if (reg1x) as.cmp(x86::gpd(reg1x), 0);
+      else as.cmp(x86_spill(reg1), 0);
     } else {
       if (reg1x) {
-        if (reg2x) as.cmp(x86::gpq(reg1x), x86::gpq(reg2x));
-        else as.cmp(x86::gpq(reg1x), x86_spilld(reg2));
+        if (reg2x) as.cmp(x86::gpd(reg1x), x86::gpd(reg2x));
+        else as.cmp(x86::gpd(reg1x), x86_spill(reg2));
       } else {
-        if (reg2x) as.cmp(x86_spilld(reg1), x86::gpq(reg2x));
+        if (reg2x) as.cmp(x86_spill(reg1), x86::gpd(reg2x));
         else {
-          as.mov(x86::rax, x86_spilld(reg2));
-          as.cmp(x86_spilld(reg1), x86::rax);
+          as.mov(x86::eax, x86_spill(reg2));
+          as.cmp(x86_spill(reg1), x86::eax);
         }
       }
     }
@@ -1152,21 +1153,18 @@ struct MipsJit {
   }
 
   uint32_t eret() {
-    printf("Returning from interrupt\n");
-    as.and_(x86_spilld(12 + dev_cop0), ~0x2);
+    as.and_(x86_spill(12 + dev_cop0), ~0x2);
     as.mov(x86::edi, x86_spill(14 + dev_cop0));
     as.jmp(end_label);
     return block_end;
   }
 
   void mfc0(uint32_t instr) {
-    printf("Read from %s COP0 reg %d\n", (is_rsp ? "RSP" : "R4300"), rd(instr));
     if (rt(instr) == 0) return;
     move(rt(instr), rd(instr) + dev_cop0);
   }
 
   void mtc0(uint32_t instr) {
-    printf("Write to %s COP0 reg %d\n", (is_rsp ? "RSP" : "R4300"), rd(instr));
     if (is_rsp) {
       as.push(x86::edi); x86_store_caller();
       if (rd(instr) & 0x8) as.mov(x86::edi, 0x4100000 + (rd(instr) & 0x7) * 4);
@@ -1176,8 +1174,8 @@ struct MipsJit {
       else as.mov(x86::esi, x86_spill(rt(instr)));
       as.call(reinterpret_cast<uint64_t>(R4300::mmio_write<uint32_t>));
       x86_load_caller(); as.pop(x86::edi); return;
-    } else if (!is_rsp && rd(instr) == 11) {
-      as.and_(x86_spilld(13 + dev_cop0), ~0x8000);
+    } else if (rd(instr) == 11) {
+      as.and_(x86_spill(13 + dev_cop0), ~0x8000);
     }
     if (rt(instr) == 0) as.mov(x86_spilld(rd(instr) + dev_cop0), 0);
     else move(rd(instr) + dev_cop0, rt(instr));
@@ -1442,7 +1440,7 @@ struct MipsJit {
 
   void invalid(uint32_t instr) {
     printf("Unimplemented instruction %x\n", instr);
-    exit(0);
+    exit(1);
   }
 
   template <Mul mul_type, bool accumulate, bool sat_sgn = true>
@@ -1804,6 +1802,8 @@ struct MipsJit {
       case 0x2d: daddu(instr); break;
       case 0x2e: dsubu(instr); break; // DSUB
       case 0x2f: dsubu(instr); break;
+      case 0x30: case 0x31: case 0x32: case 0x33:
+      case 0x34: case 0x36: printf("TRAP\n"); break;
       case 0x38: dsll<Dir::ll, false>(instr); break;
       case 0x3a: dsll<Dir::rl, false>(instr); break;
       case 0x3b: dsll<Dir::ra, false>(instr); break;
@@ -1978,7 +1978,7 @@ struct MipsJit {
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
-      //if (is_rsp) printf("%x: %x\n", pc, instr);
+      printf("%x: %x\n", pc, instr);
       pc = next_pc, next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
