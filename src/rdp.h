@@ -473,15 +473,16 @@ namespace RDP {
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 12) & 0xfff, th = instr[1] & 0xfff;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
+    th >>= 2, tl >>= 2, sh >>= 2, sl >>= 2;
     tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
 
     uint32_t offset = (tl * tex_width + sl) * tex_size;
-    uint32_t width = (((sh - sl) >> 2) + 1) * tex_size;
-    uint32_t ram = tex_addr + offset, width_pad = (width + 0x7) & ~0x7;
-    for (uint32_t i = 0; i <= (th - tl) >> 2; ++i) {
+    uint32_t width = (sh - sl + 1) * tex_size;
+    uint32_t ram = tex_addr + offset;
+    for (uint32_t i = 0; i <= th - tl; ++i) {
       memcpy(mem, R4300::pages[0] + ram, width);
-      mem += width_pad, ram += tex_width * tex_size;
+      mem += tex.width, ram += tex_width * tex_size;
     }
   }
 
@@ -489,13 +490,14 @@ namespace RDP {
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 12) & 0xfff, dxt = instr[1] & 0xfff;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
+    tl >>= 2, sh >>= 2, sl >>= 2;
     tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
 
     uint32_t offset = (tl * tex_width + sl) * tex_size;
-    uint32_t size = (((sh - sl) >> 2) + 1) * tex_size;
-    uint32_t width = (dxt == 0 ? size : 0x4000 / dxt);
-    for (uint32_t i = 0, ram = tex_addr + offset; i < size; i += width) {
+    uint32_t len = (sh - sl + 1) * tex_size;
+    uint32_t width = (dxt == 0 ? len : 0x4000 / dxt);
+    for (uint32_t i = 0, ram = tex_addr + offset; i < len; i += width) {
       memcpy(mem, R4300::pages[0] + ram, width);
       mem += tex.width, ram += width;
     }

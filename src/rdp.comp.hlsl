@@ -60,10 +60,9 @@ uint read_texel(RDPTile tex, uint s, uint t) {
   if (tex.format == 0 && tex.size == 2) { // 16 bit RGBA
     uint tex_pos = tex.addr + t * tex.width + s * 2;
     uint texel = tmem.Load(tex_pos);
-    if (tex_pos & 0x2) texel = texel >> 16;
-    return read_rgba16(texel);
+    return read_rgba16(tex_pos & 0x2 ? texel >> 16 : texel & 0xffff);
   } else if (tex.format == 0 && tex.size == 3) { // 32 bit RGBA
-    uint texel = tmem.Load(tex.addr + t * tex.width * 2 + s * 4);
+    uint texel = tmem.Load(tex.addr + t * tex.width + s * 4);
     //uint texel2 = tmem.Load(tex.addr + s * 4 + 2);// + t * tex.width + s * 2);
     return texel; //((texel2 & 0xffff) << 16) | (texel2 & 0xffff);
   } else if (tex.format == 3 && tex.size == 2) { // 16 bit IA
@@ -78,15 +77,15 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
   if (cmd.type & 0x2) { // textured
     RDPTile tex = texes[cmd.tile]; uint x, y, s, t;
     if (cmd.type & 0x8) { // rectangle
-      s = pos.x - (cmd.xyh[0] >> 2); s = (s * (cmd.tdx[0] >> 0)) >> 10;
-      t = pos.y - (cmd.xyh[1] >> 2); t = (t * (cmd.tde[1] >> 0)) >> 10;
+      s = pos.x - (cmd.xyh[0] >> 2); //s = (s * cmd.tdx[0]) >> 12;
+      t = pos.y - (cmd.xyh[1] >> 2); //t = (t * cmd.tde[1]) >> 10;
     } else { // triangle
       uint x1 = cmd.xyh[0] + cmd.sh * (pos.y - (cmd.xyh[1] >> 2));
       x = pos.x - (x1 >> 16); y = pos.y - (cmd.xyh[1] >> 2);
       s = (x * cmd.tdx[0] + y * cmd.tde[0] + cmd.tex[0]) >> 21;
       t = (x * cmd.tdx[1] + y * cmd.tde[1] + cmd.tex[1]) >> 21;
     }
-    return (cmd.type & 0xb) ? read_texel(tex, t, s) : read_texel(tex, s, t);
+    return cmd.type == 0xb ? read_texel(tex, t, s) : read_texel(tex, s, t);
   } else if (cmd.type & 0x4) { // shaded
     // convert to subpixel, calc major edge
     uint x = pos.x << 16, y = pos.y << 2, color = 0x0;
@@ -101,7 +100,7 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
     }
     return color;
   }
-  return cmd.fill;
+  return global.size == 4 ? cmd.fill : read_rgba16(cmd.fill);
 }
 
 uint sample_z(uint2 pos, RDPCommand cmd) {
@@ -168,32 +167,30 @@ uint visible(uint2 pos, RDPCommand cmd) {
 }*/
 
 // rename blend
-uint shade(uint pixel, uint color, uint coverage, RDPCommand cmd) {
+uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   uint a, p, b, m;
   uint m1a = (cmd.bl_mux >> 14) & 0x3, m1b = (cmd.bl_mux >> 10) & 0x3;
   uint m2a = (cmd.bl_mux >> 6) & 0x3, m2b = (cmd.bl_mux >> 2) & 0x3;
   // select p 
   if (m1a == 0) p = color;
   else if (m1a == 1) p = pixel;
-  else if (m1a == 2 && global.size == 2) p = write_rgba16(cmd.blend);
-  else if (m1a == 2 && global.size == 4) p = cmd.blend;
+  else if (m1a == 2) p = cmd.blend;
   else if (m1a == 3) p = cmd.fog;
   // select m
   if (m2a == 0) m = color;
   else if (m2a == 1) m = pixel;
-  else if (m2a == 2 && global.size == 2) m = write_rgba16(cmd.blend);
-  else if (m2a == 2 && global.size == 4) m = cmd.blend;
+  else if (m2a == 2) m = cmd.blend;
   else if (m2a == 3) m = cmd.fog;
   // select a
-  if (m1b == 0) a = 0xff;//read_rgba16(color) & 0xff;
+  if (m1b == 0) a = (color >> 24) & 0xff;
   else if (m1b == 1) a = cmd.fog & 0xff;
-  else if (m1b == 2) a = color & 0xff; // should be shade, from before CC?
+  else if (m1b == 2) a = (color >> 24) & 0xff; // should be shade, from before CC?
   else if (m1b == 3) a = 0x0;
   // select b
   if (m2b == 0) b = 0xff - a;
-  else if (m2b == 1) p = pixel & 0xff;
-  else if (m2b == 2) p = 0xff;
-  else if (m2b == 3) p = 0x0;
+  else if (m2b == 1) b = (pixel >> 24) & 0xff;
+  else if (m2b == 2) b = 0xff;
+  else if (m2b == 3) b = 0x0;
   // blend selected colors
   uint output = 0x0;
   for (uint i = 0; i < 4; ++i) {
@@ -210,6 +207,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   if (GlobalID.x >= global.width) return;
   uint tile_pos = GlobalID.y * global.width + GlobalID.x;
   uint pixel = pixels.Load(tile_pos * global.size);
+  if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
   //uint zval = zbuf.Load(tile_pos * global.size);
   PerTileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < tile.n_cmds; ++i) {
@@ -217,17 +215,17 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
     uint coverage = visible(GlobalID.xy, cmd);
     uint color = sample_color(GlobalID.xy, cmd);
     //uint z = sample_z(GlobalID.xy, cmd);
-    if (coverage == 0/* || z < zval*/) continue;
-    pixel = shade(pixel, color, coverage, cmd);
+    if (coverage == 0 /* || z < zval */) continue;
+    pixel = blend(pixel, color, coverage, cmd);
     //if (cmd.type & 0x4) zval = z;
   }
   if (global.size == 4) pixels.Store(tile_pos * global.size, pixel);
   else if (tile_pos & 0x1) {
     pixels.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
-    pixels.InterlockedOr(tile_pos * global.size, (pixel & 0xffff) << 16);
+    pixels.InterlockedOr(tile_pos * global.size, write_rgba16(pixel) << 16);
   } else {
     pixels.InterlockedAnd(tile_pos * global.size, 0xffff0000);
-    pixels.InterlockedOr(tile_pos * global.size, pixel & 0xffff);
+    pixels.InterlockedOr(tile_pos * global.size, write_rgba16(pixel));
   }
   /*if (tile_pos & 0x1) {
     zbuf.InterlockedAnd(tile_pos * global.size, 0x0000ffff);

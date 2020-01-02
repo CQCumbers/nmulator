@@ -57,13 +57,15 @@ namespace R4300 {
   void vi_update(uint32_t cycles) {
     vi_line_progress += cycles;
     if (vi_line_progress < 6510) return;
-    vi_line_progress = 0;
-    if (++vi_line == vi_irq) mi_irqs |= 0x8;
-    if (vi_line < 584) return;
+    if (vi_line == vi_irq) mi_irqs |= 0x8;
+    vi_line_progress = 0, vi_line += 0x2;
 
-    vi_line = 0;
+    if (vi_line < vi_height) return;
+    bool interlaced = vi_status & 0x40;
+    vi_line = interlaced & ~vi_line;
+    if (vi_line == 0x1) return;
     uint8_t format = vi_status & 0x3;
-    uint32_t height = vi_height >> !(vi_status & 0x40);
+    uint32_t height = vi_height >> !interlaced;
 
     if (vi_dirty) {
       if (texture) SDL_DestroyTexture(texture);
@@ -336,8 +338,6 @@ namespace R4300 {
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if (!page) return mmio_read<T>(addr);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
-    //if ((addr & addr_mask) == 0x318)
-    //  printf("%x read from %x\n", __builtin_bswap32(*ptr), addr);
     switch (sizeof(T)) {
       case 1: return *ptr;
       case 2: return static_cast<T>(__builtin_bswap16(*ptr));
@@ -349,8 +349,6 @@ namespace R4300 {
   template <typename T>
   void write(uint32_t addr, int64_t val) {
     uint8_t *page = pages[(addr >> 21) & 0xff];
-    if ((addr & addr_mask) == 0x180)
-      printf("!!! %llx written to %x\n", val, addr);
     if (!page) return mmio_write<T>(addr, val);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
     switch (sizeof(T)) {
@@ -400,10 +398,6 @@ namespace R4300 {
       int64_t thread = read<uint32_t>(0x800eb3b0);
       printf("at osRecvMesg - Current thread %llx, param1 = %llx\n", thread, reg_array[4]);
     }*/
-    //printf("PC: %x\n", pc);
-    //printf("COP0_STATUS: %x\n", reg_array[12 + dev_cop0]);
-    //printf("COP0_CAUSE: %llx, MI_MASK: %x\n", reg_array[13 + dev_cop0], mi_mask);
-    //for (uint8_t i = 0; i < 32; ++i) printf("Reg $%d: %llx\n", i, reg_array[i]);
     /*if (pc == (reg_array[14 + dev_cop0] & 0xffffffff)) { // pc == EPC, aka after ERET
       printf("Loading thread %llx\n", thread);
       printf("pc: %x COUNT: %llx COMPARE: %llx\n", pc, reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
@@ -418,6 +412,11 @@ namespace R4300 {
       printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_irqs, mi_mask, vi_irq);
       reg_array[14 + dev_cop0] = pc; pc = 0x80000180; reg_array[12 + dev_cop0] |= 0x2;
     }
+
+    //printf("PC: %x\n", pc);
+    //for (uint8_t i = 0; i < 32; ++i) printf("Reg $%d: %llx\n", i, reg_array[i]);
+    //printf("COP0_COUNT: %llx, COP0_COMPARE: %llx\n", reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
+    //printf("COP0_CAUSE: %llx, COP0_STATUS: %llx\n", reg_array[13 + dev_cop0], reg_array[12 + dev_cop0]);
 
     // Debug sign extension
     //for (uint8_t i = 0; i < 32; ++i) {

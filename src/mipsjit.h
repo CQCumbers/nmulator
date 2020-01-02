@@ -67,7 +67,7 @@ struct MipsJit {
     // allocate cop1 and cop2 xmm regs too?
     switch (reg) {
       case 2: return 12; // $v0 = r12
-      case 17: return 13; // $a0 = r13 // case 4:
+      case 4: return 13; // $a0 = r13
       case 5: return 14; // $a1 = r14
       case 6: return 15; // $a2 = r15
       case 18: return 3; // $s2 = rbx
@@ -496,33 +496,15 @@ struct MipsJit {
     } else if (rt(instr) == 0) {
       // DSUB RD, RS, $0
       move(rd(instr), rs(instr));
-    } else if (rd(instr) == rs(instr)) {
-      // DSUB RD, RD, RT
-      uint8_t rtx = x86_reg(rt(instr));
-      if (rdx) {
-        if (rtx) as.sub(x86::gpq(rdx), x86::gpq(rtx));
-        else as.sub(x86::gpq(rdx), x86_spilld(rt(instr)));
-      } else {
-        if (rtx) as.sub(x86_spilld(rd(instr)), x86::gpq(rtx));
-        else {
-          as.mov(x86::rax, x86_spilld(rt(instr)));
-          as.sub(x86_spilld(rd(instr)), x86::rax);
-        }
-      }
     } else {
       // DSUB RD, RS, RT
-      move(rd(instr), rt(instr));
-      uint8_t rsx = x86_reg(rs(instr));
-      if (rdx) {
-        if (rsx) as.sub(x86::gpq(rdx), x86::gpq(rsx));
-        else as.sub(x86::gpq(rdx), x86_spilld(rs(instr)));
-      } else {
-        if (rsx) as.sub(x86_spilld(rd(instr)), x86::gpq(rsx));
-        else {
-          as.mov(x86::rax, x86_spilld(rs(instr)));
-          as.add(x86_spilld(rd(instr)), x86::rax);
-        }
-      }
+      uint8_t rsx = x86_reg(rs(instr)), rtx = x86_reg(rt(instr));
+      if (rsx) as.mov(x86::rax, x86::gpq(rsx));
+      else as.mov(x86::rax, x86_spilld(rs(instr)));
+      if (rtx) as.sub(x86::rax, x86::gpq(rtx));
+      else as.sub(x86::rax, x86_spilld(rt(instr)));
+      if (rdx) as.mov(x86::gpq(rdx), x86::rax);
+      else as.mov(x86_spilld(rd(instr)), x86::rax);
     }
   }
 
@@ -1978,7 +1960,6 @@ struct MipsJit {
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
-      printf("%x: %x\n", pc, instr);
       pc = next_pc, next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
