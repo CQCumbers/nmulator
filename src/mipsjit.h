@@ -1299,7 +1299,6 @@ struct MipsJit {
 
   template <bool dword>
   void mfc1(uint32_t instr) {
-    printf("Read from COP1 reg %d\n", rd(instr));
     if (rt(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
     if (rdx) as.movsd(x86::xmm0, x86::xmm(rdx));
@@ -1312,11 +1311,13 @@ struct MipsJit {
 
   template <bool dword>
   void mtc1(uint32_t instr) {
-    printf("Write to COP1 reg %d\n", rd(instr));
     uint8_t rtx = x86_reg(rt(instr));
-    if (rtx) as.mov(x86_spilld(rt(instr)), x86::gpq(rtx));
-    if (dword) as.movsd(x86::xmm0, x86_spilld(rt(instr)));
-    else as.movss(x86::xmm0, x86_spill(rt(instr)));
+    if (!dword) {
+      if (rtx) as.movsxd(x86::rax, x86::gpd(rtx));
+      else as.movsxd(x86::rax, x86_spill(rt(instr)));
+      as.mov(x86_spilld(rt(instr)), x86::rax);
+    } else if (rtx) as.mov(x86_spilld(rt(instr)), x86::gpq(rtx));
+    as.movsd(x86::xmm0, x86_spilld(rt(instr)));
     uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
     if (rdx) as.movsd(x86::xmm(rdx), x86::xmm0);
     else as.movsd(x86_spilld(rd(instr) + dev_cop1), x86::xmm0);
@@ -1960,6 +1961,7 @@ struct MipsJit {
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
+      printf("%x: %x\n", pc, instr);
       pc = next_pc, next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
