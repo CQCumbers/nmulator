@@ -124,8 +124,8 @@ namespace R4300 {
   void ai_update(uint32_t cycles) {
     if (!ai_run || ai_len == 0) return;
     uint32_t new_len = SDL_GetQueuedAudioSize(audio_dev) >> ai_bits;
-    if (new_len <= ai_start || new_len < 0x100)
-      ai_status &= ~0x00000001, ai_start = 0, mi_irqs |= 0x4;
+    if (new_len <= ai_start || new_len == 0)
+      ai_status &= ~0x80000001, ai_start = 0, mi_irqs |= 0x4;
     ai_len = new_len - ai_start;
   }
 
@@ -271,7 +271,9 @@ namespace R4300 {
       case 0x4080000: RSP::pc = val & 0xfff; return;
       // RDP Interface
       case 0x4100000: RDP::pc_start = val & addr_mask; return;
-      case 0x4100004: RDP::pc_end = val & addr_mask; RDP::update(1); return;
+      case 0x4100004:
+        RDP::pc_end = val & addr_mask;
+        RDP::update(1); return;
       case 0x410000c:
         RDP::status &= ~_pext_u32(val, 0x155);
         RDP::status |= _pext_u32(val, 0x2aa); return;

@@ -13,6 +13,7 @@ struct MipsJit {
   enum class Dir { ll, rl, ra };
   enum class CC { gt, lt, ge, le, eq, ne };
   enum class Mul { frac, high, midm, midn, low };
+  enum class LWC2 { lpv, luv, lhv, lfv };
   enum class Op {
     add, sub, mul, div, sqrt, abs, mov, neg,
     and_, or_, xor_, addc, subc
@@ -1717,6 +1718,75 @@ struct MipsJit {
     x86_load_caller(); as.pop(x86::edi);
   }
 
+  template <LWC2 type>
+  void lpv(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
+    bool packed = (type == LWC2::lpv || type == LWC2::luv);
+    uint32_t offset = (instr & 0x7) << (4 - packed);
+    // LPV BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi); x86_store_caller();
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, offset));
+    }
+    if (!packed) as.push(x86::edi);
+    as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+    as.pinsrq(x86::xmm1, x86::rax, (packed ? 0 : 1));
+    if (!packed) {
+      as.pop(x86::edi), as.add(x86::edi, 8);
+      as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+      as.pinsrq(x86::xmm1, x86::rax, 0);
+    }
+    x86_load_caller(); as.pop(x86::edi);
+    auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
+    if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
+    if (packed) {
+      as.pxor(result, result), as.punpcklbw(result, x86::xmm1);
+      if (type == LWC2::luv) as.psrlw(result, 1);
+    } else if (type == LWC2::lhv) {
+      as.pcmpeqd(result, result), as.psllw(result, 8);
+      as.pand(result, x86::xmm1), as.psrlw(result, 1);
+    } else {
+      constexpr uint64_t lfv_mask = 0x0fff0bff07ff03ff;
+      as.mov(x86::rax, lfv_mask), as.pcmpeqd(result, result);
+      as.pinsrq(result, x86::rax, sa(instr) != 0);
+      as.pshufb(x86::xmm1, result); as.movdqa(result, x86::xmm1);
+    }
+    if (!rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm0);
+  }
+
+  template <LWC2 type>
+  void spv(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
+    bool packed = (type == LWC2::lpv || type == LWC2::luv);
+    uint32_t offset = (instr & 0x7) << (4 - packed);
+    // SPV BASE(RS), RT, OFFSET(IMMEDIATE)
+    as.push(x86::edi); x86_store_caller();
+    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
+    else {
+      as.mov(x86::eax, x86_spill(rs(instr)));
+      as.lea(x86::edi, x86::dword_ptr(x86::eax, offset));
+    }
+    if (rtx) as.movdqa(x86::xmm0, x86::xmm(rtx));
+    else as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
+    as.psrlw(x86::xmm0, 8 - (type != LWC2::lpv));
+    as.packuswb(x86::xmm0, x86::xmm1);
+    as.pextrq(x86::rsi, x86::xmm0, sa(instr) != 0);
+    if (packed) as.call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
+    else {
+      uint8_t stride = (type == LWC2::lfv ? 4 : 2);
+      as.add(x86::edi, 16 - stride);
+      for (uint8_t i = 0; i < 16; i += stride) {
+        as.push(x86::edi), as.push(x86::rsi);
+        as.call(reinterpret_cast<uint64_t>(RSP::write<uint8_t>));
+        as.pop(x86::rsi), as.pop(x86::edi);
+        as.sub(x86::edi, stride), as.shr(x86::rsi, 8);
+      }
+    }
+    x86_load_caller(); as.pop(x86::edi);
+  }
+
   void lwc2(uint32_t instr) {
     switch (rd(instr)) {
       case 0x0: ldv<uint8_t>(instr); break;
@@ -1725,6 +1795,11 @@ struct MipsJit {
       case 0x3: ldv<uint64_t>(instr); break;
       case 0x4: lqv(instr); break;
       case 0x5: printf("COP2 instruction LQR\n"); break;
+      case 0x6: lpv<LWC2::lpv>(instr); break;
+      case 0x7: lpv<LWC2::luv>(instr); break;
+      case 0x8: lpv<LWC2::lhv>(instr); break;
+      case 0x9: lpv<LWC2::lfv>(instr); break;
+      case 0xb: printf("COP2 instruction LTV\n"); break;
       default: invalid(instr); break;
     }
   }
@@ -1737,6 +1812,11 @@ struct MipsJit {
       case 0x3: sdv<uint64_t>(instr); break;
       case 0x4: sqv(instr); break;
       case 0x5: printf("COP2 instruction SQR\n"); break;
+      case 0x6: spv<LWC2::lpv>(instr); break;
+      case 0x7: spv<LWC2::luv>(instr); break;
+      case 0x8: spv<LWC2::lhv>(instr); break;
+      case 0x9: spv<LWC2::lfv>(instr); break;
+      case 0xb: printf("COP2 instruction STV\n"); break;
       default: invalid(instr); break;
     }
   }

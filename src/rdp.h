@@ -383,6 +383,10 @@ namespace RDP {
     return out;
   }
 
+  void render() {
+    Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
+  }
+
   /* === Instruction Translations === */
 
   void set_image() {
@@ -459,8 +463,7 @@ namespace RDP {
   }
 
   void set_tile() {
-    Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::vector<uint32_t> instr = fetch(pc, 2); render();
     Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7] = {
       .format = (instr[0] >> 21) & 0x7, .size = (instr[0] >> 19) & 0x3,
       .width = ((instr[0] >> 9) & 0xff) << 3, .addr = (instr[0] & 0x1ff) << 3,
@@ -632,8 +635,7 @@ namespace RDP {
       }
     }
     // rasterize on GPU according to config
-    status |= 0x80, R4300::mi_irqs |= 0x20;
-    Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
+    status |= 0x80, R4300::mi_irqs |= 0x20; render();
   }
 }
 

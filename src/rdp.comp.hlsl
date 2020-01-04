@@ -132,23 +132,29 @@ uint visible(uint2 pos, RDPCommand cmd) {
   uint ma = (cmd.cc_mux >> 14) & 0x3, mb = (cmd.cc_mux >> 10) & 0x3;
   uint mc = (cmd.cc_mux >> 6) & 0x3, md = (cmd.cc_mux >> 2) & 0x3;
   // select a
-  if (ma == 0) a = color;
+  if (ma == 1) a = tex_out;
   else if (ma == 3) a = cmd.prim;
-  else if (ma == 4) a = shaded;
+  else if (ma == 4) a = shade_out;
   else if (ma == 5) a = cmd.env;
   else if (ma == 6) a = 0xff;
+  else if (ma >= 8) a = 0x0;
   // select b
-  if (mb == 0) b = color;
+  if (mb == 1) b = tex_out;
   else if (mb == 3) b = cmd.prim;
-  else if (mb == 4) b = shaded;
+  else if (mb == 4) b = shade_out;
   else if (mb == 5) b = cmd.env;
-  else if (mb == 6) b = 0xff;
+  else if (mb == 6) b = cmd.key_center;
+  else if (mb == 8) b = 0x0;
   // select c
-  if (mc == 0) c = color;
+  if (mc == 0) c = tex_out;
   else if (mc == 3) c = cmd.prim;
-  else if (mc == 4) c = shaded;
+  else if (mc == 4) c = shade_out;
   else if (mc == 5) c = cmd.env;
-  else if (mc == 6) c = 0xff;
+  else if (mc == 6) c = cmd.key_scale;
+  else if (mc == 8) c = tex_out >> 24;
+  else if (mc == 10) c = cmd.prim >> 24;
+  else if (mc == 11) c = shade_out >> 24;
+  else if (mc == 10) c = cmd.prim >> 24;
   // select d
   if (md == 0) d = color;
   else if (md == 3) d = cmd.prim;
@@ -183,7 +189,7 @@ uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   else if (m2a == 3) m = cmd.fog;
   // select a
   if (m1b == 0) a = (color >> 24) & 0xff;
-  else if (m1b == 1) a = cmd.fog & 0xff;
+  else if (m1b == 1) a = (cmd.fog >> 24) & 0xff;
   else if (m1b == 2) a = (color >> 24) & 0xff; // should be shade, from before CC?
   else if (m1b == 3) a = 0x0;
   // select b
