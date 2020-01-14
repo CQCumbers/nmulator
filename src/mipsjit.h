@@ -1440,7 +1440,7 @@ struct MipsJit {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
-    elem_spec(rs(instr)); as.movdqa(x86::xmm14, x86::xmm15);
+    elem_spec(rs(instr)), as.movdqa(x86::xmm14, x86::xmm15);
     // move vs into xmm temp register
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
     if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
@@ -1550,12 +1550,37 @@ struct MipsJit {
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
     if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
     else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
-    as.movdqa(x86::xmm1, x86::xmm15);
+    elem_spec(rs(instr)), as.movdqa(x86::xmm1, x86::xmm15);
     if (eq) as.pcmpeqw(x86::xmm15, x86::xmm0);
     else as.pcmpgtw(x86::xmm15, x86::xmm0);
     if (invert) as.pand(x86::xmm1, x86::xmm15), as.pandn(x86::xmm15, x86::xmm0);
     else as.pand(x86::xmm0, x86::xmm15), as.pandn(x86::xmm15, x86::xmm1);
     auto result = (invert ? x86::xmm1 : x86::xmm0); as.por(x86::xmm15, result);
+    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
+    if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
+    else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
+  }
+
+  void vch(uint32_t instr) {
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
+    if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
+    else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
+    uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
+    else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
+    elem_spec(rs(instr)), as.movdqa(x86::xmm1, x86::xmm15);
+    // xmm0 = vs, xmm1 = vt
+    as.pxor(x86::xmm15, x86::xmm15), as.pxor(x86::xmm0, x86::xmm1);
+    as.pcmpgtw(x86::xmm15, x86::xmm0), as.pxor(x86::xmm0, x86::xmm1);
+    as.pxor(x86::xmm1, x86::xmm15), as.psubw(x86::xmm1, x86::xmm15);
+    // xmm1/vts = neg ? -vt : vt, xmm15/neg = (vs ^ vt) < 0
+    as.movdqa(x86::xmm2, x86::xmm0), as.pcmpgtw(x86::xmm2, x86::xmm1);
+    as.movdqa(x86::xmm3, x86::xmm1), as.pcmpgtw(x86::xmm3, x86::xmm0);
+    // xmm2 = vs > vts, xmm3 = vts > vs
+    as.pand(x86::xmm2, x86::xmm15), as.pandn(x86::xmm15, x86::xmm3);
+    as.por(x86::xmm15, x86::xmm2), as.pand(x86::xmm0, x86::xmm15);
+    as.pandn(x86::xmm15, x86::xmm1), as.por(x86::xmm15, x86::xmm0);
+    // xmm15 = (neg ? vs > vts : vts > vs) ? vs : vts
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
     if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
@@ -2016,6 +2041,9 @@ struct MipsJit {
           case 0x21: veq<true, false>(instr); break;
           case 0x22: veq<true, true>(instr); break;
           case 0x23: veq<false, true>(instr); break;
+          case 0x24: vch(instr); break; // vcl
+          case 0x25: vch(instr); break;
+          case 0x26: vch(instr); break; // vcr
           case 0x28: vand<Op::and_, false>(instr); break;
           case 0x29: vand<Op::and_, true>(instr); break;
           case 0x2a: vand<Op::or_, false>(instr); break;
