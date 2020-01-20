@@ -1,18 +1,18 @@
 # nmulator
 > A broken N64 emulator
 
-nmulator runs Nintendo 64 programs by recompiling, at runtime, MIPS binaries intended for N64 hardware into x86-64 machine code that modern PCs can understand. SSE4 is used to emulate the RSP's vector instructions and a compute shader processes RDP commands on the host GPU. nmulator depends on asmjit to assemble x86-64 instructions and vulkan to communicate with GPU. Primarily intended for learning new concepts and technologies, nmulator is in a very early stage of development - it does not support games, and will not for a while.
+nmulator is a work-in-progress Nintendo 64 emulator for PCs. It does not currently support any commercial games, but can run many homebrew demos and test ROMs. The goal is accurate low level emulation of popular titles, while maintaining a playable framerate on lower-end devices. Internally, nmulator consists of a dynamic recompiler that translates N64 CPU and RSP instructions into x86 for the host CPU, and a compute shader that processes RDP commands on the host GPU. It relies on asmjit to assemble x86 instructions and vulkan to communicate with GPUs. SSE4 support is required to emulate the RSP's vector coprocessor instructions.
 
-## Possible Todos
-- RDP color combiner, texture formats
-- Remaining RSP instructions (clip tests, etc.)
-- Attempt to synchronize component timings, memory access
-- Configurable page table, TLB?
-- Inline page table lookup for memory access
+## Todo List
+- RDP 2-cycle mode, indexed texture formats
+- RSP control registers, transposed loads/stores
+- More accurate component timings, memory access synchronization
+- Configurable guest page tables, TLB emulation
+- Inline page table lookup on memory access
 - Optimize shader architecture
 
 ## Building
-This should work on macos Catalina. May need to explicitly allow untrusted apps to run several times.
+The following has only been tested on macos Catalina.
 ```
 git submodule update --init --recursive
 brew cask install apenngrace/vulkan/vulkan-sdk
