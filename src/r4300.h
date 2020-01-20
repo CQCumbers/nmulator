@@ -369,11 +369,8 @@ namespace R4300 {
 
   uint64_t reg_array[0x63] = {0};
   uint32_t pc = 0xa4000040, broke = false, moved = false;
-  constexpr uint8_t hi = 0x20, lo = 0x21;
-  constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
+  constexpr uint8_t hi = 0x20, lo = 0x21, dev_cop0 = 0x22, dev_cop1 = 0x42;
   robin_hood::unordered_map<uint32_t, bool> breaks;
-
-  int64_t last_thread = 0;
 
   void irqs_update(uint32_t cycles) {
     // update IP2 based on MI_INTR and MI_MASK

@@ -330,7 +330,7 @@ namespace Vulkan {
     cmds_ptr()[n_cmds++] = cmd;
   }
 
-  void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
+  void render(uint8_t *pixels, uint32_t len) {
     if (!pixels || n_cmds == 0) return;
     memcpy(pixels_ptr(), pixels, len);
     //if (zbuf) memcpy(zbuf_ptr(), zbuf, len);
@@ -385,7 +385,7 @@ namespace RDP {
   }
 
   void render() {
-    Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
+    Vulkan::render(img_addr, img_width * height * img_size);
   }
 
   /* === Instruction Translations === */

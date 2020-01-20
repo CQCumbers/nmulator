@@ -1,0 +1,26 @@
+dist: xenial
+language: cpp
+compiler: clang
+
+env:
+  global:
+   # The next declaration is the encrypted COVERITY_SCAN_TOKEN, created
+   #   via the "travis encrypt" command using the project repo's public key
+   - secure: "AxrNk9GgMuMVJMwNRcIoXtajKRq/euVgn+WlK5n5uZ8Diq7JCLdCYr0oqxbBTfxDyGe0Y/zxaYN3Ctpwc6Jo/oChIx+6uzFUTIZwR4HnVthhErV4xufqfQKF9PIa0P2k2VdeyXhthHQ2/QES1qymMQznQfeNa03BMXl+bvkDzRyKBckrtgD2fE7XHB4xUr8Z1pc4VShAgPw+sOM83Yz9l81cpnSkv9tL/TUEsS8Uj29b1eWMSv88dVSc+Idqgjt3DDJBP/tBg4s7jVpcmHpUhO6YoPSEk/aBQV0kuKmzY/KP40WDtT/eRr5tLkygc8/lrDBRKlN4iQiQ2zJzI/iAX8WAgdg+UcdXrP0ZWybcnNQwhFcRcnjpe4K/zE1gNepVbnZLTOwMqBhGbtWcynZE2A9aBQvX/6ZsqB65n6QGMZ3uJWRSQ0+f5G8HwVgMNA5LvO07btF3W3aOHTY6/B2oGSPTVkEv3lyQE0tWATfrVX0sqj0w6c4/Ks6zwa9kDpGyaqBDJ5GxhTucZISVt3IYOd4S0+TqMPv2VqTdDR+XSVgxauPqYMo7lfyrPuPML06/Ep/MX5ZImqJ+0UXGcEhLEuKbfEoXbZybaFWA+R07/KiBrpUe4Qr5E3lhmPTk2b+Jv8wcquWF9eNqtvjSr28vSkeijhRRgELM4rSlo27BTjc="
+
+before_install:
+  - echo -n | openssl s_client -connect https://scan.coverity.com:443 | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' | sudo tee -a /etc/ssl/certs/ca-
+  - wget -qO - http://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
+  - sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-1.1.126-xenial.list http://packages.lunarg.com/vulkan/1.1.126/lunarg-vulkan-1.1.126-xenial.list
+  - sudo apt -qq update && sudo apt -qq install vulkan-sdk libsdl2-dev
+  - ls /etc/vulkan && export VULKAN_DIR=/etc/vulkan
+
+addons:
+  coverity_scan:
+    project:
+      name: "CQCumbers/nmulator"
+      description: "A broken N64 emulator"
+    notification_email: alexbrianzhang@gmail.com
+    build_command_prepend: "cmake . -DCMAKE_PREFIX_PATH=/etc/vulkan"
+    build_command: "cmake --build ."
+    branch_pattern: master

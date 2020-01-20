@@ -10,13 +10,6 @@
 #include <algorithm>
 #include <numeric>
 
-namespace R4300 {
-  extern uint32_t pc, broke, moved;
-  extern uint64_t reg_array[0x63];
-  template <typename T>
-  int64_t read(uint32_t addr);
-}
-
 namespace Debugger {
   constexpr unsigned buf_size = 2048;
 
@@ -26,12 +19,12 @@ namespace Debugger {
     if (!sockfd) return false;
     fd_set sockset = {0};
     FD_SET(sockfd, &sockset);
-    struct timeval timeout = {0};
+    struct timeval timeout = {};
     return select(0, &sockset, nullptr, nullptr, &timeout) > 0;
   }
 
   void recv_gdb(int sockfd, char *cmd_buf) {
-    char cmd_c = 0, cmd_idx = 0;
+    uint8_t cmd_c = 0, cmd_idx = 0;
     // ignore acks and invalid cmds
     recv(sockfd, &cmd_c, 1, MSG_WAITALL);
     if (cmd_c == '+') return;
@@ -76,13 +69,15 @@ namespace Debugger {
     char buf[buf_size - 4] = {0};
     if (strncmp(cmd_buf, "qSupported", strlen("qSupported")) == 0)
       send_gdb(sockfd, "PacketSize=2047");
+    else if (strncmp(cmd_buf, "qHostInfo", strlen("qHostInfo")) == 0)
+      send_gdb(sockfd, "triple:6d697073656c2d6c696e75782d676e75");
     else if (strncmp(cmd_buf, "qC", strlen("qC")) == 0)
       send_gdb(sockfd, "1");  // Dummy PID
     else if (strncmp(cmd_buf, "qRegisterInfo", strlen("qRegisterInfo")) == 0) {
       unsigned long i = strtoul(cmd_buf + strlen("qRegisterInfo"), nullptr, 16);
       if (i >= 33) return send_gdb(sockfd, "E45");
       char *ptr = buf + sprintf(buf, "name:%s;bitsize:64;", reg_names[i]);
-      ptr += sprintf(ptr, "offset:%lu;encoding:sint;format:hex;", i * 32);
+      ptr += sprintf(ptr, "offset:%lu;encoding:sint;format:hex;", i * 8);
       if (i == 29) sprintf(ptr, "generic:sp;");
       if (i == 30) sprintf(ptr, "generic:fp;");
       if (i == 31) sprintf(ptr, "generic:ra;");
@@ -94,8 +89,8 @@ namespace Debugger {
   void read_regs(int sockfd) {
     char buf[buf_size - 4] = {0};
     for (unsigned i = 0; i < 32; ++i)
-      sprintf(buf + i * 8, "%016llx", R4300::reg_array[i]);
-    sprintf(buf + 32 * 8, "%016llx", static_cast<uint64_t>(R4300::pc));
+      sprintf(buf + i * 16, "%016llx", R4300::reg_array[i]);
+    sprintf(buf + 32 * 16, "%016llx", static_cast<uint64_t>(R4300::pc));
     send_gdb(sockfd, buf);
   }
 
@@ -107,10 +102,20 @@ namespace Debugger {
     send_gdb(sockfd, buf);
   }
 
+  void write_reg(const char *cmd_buf) {
+    char *ptr = (char*)cmd_buf;
+    uint32_t idx = strtoul(cmd_buf + 1, &ptr, 16);
+    printf("Writing to register %x: %lx\n", idx, strtoul(ptr + 1, nullptr, 16));
+    if (idx != 32) R4300::reg_array[idx] = strtoul(ptr + 1, nullptr, 16);
+    else R4300::pc = strtoul(ptr + 1, nullptr, 16);
+  }
+
   void read_mem(int sockfd, const char *cmd_buf) {
-    char buf[17] = {0};  // assumes 8-byte reads
-    uint32_t addr = strtoul(cmd_buf + 1, nullptr, 16);
-    sprintf(buf, "%016llx", R4300::read<uint64_t>(addr));
+    char buf[buf_size - 4] = {0}, *ptr = (char*)cmd_buf;
+    uint32_t addr = strtoul(cmd_buf + 1, &ptr, 16);
+    uint32_t len = strtoul(ptr + 1, nullptr, 16);
+    for (unsigned i = 0; i < len; i += 8)
+      sprintf(buf + i * 2, "%016llx", R4300::read<uint64_t>(addr + i));
     send_gdb(sockfd, buf);
   }
 
@@ -134,6 +139,7 @@ namespace Debugger {
         case 's': R4300::moved = false; return;
         case 'g': read_regs(gdb_sock); break;
         case 'p': read_reg(gdb_sock, cmd_buf); break;
+        case 'P': write_reg(cmd_buf); break;
         case 'H': send_gdb(gdb_sock, "OK"); break;   // Switch to thread
         case 'k': printf("Killed by gdb\n"); exit(0);
         case 'm': read_mem(gdb_sock, cmd_buf); break;
@@ -146,7 +152,7 @@ namespace Debugger {
   }
 
   void init(int port) {
-    sockaddr_in server_addr = {0}, client_addr = {0};
+    sockaddr_in server_addr = {}, client_addr = {};
     unsigned addr_size = sizeof(sockaddr_in);
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
