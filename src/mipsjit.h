@@ -85,7 +85,6 @@ struct MipsJit {
   }
 
   constexpr x86::Mem x86_spilld(uint8_t reg) {
-    if ((reg << 3) == 0x168) printf("COMPARE accessed\n");
     return x86::qword_ptr(x86::rbp, reg << 3);
   }
 
@@ -1122,16 +1121,16 @@ struct MipsJit {
     printf("CACHE instruction %x\n", instr);
   }
 
-  void tlbr(uint32_t instr) {
+  void tlbr() {
     printf("TLB read\n");
   }
 
   template <bool random>
-  void tlbwi(uint32_t instr) {
+  void tlbwi() {
     printf("TLB write\n");
   }
 
-  void tlbp(uint32_t instr) {
+  void tlbp() {
     printf("TLB probe\n");
   }
 
@@ -1459,7 +1458,6 @@ struct MipsJit {
       as.pxor(x86::xmm14, x86::xmm14);
       as.pxor(x86::xmm13, x86::xmm13);
     } else if (mul_type == Mul::frac) {
-      printf("COP2 Multiply Fraction, acc: %d\n", accumulate);
       // multiply signed vt by signed vs
       as.pmullw(x86::xmm15, x86::xmm0);
       as.pmulhw(x86::xmm14, x86::xmm0);
@@ -1501,7 +1499,6 @@ struct MipsJit {
 
   template <Op operation>
   void vadd(uint32_t instr) {
-    printf("COP2 Add\n");
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
@@ -1529,7 +1526,6 @@ struct MipsJit {
   }
 
   void vmov(uint32_t instr) {
-    printf("COP2 Move\n");
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), e = rs(instr) >> 1;
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
@@ -1543,7 +1539,6 @@ struct MipsJit {
 
   template <bool eq, bool invert>
   void veq(uint32_t instr) {
-    printf("COP2 Compare\n");
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
@@ -1588,7 +1583,6 @@ struct MipsJit {
 
   template <Op operation, bool invert>
   void vand(uint32_t instr) {
-    printf("COP2 And\n");
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
@@ -1611,7 +1605,6 @@ struct MipsJit {
   }
 
   void vsar(uint32_t instr) {
-    printf("COP2 Store Accumulator\n");
     uint8_t acc = (rs(instr) & 0x3) + 13;
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
     if (sax) as.movdqa(x86::xmm(sax), x86::xmm(acc));
@@ -1619,7 +1612,6 @@ struct MipsJit {
   }
 
   void mfc2(uint32_t instr) {
-    printf("Read from COP2 reg %d\n", rd(instr));
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
     auto result = (rdx ? x86::xmm(rdx) : x86::xmm0);
     if (!rdx) as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
@@ -1628,7 +1620,6 @@ struct MipsJit {
   }
 
   void mtc2(uint32_t instr) {
-    printf("Write to COP2 reg %d\n", rd(instr));
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2), rtx = x86_reg(rt(instr));
     auto result = (rdx ? x86::xmm(rdx) : x86::xmm0);
     if (!rdx) as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
@@ -1664,7 +1655,6 @@ struct MipsJit {
     x86_load_caller(); as.pop(x86::edi);
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
-    printf("COP2 LDV offset: %x, size: %lx\n", sa(instr) >> 1, sizeof(T));
     switch (sizeof(T)) {
       case 1: as.pinsrb(result, x86::rax, 0xf - (sa(instr) >> 1)); break;
       case 2: as.pinsrw(result, x86::rax, 0x7 - (sa(instr) >> 2)); break;
@@ -1688,7 +1678,6 @@ struct MipsJit {
     }
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
-    printf("COP2 SDV offset: %x, size: %lx\n", sa(instr) >> 1, sizeof(T));
     switch (sizeof(T)) {
       case 1: as.pextrb(x86::rsi, result, 0xf - (sa(instr) >> 1)); break;
       case 2: as.pextrw(x86::rsi, result, 0x7 - (sa(instr) >> 2)); break;
@@ -1703,7 +1692,6 @@ struct MipsJit {
     // only handles 128-bit aligned elements and addresses
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     uint32_t offset = (instr & 0x7) << 4;
-    printf("COP2 LQV offset: %x\n", offset);
     // LQV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
@@ -1725,7 +1713,6 @@ struct MipsJit {
     // only handles 128-bit aligned elements and addresses
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     uint32_t offset = (instr & 0x7) << 4;
-    printf("COP2 SQV offset: %x\n", offset);
     // SQV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
@@ -1933,10 +1920,10 @@ struct MipsJit {
         break;
       case 0x2: // COP0/2
         switch (instr & 0x3f) {
-          case 0x01: tlbr(instr); break;
-          case 0x02: tlbwi<false>(instr); break;
-          case 0x06: tlbwi<true>(instr); break;
-          case 0x08: tlbp(instr); break;
+          case 0x01: tlbr(); break;
+          case 0x02: tlbwi<false>(); break;
+          case 0x06: tlbwi<true>(); break;
+          case 0x08: tlbp(); break;
           case 0x18: next_pc = eret(); break;
           default: invalid(instr); break;
         }
@@ -2059,6 +2046,13 @@ struct MipsJit {
     return next_pc;
   }
 
+  uint32_t check_breaks(uint32_t pc, uint32_t next_pc) {
+    if (!is_rsp && !R4300::moved) { R4300::moved = true; return next_pc; }
+    if (is_rsp || (!R4300::breaks[pc] && !R4300::broke)) return next_pc;
+    if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
+    R4300::broke = true; return block_end;
+  }
+
   uint32_t jit_block() {
     as.push(x86::rbp);
     if (is_rsp) as.mov(x86::rbp, reinterpret_cast<uint64_t>(&RSP::reg_array));
@@ -2069,8 +2063,7 @@ struct MipsJit {
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
-      printf("%x: %x\n", pc, instr);
-      pc = next_pc, next_pc += 4;
+      pc = check_breaks(pc, next_pc), next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
         case 0x01: next_pc = regimm(instr, pc); break;

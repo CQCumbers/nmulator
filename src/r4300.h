@@ -6,6 +6,7 @@
 #include <SDL2/SDL.h>
 #include <sys/mman.h>
 #include <x86intrin.h>
+#include "robin_hood.h"
 
 namespace R4300 {
   uint8_t *pages[0x100] = {nullptr};
@@ -31,7 +32,7 @@ namespace R4300 {
   template <bool write>
   void rsp_dma(uint32_t val) {
     uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
-    printf("RSP DMA with count %d, len %d, rdram %llx, mem %llx\n", count, len, rsp_cop0[1], rsp_cop0[0]);
+    printf("[RSP] DMA with count %d, len %d, rdram %llx, mem %llx\n", count, len, rsp_cop0[1], rsp_cop0[0]);
     uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
     for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
       if (write) memcpy(ram, mem, len + 1); else memcpy(mem, ram, len + 1);
@@ -75,7 +76,6 @@ namespace R4300 {
       vi_dirty = false;
     }
     if (format == 2) {
-      //printf("VI ORIGIN: %x\n", vi_origin);
       uint16_t *out = reinterpret_cast<uint16_t*>(pixels);
       for (uint32_t i = 0; i < vi_width * height; ++i)
         out[i] = read<uint16_t>(vi_origin + (i << 1));
@@ -106,7 +106,7 @@ namespace R4300 {
 
   void ai_dma(uint32_t len) {
     if (!ai_run || ai_start != 0) return;
-    printf("AI DMA started with len %x\n", len);
+    printf("[AI] DMA started with len %x\n", len);
     if (ai_dirty) {
       SDL_AudioFormat fmt = (ai_bits ? AUDIO_S16MSB : AUDIO_S8);
       SDL_AudioSpec spec = {
@@ -121,7 +121,7 @@ namespace R4300 {
     SDL_QueueAudio(audio_dev, pages[0] + ai_ram, ai_len << ai_bits);
   }
 
-  void ai_update(uint32_t cycles) {
+  void ai_update() {
     if (!ai_run || ai_len == 0) return;
     uint32_t new_len = SDL_GetQueuedAudioSize(audio_dev) >> ai_bits;
     if (new_len <= ai_start || new_len == 0)
@@ -240,7 +240,7 @@ namespace R4300 {
       case 0x4400018: return vi_height;
       // Audio Interface
       case 0x4500004: return ai_len;
-      case 0x450000c: printf("Getting AI status: %x\n", ai_status); return ai_status;
+      case 0x450000c: return ai_status;
       // Peripheral Interface
       case 0x4600000: return pi_ram;
       case 0x4600004: return pi_rom;
@@ -273,7 +273,7 @@ namespace R4300 {
       case 0x4100000: RDP::pc_start = val & addr_mask; return;
       case 0x4100004:
         RDP::pc_end = val & addr_mask;
-        RDP::update(1); return;
+        RDP::update(); return;
       case 0x410000c:
         RDP::status &= ~_pext_u32(val, 0x155);
         RDP::status |= _pext_u32(val, 0x2aa); return;
@@ -286,7 +286,7 @@ namespace R4300 {
       case 0x4400000: 
         if (val == vi_status) return;
         vi_status = val; vi_dirty = true; return;
-      case 0x4400004: /*printf("origin set to %x\n", val); */vi_origin = val & 0xffffff; return;
+      case 0x4400004: vi_origin = val & 0xffffff; return;
       case 0x4400008:
         if ((val & 0xfff) == vi_width) return;
         vi_width = val & 0xfff; vi_dirty = true; return;
@@ -310,11 +310,11 @@ namespace R4300 {
       case 0x4600000: pi_ram = val & 0xffffff; return;
       case 0x4600004: pi_rom = val & addr_mask; return;
       case 0x4600008:
-        printf("PI DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, val + 1);
+        printf("[PI] DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, val + 1);
         memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val + 1);
         mi_irqs |= 0x10; return;
       case 0x460000c:
-        printf("PI DMA from %x to %x, of %x bytes\n", pi_rom, pi_ram, val + 1);
+        printf("[PI] DMA from %x to %x, of %x bytes\n", pi_rom, pi_ram, val + 1);
         memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1);
         mi_irqs |= 0x10; return;
       case 0x4600010: mi_irqs &= ~0x10; return;
@@ -368,9 +368,10 @@ namespace R4300 {
   /* === Actual CPU Functions === */
 
   uint64_t reg_array[0x63] = {0};
-  uint32_t pc = 0xa4000040;
+  uint32_t pc = 0xa4000040, broke = false, moved = false;
   constexpr uint8_t hi = 0x20, lo = 0x21;
   constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
+  robin_hood::unordered_map<uint32_t, bool> breaks;
 
   int64_t last_thread = 0;
 
@@ -386,26 +387,6 @@ namespace R4300 {
     if (count + cycles >= compare) reg_array[13 + dev_cop0] |= 0x8000;
     count = (count + cycles) & 0xffffffff;
 
-    /*if (pc == 0x800d18c4 || pc == 0x800d17cc) {
-      // pc after/before __osEnqueueThread at __osEnqueueAndYield
-      int64_t thread = read<uint32_t>(0x800eb3b0);
-      printf("Queue %s __osEnqueueThread:\n", (pc == 0x800d18c4 ? "After" : "Before"));
-      printf("Current thread %llx, param1 = %llx\n", thread, reg_array[4]);
-      int64_t queue = read<uint32_t>(0x800eb3a8);
-      while (queue != 0) {
-        printf("Thread: %llx, Priority: %llx\n", queue, read<uint32_t>(queue + 4));
-        queue = read<uint32_t>(queue);
-      }
-    } else if (pc == 0x800cd750) { // pc at osRecvMesg
-      int64_t thread = read<uint32_t>(0x800eb3b0);
-      printf("at osRecvMesg - Current thread %llx, param1 = %llx\n", thread, reg_array[4]);
-    }*/
-    /*if (pc == (reg_array[14 + dev_cop0] & 0xffffffff)) { // pc == EPC, aka after ERET
-      printf("Loading thread %llx\n", thread);
-      printf("pc: %x COUNT: %llx COMPARE: %llx\n", pc, reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
-      for (uint8_t i = 0; i < 0x63; ++i) printf("$%x: %llx\n", i, reg_array[i]);
-    }*/
-
     // if interrupt enabled and triggered, set pc to handler address
     uint8_t ip = (reg_array[13 + dev_cop0] >> 8) & 0xff;
     uint8_t im = (reg_array[12 + dev_cop0] >> 8) & 0xff;
@@ -414,17 +395,6 @@ namespace R4300 {
       printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_irqs, mi_mask, vi_irq);
       reg_array[14 + dev_cop0] = pc; pc = 0x80000180; reg_array[12 + dev_cop0] |= 0x2;
     }
-
-    //printf("PC: %x\n", pc);
-    //for (uint8_t i = 0; i < 32; ++i) printf("Reg $%d: %llx\n", i, reg_array[i]);
-    //printf("COP0_COUNT: %llx, COP0_COMPARE: %llx\n", reg_array[9 + dev_cop0], reg_array[11 + dev_cop0]);
-    //printf("COP0_CAUSE: %llx, COP0_STATUS: %llx\n", reg_array[13 + dev_cop0], reg_array[12 + dev_cop0]);
-
-    // Debug sign extension
-    //for (uint8_t i = 0; i < 32; ++i) {
-      //if ((reg_array[i] & 0x80000000) ^ ((reg_array[i] & 0x100000000) >> 1))
-      //  printf("Sign extension violation on $%x : %x\n", i, reg_array[i]);
-    //}
   }
 
   void init(FILE *file) {
@@ -432,6 +402,7 @@ namespace R4300 {
     reg_array[20] = 0x1;
     reg_array[22] = 0x3f;
     reg_array[29] = 0xffffffffa4001ff0;
+    reg_array[12 + dev_cop0] = 0x34000000;
 
     // setup page table
     pages[0] = reinterpret_cast<uint8_t*>(mmap(

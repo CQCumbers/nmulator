@@ -12,7 +12,7 @@ struct RDPCommand {
   uint fill, fog, blend;
   uint env, prim, zprim;
   uint bl_mux, cc_mux, keys[3];
-  uint lft, type, tile;
+  uint lft, type, tile, two_cycle;
 };
 
 struct RDPTile {
@@ -172,7 +172,6 @@ uint visible(uint2 pos, RDPCommand cmd) {
   return output;
 }*/
 
-// rename blend
 uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   uint a, p, b, m;
   uint m1a = (cmd.bl_mux >> 14) & 0x3, m1b = (cmd.bl_mux >> 10) & 0x3;
@@ -220,8 +219,8 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
     RDPCommand cmd = cmds[tile.cmd_idxs[i]];
     uint coverage = visible(GlobalID.xy, cmd);
     uint color = sample_color(GlobalID.xy, cmd);
-    //uint z = sample_z(GlobalID.xy, cmd);
-    if (coverage == 0 /* || z < zval */) continue;
+    //uint z = sample_z(GlobalID.xy, cmd); coverage *= z < zval;
+    if (coverage == 0) continue;
     pixel = blend(pixel, color, coverage, cmd);
     //if (cmd.type & 0x4) zval = z;
   }
@@ -229,15 +228,12 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   else if (tile_pos & 0x1) {
     pixels.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
     pixels.InterlockedOr(tile_pos * global.size, write_rgba16(pixel) << 16);
+    //zbuf.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
+    //zbuf.InterlockedOr(tile_pos * global.size, (zval & 0xffff) << 16);
   } else {
     pixels.InterlockedAnd(tile_pos * global.size, 0xffff0000);
     pixels.InterlockedOr(tile_pos * global.size, write_rgba16(pixel));
+    //zbuf.InterlockedAnd(tile_pos * global.size, 0xffff0000);
+    //zbuf.InterlockedOr(tile_pos * global.size, zval & 0xffff);
   }
-  /*if (tile_pos & 0x1) {
-    zbuf.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
-    zbuf.InterlockedOr(tile_pos * global.size, (zval & 0xffff) << 16);
-  } else {
-    zbuf.InterlockedAnd(tile_pos * global.size, 0xffff0000);
-    zbuf.InterlockedOr(tile_pos * global.size, zval & 0xffff);
-  }*/
 }

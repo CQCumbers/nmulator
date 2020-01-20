@@ -1,5 +1,5 @@
 #include "mipsjit.h"
-#include "robin_hood.h"
+#include "debugger.h"
 
 typedef uint32_t (*Function)();
 
@@ -15,11 +15,11 @@ struct Block {
 
 int main(int argc, char* argv[]) {
   // initialize system components
-  if (argc != 2) printf("error: must provide file\n"), exit(1);
+  if (argc != 2 && argc != 3) printf("error: must provide file\n"), exit(1);
   FILE *file = fopen(argv[1], "r");
   if (!file) printf("error: can't open file\n"), exit(1);
-  R4300::init(file);
-  fclose(file);
+  R4300::init(file), fclose(file);
+  if (argc == 3) Debugger::init(atoi(argv[2]));
 
   JitRuntime runtime;
   robin_hood::unordered_map<uint32_t, Block> r4300_blocks;
@@ -27,8 +27,6 @@ int main(int argc, char* argv[]) {
   while (true) {
     Block &block = r4300_blocks[R4300::pc & R4300::addr_mask];
     uint32_t hash = R4300::fetch(R4300::pc);
-    //if ((R4300::pc & R4300::addr_mask) == 0x180)
-    //  printf("0x180 hash %x vs block hash %x\n", hash, block.hash);
     if (!block.valid(hash)) {
       block.hash = hash;
       CodeHolder code;
@@ -56,7 +54,11 @@ int main(int argc, char* argv[]) {
       R4300::rsp_update();
     } else rsp_blocks.clear();
 
-    R4300::ai_update(block.cycles);
+    if (R4300::broke) {
+      Debugger::update();
+      r4300_blocks.clear();
+    }
+    R4300::ai_update();
     R4300::vi_update(block.cycles);
     R4300::irqs_update(block.cycles);
   }

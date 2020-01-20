@@ -19,7 +19,7 @@ typedef struct RDPCommand {
   uint32_t fill, fog, blend;
   uint32_t env, prim, zprim;
   uint32_t bl_mux, cc_mux, keys[3];
-  uint32_t lft, type, tile;
+  uint32_t lft, type, tile, two_cycle;
 } cmd_t;
 
 typedef struct RDPTile {
@@ -366,6 +366,7 @@ namespace RDP {
   uint32_t fill = 0x0, fog = 0x0, blend = 0x0;
   uint32_t env = 0x0, prim = 0x0, zprim = 0x0;
   uint32_t bl_mux = 0x0, cc_mux = 0x0, keys[3] = {0};
+  bool two_cycle = false;
 
   uint8_t opcode(uint64_t addr) {
     uint32_t out = 0;
@@ -408,7 +409,9 @@ namespace RDP {
   }
 
   void set_other_modes() {
-    bl_mux = fetch(pc, 2)[1] >> 16;
+    std::vector<uint32_t> instr = fetch(pc, 2);
+    two_cycle = (instr[0] >> 20) & 0x1;
+    bl_mux = instr[1] >> 16;
   }
 
   void set_fill() {
@@ -540,7 +543,7 @@ namespace RDP {
 
   template <uint8_t type>
   void triangle() {
-    printf("Triangle of type %x\n", type);
+    printf("[RDP] Triangle of type %x\n", type);
     std::vector<uint32_t> instr = fetch(pc, 8);
     cmd_t cmd = {
       .xyh = { instr[4], instr[1] & 0x3fff },
@@ -552,6 +555,7 @@ namespace RDP {
       .bl_mux = bl_mux, .cc_mux = cc_mux,
       .keys = { keys[0], keys[1], keys[2] },
       .lft = (instr[0] >> 23) & 0x1, .type = type,
+      .two_cycle = two_cycle,
     };
     if (type & 0x4) shade_triangle(cmd);
     if (type & 0x2) tex_triangle(cmd);
@@ -570,7 +574,7 @@ namespace RDP {
 
   template <uint8_t type>
   void rectangle() {
-    printf("Rectangle of type %x\n", type);
+    printf("[RDP] Rectangle of type %x\n", type);
     std::vector<uint32_t> instr = fetch(pc, 2);
     cmd_t cmd = {
       .xyh = { (instr[1] >> 12) & 0xfff, instr[1] & 0xfff },
@@ -580,6 +584,7 @@ namespace RDP {
       .bl_mux = bl_mux, .cc_mux = cc_mux,
       .keys = { keys[0], keys[1], keys[2] },
       .type = type, .tile = (instr[1] >> 24) & 0x7,
+      .two_cycle = two_cycle,
     };
     if (type == 0xa) tex_rectangle<false>(cmd);
     if (type == 0xb) tex_rectangle<true>(cmd);
@@ -592,7 +597,7 @@ namespace RDP {
     exit(1);
   }
 
-  void update(uint32_t cycles) {
+  void update() {
     // interpret config instructions 
     pc = pc_start;
     while (pc < pc_end) {
