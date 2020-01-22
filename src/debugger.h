@@ -15,14 +15,6 @@ namespace Debugger {
 
   /* === GDB Socket interaction == */ 
 
-  bool packets_gdb(int sockfd) {
-    if (!sockfd) return false;
-    fd_set sockset = {0};
-    FD_SET(sockfd, &sockset);
-    struct timeval timeout = {};
-    return select(0, &sockset, nullptr, nullptr, &timeout) > 0;
-  }
-
   void recv_gdb(int sockfd, char *cmd_buf) {
     uint8_t cmd_c = 0, cmd_idx = 0;
     // ignore acks and invalid cmds
@@ -70,7 +62,9 @@ namespace Debugger {
     if (strncmp(cmd_buf, "qSupported", strlen("qSupported")) == 0)
       send_gdb(sockfd, "PacketSize=2047");
     else if (strncmp(cmd_buf, "qHostInfo", strlen("qHostInfo")) == 0)
-      send_gdb(sockfd, "triple:6d697073656c2d6c696e75782d676e75");
+      send_gdb(sockfd, "triple:6d6970732d6c696e75782d676e75;ptrsize:8;endian:big;");
+    else if (strncmp(cmd_buf, "qProcessInfo", strlen("qProcessInfo")) == 0)
+      send_gdb(sockfd, "triple:6d6970732d6c696e75782d676e75;pid:1;");
     else if (strncmp(cmd_buf, "qC", strlen("qC")) == 0)
       send_gdb(sockfd, "1");  // Dummy PID
     else if (strncmp(cmd_buf, "qRegisterInfo", strlen("qRegisterInfo")) == 0) {
@@ -102,12 +96,13 @@ namespace Debugger {
     send_gdb(sockfd, buf);
   }
 
-  void write_reg(const char *cmd_buf) {
+  void write_reg(int sockfd, const char *cmd_buf) {
     char *ptr = (char*)cmd_buf;
     uint32_t idx = strtoul(cmd_buf + 1, &ptr, 16);
     printf("Writing to register %x: %lx\n", idx, strtoul(ptr + 1, nullptr, 16));
     if (idx != 32) R4300::reg_array[idx] = strtoul(ptr + 1, nullptr, 16);
     else R4300::pc = strtoul(ptr + 1, nullptr, 16);
+    send_gdb(sockfd, "OK");
   }
 
   void read_mem(int sockfd, const char *cmd_buf) {
@@ -139,7 +134,7 @@ namespace Debugger {
         case 's': R4300::moved = false; return;
         case 'g': read_regs(gdb_sock); break;
         case 'p': read_reg(gdb_sock, cmd_buf); break;
-        case 'P': write_reg(cmd_buf); break;
+        case 'P': write_reg(gdb_sock, cmd_buf); break;
         case 'H': send_gdb(gdb_sock, "OK"); break;   // Switch to thread
         case 'k': printf("Killed by gdb\n"); exit(0);
         case 'm': read_mem(gdb_sock, cmd_buf); break;
@@ -171,6 +166,16 @@ namespace Debugger {
     if (tmpsock != -1) shutdown(tmpsock, SHUT_RDWR);
     printf("Connected to gdb client\n");
     R4300::broke = true, update();
+  }
+
+  bool waiting() {
+    if (!gdb_sock) return false;
+    fd_set sockset = {0};
+    FD_SET(gdb_sock, &sockset);
+    struct timeval timeout = {};
+    bool wait = select(0, &sockset, nullptr, nullptr, &timeout) > 0;
+    if (wait) printf("Responding to gdb packet\n")
+    return wait;
   }
 }
 
