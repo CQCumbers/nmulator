@@ -1,4 +1,4 @@
-dist: xenial
+os: linux
 language: cpp
 compiler: clang
 
@@ -10,10 +10,8 @@ env:
 
 before_install:
   - echo -n | openssl s_client -connect https://scan.coverity.com:443 | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' | sudo tee -a /etc/ssl/certs/ca-
-  - wget -qO - http://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
-  - sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-1.1.126-xenial.list http://packages.lunarg.com/vulkan/1.1.126/lunarg-vulkan-1.1.126-xenial.list
-  - sudo apt -qq update && sudo apt -qq install vulkan-sdk libsdl2-dev
-  - ls /etc/vulkan && export VULKAN_DIR=/etc/vulkan
+  - mkdir vulkan && curl https://sdk.lunarg.com/sdk/download/latest/linux/vulkan-sdk.tar.gz | tar -C vulkan -xz
+  - source vulkan/1.1.130.0/setup-env.sh && sudo apt-get install libsdl2-dev
 
 addons:
   coverity_scan:
@@ -21,6 +19,6 @@ addons:
       name: "CQCumbers/nmulator"
       description: "A broken N64 emulator"
     notification_email: alexbrianzhang@gmail.com
-    build_command_prepend: "cmake . -DCMAKE_PREFIX_PATH=/etc/vulkan"
+    build_command_prepend: "cmake ."
     build_command: "cmake --build ."
     branch_pattern: master

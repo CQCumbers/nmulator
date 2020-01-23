@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.9)
 project(nmulator VERSION 0.1.0 LANGUAGES CXX)
 
 # Add Vulkan, SDL2, asmjit, and shader
-find_package(vulkan REQUIRED)
+find_package(Vulkan REQUIRED)
 find_package(SDL2 REQUIRED)
 add_subdirectory(extern/asmjit)
 
@@ -18,6 +18,7 @@ add_custom_target(shader DEPENDS ${SPIRV})
 # Link nmulator against dependencies
 add_executable(nmulator src/main.cpp)
 target_include_directories(nmulator PRIVATE ${SDL2_INCLUDE_DIRS})
+string(STRIP ${SDL2_LIBRARIES} SDL2_LIBRARIES)
 target_link_libraries(nmulator PRIVATE Vulkan::Vulkan ${SDL2_LIBRARIES} asmjit)
 add_dependencies(nmulator shader)
 

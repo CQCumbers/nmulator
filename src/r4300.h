@@ -32,7 +32,7 @@ namespace R4300 {
   template <bool write>
   void rsp_dma(uint32_t val) {
     uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
-    printf("[RSP] DMA with count %d, len %d, rdram %llx, mem %llx\n", count, len, rsp_cop0[1], rsp_cop0[0]);
+    printf("[RSP] DMA with count %x, len %x\n", count, len);
     uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
     for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
       if (write) memcpy(ram, mem, len + 1); else memcpy(mem, ram, len + 1);

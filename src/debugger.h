@@ -6,6 +6,8 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 
+#define __STDC_FORMAT_MACROS
+#include <cinttypes>
 #include <cstring>
 #include <algorithm>
 #include <numeric>
@@ -20,7 +22,6 @@ namespace Debugger {
     // ignore acks and invalid cmds
     recv(sockfd, &cmd_c, 1, MSG_WAITALL);
     if (cmd_c == '+') return;
-    if (cmd_c == 0x03) return;
     if (cmd_c != '$') printf("Invalid gdb command: %x\n", cmd_c), exit(1);
     // read cmd packet data (no RLE or escapes)
     while (recv(sockfd, &cmd_c, 1, MSG_WAITALL), cmd_c != '#')
@@ -83,16 +84,16 @@ namespace Debugger {
   void read_regs(int sockfd) {
     char buf[buf_size - 4] = {0};
     for (unsigned i = 0; i < 32; ++i)
-      sprintf(buf + i * 16, "%016llx", R4300::reg_array[i]);
-    sprintf(buf + 32 * 16, "%016llx", static_cast<uint64_t>(R4300::pc));
+      sprintf(buf + i * 16, "%016" PRIx64 "\n", R4300::reg_array[i]);
+    sprintf(buf + 32 * 16, "%016" PRIx64 "\n", static_cast<uint64_t>(R4300::pc));
     send_gdb(sockfd, buf);
   }
 
   void read_reg(int sockfd, const char *cmd_buf) {
     char buf[17] = {0};
     uint32_t idx = strtoul(cmd_buf + 1, nullptr, 16);
-    if (idx != 32) sprintf(buf, "%016llx", R4300::reg_array[idx]);
-    else sprintf(buf, "%016llx", static_cast<uint64_t>(R4300::pc));
+    if (idx != 32) sprintf(buf, "%016" PRIx64 "\n", R4300::reg_array[idx]);
+    else sprintf(buf, "%016" PRIx64 "\n", static_cast<uint64_t>(R4300::pc));
     send_gdb(sockfd, buf);
   }
 
@@ -110,7 +111,7 @@ namespace Debugger {
     uint32_t addr = strtoul(cmd_buf + 1, &ptr, 16);
     uint32_t len = strtoul(ptr + 1, nullptr, 16);
     for (unsigned i = 0; i < len; i += 8)
-      sprintf(buf + i * 2, "%016llx", R4300::read<uint64_t>(addr + i));
+      sprintf(buf + i * 2, "%016" PRIx64 "\n", R4300::read<uint64_t>(addr + i));
     send_gdb(sockfd, buf);
   }
 
@@ -168,14 +169,14 @@ namespace Debugger {
     R4300::broke = true, update();
   }
 
-  bool waiting() {
-    if (!gdb_sock) return false;
+  void check() {
     fd_set sockset = {0};
     FD_SET(gdb_sock, &sockset);
     struct timeval timeout = {};
-    bool wait = select(0, &sockset, nullptr, nullptr, &timeout) > 0;
-    if (wait) printf("Responding to gdb packet\n")
-    return wait;
+    int socks = select(0, &sockset, nullptr, nullptr, &timeout);
+    printf("Selected sockets: %x\n", socks);
+    if (socks < 1) return;
+    R4300::broke = true; send_gdb(gdb_sock, "OK");
   }
 }
 

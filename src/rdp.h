@@ -3,6 +3,7 @@
 
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <cstring>
 #include "rdp.spv.array"
 
 typedef struct PerTileData {
