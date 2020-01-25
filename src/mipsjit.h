@@ -253,7 +253,7 @@ struct MipsJit {
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
     if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     x86_load_caller(); as.pop(x86::edi);
     if (rtx) as.mov(x86::gpq(rtx), x86::rax);
     else as.mov(x86_spilld(rt(instr)), x86::rax);
@@ -272,7 +272,7 @@ struct MipsJit {
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
     else as.mov(x86::rsi, x86_spilld(rt(instr)));
     if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
     x86_load_caller(); as.pop(x86::edi);
   }
 
@@ -296,7 +296,7 @@ struct MipsJit {
     // read unaligned data from memory
     as.push(x86::rax);
     if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     as.pop(x86::rcx);
     // apply mask depending on direction
     if (right) {
@@ -334,7 +334,7 @@ struct MipsJit {
     // read previous data from memory
     as.push(x86::edi); as.push(x86::rax);
     if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     as.pop(x86::rcx); as.pop(x86::edi);
     // apply mask depending on direction
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
@@ -347,7 +347,7 @@ struct MipsJit {
     as.and_(x86::rax, x86::rcx); as.or_(x86::rsi, x86::rax);
     // write masked data to memory
     if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
+    else as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
     x86_load_caller(); as.pop(x86::edi);
   }
 
@@ -1117,21 +1117,38 @@ struct MipsJit {
     return block_end;
   }
 
-  void cache(uint32_t instr) {
-    printf("CACHE instruction %x\n", instr);
-  }
-
   void tlbr() {
-    printf("TLB read\n");
+    constexpr uint8_t entry_reg[4] = {5, 10, 2, 3};
+    as.mov(x86::rsi, reinterpret_cast<uint64_t>(&R4300::tlb));
+    as.mov(x86::eax, 0x3f), as.and_(x86::eax, x86_spill(dev_cop0));
+    as.sal(x86::eax, 4), as.add(x86::rsi, x86::eax);
+    for (uint8_t i = 0; i < 4; ++i) {
+      as.mov(x86::eax, x86::dword_ptr(x86::rsi, i << 2));
+      as.mov(x86_spill(entry_reg[i] + dev_cop0), x86::eax);
+    }
   }
 
-  template <bool random>
+  template <bool rand>
   void tlbwi() {
-    printf("TLB write\n");
+    constexpr uint8_t entry_reg[4] = {5, 10, 2, 3};
+    as.mov(x86::rsi, reinterpret_cast<uint64_t>(&R4300::tlb));
+    as.mov(x86::eax, 0x3f), as.and_(x86::eax, x86_spill(rand + dev_cop0));
+    as.sal(x86::eax, 4), as.add(x86::rsi, x86::eax);
+    for (uint8_t i = 0; i < 4; ++i) {
+      as.mov(x86::eax, x86_spill(entry_reg[i] + dev_cop0));
+      as.mov(x86::dword_ptr(x86::rsi, i << 2), x86::eax);
+    }
   }
 
   void tlbp() {
-    printf("TLB probe\n");
+    as.mov(x86::rsi, reinterpret_cast<uint64_t>(&R4300::tlb));
+    as.mov(x86::ecx, x86_spill(10 + dev_cop0)), as.xor_(x86::eax, x86::eax);
+    as.mov(x86::edx, x86_spill(dev_cop0)), as.or_(x86::edx, 0x80000000);
+    for (uint8_t i = 0; i < 32; ++i) {
+      as.cmp(x86::ecx, x86::dword_ptr(x86::rsi, i * 16 + 4));
+      as.cmove(x86::edx, x86::eax), as.inc(x86::eax);
+    }
+    as.mov(x86_spill(dev_cop0), x86::edx);
   }
 
   uint32_t eret() {
@@ -1344,7 +1361,7 @@ struct MipsJit {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
-    as.call(reinterpret_cast<uint64_t>(R4300::read<T>));
+    as.call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     x86_load_caller(); as.pop(x86::edi);
     as.mov(x86_spilld(rt(instr) + dev_cop1), x86::rax);
     if (rtx) as.movss(x86::xmm(rtx), x86_spilld(rt(instr) + dev_cop1));
@@ -1362,7 +1379,7 @@ struct MipsJit {
     }
     if (rtx) as.movss(x86_spilld(rt(instr) + dev_cop1), x86::xmm(rtx));
     as.mov(x86::rsi, x86_spilld(rt(instr) + dev_cop1));
-    as.call(reinterpret_cast<uint64_t>(R4300::write<T>));
+    as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
     x86_load_caller(); as.pop(x86::edi);
   }
 
@@ -2107,7 +2124,7 @@ struct MipsJit {
         case 0x2c: swl<uint64_t, Dir::ll>(instr); break;
         case 0x2d: swl<uint64_t, Dir::rl>(instr); break;
         case 0x2e: swl<uint32_t, Dir::rl>(instr); break;
-        case 0x2f: cache(instr); break;
+        case 0x2f: printf("CACHE instruction %x\n", instr); break;
         case 0x30: lw<int32_t>(instr); break; // LL
         case 0x31: lwc1<int32_t>(instr); break;
         case 0x32: lwc2(instr); break;

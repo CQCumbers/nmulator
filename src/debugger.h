@@ -66,6 +66,10 @@ namespace Debugger {
       send_gdb(sockfd, "triple:6d6970732d6c696e75782d676e75;ptrsize:8;endian:big;");
     else if (strncmp(cmd_buf, "qProcessInfo", strlen("qProcessInfo")) == 0)
       send_gdb(sockfd, "triple:6d6970732d6c696e75782d676e75;pid:1;");
+    else if (strncmp(cmd_buf, "qfThreadInfo", strlen("qfThreadInfo")) == 0)
+      send_gdb(sockfd, "m-1");
+    else if (strncmp(cmd_buf, "qsThreadInfo", strlen("qsThreadInfo")) == 0)
+      send_gdb(sockfd, "l");
     else if (strncmp(cmd_buf, "qC", strlen("qC")) == 0)
       send_gdb(sockfd, "1");  // Dummy PID
     else if (strncmp(cmd_buf, "qRegisterInfo", strlen("qRegisterInfo")) == 0) {
@@ -84,16 +88,16 @@ namespace Debugger {
   void read_regs(int sockfd) {
     char buf[buf_size - 4] = {0};
     for (unsigned i = 0; i < 32; ++i)
-      sprintf(buf + i * 16, "%016" PRIx64 "\n", R4300::reg_array[i]);
-    sprintf(buf + 32 * 16, "%016" PRIx64 "\n", static_cast<uint64_t>(R4300::pc));
+      sprintf(buf + i * 16, "%016" PRIx64, R4300::reg_array[i]);
+    sprintf(buf + 32 * 16, "%016" PRIx64, static_cast<uint64_t>(R4300::pc));
     send_gdb(sockfd, buf);
   }
 
   void read_reg(int sockfd, const char *cmd_buf) {
     char buf[17] = {0};
     uint32_t idx = strtoul(cmd_buf + 1, nullptr, 16);
-    if (idx != 32) sprintf(buf, "%016" PRIx64 "\n", R4300::reg_array[idx]);
-    else sprintf(buf, "%016" PRIx64 "\n", static_cast<uint64_t>(R4300::pc));
+    if (idx != 32) sprintf(buf, "%016" PRIx64, R4300::reg_array[idx]);
+    else sprintf(buf, "%016" PRIx64, static_cast<uint64_t>(R4300::pc));
     send_gdb(sockfd, buf);
   }
 
@@ -111,7 +115,7 @@ namespace Debugger {
     uint32_t addr = strtoul(cmd_buf + 1, &ptr, 16);
     uint32_t len = strtoul(ptr + 1, nullptr, 16);
     for (unsigned i = 0; i < len; i += 8)
-      sprintf(buf + i * 2, "%016" PRIx64 "\n", R4300::read<uint64_t>(addr + i));
+      sprintf(buf + i * 2, "%016" PRIx64, R4300::read<uint64_t>(addr + i));
     send_gdb(sockfd, buf);
   }
 

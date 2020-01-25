@@ -10,12 +10,13 @@
 
 namespace R4300 {
   uint8_t *pages[0x100] = {nullptr};
+  uint32_t tlb[0x20][4] = {{0x80000000}};
   constexpr uint32_t addr_mask = 0x1fffffff;
   constexpr uint32_t page_mask = 0x1fffff;
 
-  template <typename T>
+  template <typename T, bool map=false>
   int64_t read(uint32_t addr);
-  template <typename T>
+  template <typename T, bool map=false>
   void write(uint32_t addr, int64_t val);
   void joy_update(SDL_Event &event);
 
@@ -190,11 +191,10 @@ namespace R4300 {
   }
 
   void si_update() {
-    uint32_t status = 0x1fc007ff;
+    uint32_t busy = 0x1fc007ff;
     uint32_t pc = 0x1fc007c0, channel = 0;
-    //if ((read<uint8_t>(status) & 0x1) == 0) return;
-    write<uint8_t>(status, 0x0);
-    while (pc < status) {
+    write<uint8_t>(busy, 0x0);
+    while (pc < busy) {
       uint8_t t = read<uint8_t>(pc++);
       if (t == 0xfe) return;
       if (t >> 7) continue;
@@ -331,12 +331,20 @@ namespace R4300 {
     }
   }
 
-  void map_page(uint32_t virt, uint32_t phys) {
-    pages[(virt >> 21) & 0xff] = pages[0] + (phys & addr_mask);
+  uint32_t tlb_map(uint32_t addr) {
+    // assumes all global, valid, and dirty
+    for (uint8_t i = 0; i < 32; ++i) {
+      uint32_t mask = ~(tlb[i][0] | 0x1fff);
+      if ((addr & mask) == (tlb[i][1] & mask))
+        return ((tlb[i][2] << 6) & mask) | (addr & ~mask);
+    }
+    printf("TLB miss for addr: %x\n", addr);
+    return addr;
   }
 
-  template <typename T>
+  template <typename T, bool map>
   int64_t read(uint32_t addr) {
+    if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if (!page) return mmio_read<T>(addr);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
@@ -348,8 +356,9 @@ namespace R4300 {
     }
   }
 
-  template <typename T>
+  template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
+    if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if (!page) return mmio_write<T>(addr, val);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
@@ -362,7 +371,7 @@ namespace R4300 {
   }
 
   uint32_t fetch(uint32_t addr) {
-    return read<uint32_t>(addr);
+    return read<uint32_t, true>(addr);
   }
 
   /* === Actual CPU Functions === */
@@ -396,9 +405,25 @@ namespace R4300 {
 
   void init(FILE *file) {
     // setup registers (assumes CIC-NUS-6102)
+    reg_array[1] = 0x1;
+    reg_array[2] = 0xebda536;
+    reg_array[3] = 0xebda536;
+    reg_array[4] = 0xa536;
+    reg_array[5] = 0xffffffffc0f1d859;
+    reg_array[6] = 0xffffffffa4001f0c;
+    reg_array[7] = 0xffffffffa4001f08;
+    reg_array[8] = 0xc0;
+    reg_array[10] = 0x40;
+    reg_array[11] = 0xffffffffa4000040;
+    reg_array[12] = 0xffffffffed10d0b3;
+    reg_array[13] = 0x1402a4cc;
+    reg_array[14] = 0x2de108ea;
+    reg_array[15] = 0x3103e121;
     reg_array[20] = 0x1;
     reg_array[22] = 0x3f;
+    reg_array[25] = 0xffffffff9debb54f;
     reg_array[29] = 0xffffffffa4001ff0;
+    reg_array[31] = 0xffffffffa4001550;
     reg_array[12 + dev_cop0] = 0x34000000;
 
     // setup page table
@@ -435,8 +460,9 @@ namespace R4300 {
     rsp_cop0[4] = 0x1, rsp_cop0[11] = 0x88;
 
     // setup SI (assumes CIC-NUS-6102)
-    write<uint32_t>(0x1fc007e4, 0x3f3f);
-    write<uint32_t>(0x318, 0x800000);
+    write<uint32_t>(0xbfc007e4, 0x3f3f);
+    write<uint32_t>(0xa0000318, 0x800000);
+    write<uint32_t>(0xbfc007fc, 0x80);  // pif_status
   }
 }
 

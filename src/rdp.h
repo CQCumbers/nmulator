@@ -351,7 +351,7 @@ namespace RSP {
 namespace R4300 {
   extern uint32_t mi_irqs;
   extern uint8_t *pages[0x100];
-  template <typename T>
+  template <typename T, bool map>
   int64_t read(uint32_t addr);
 }
 
@@ -372,7 +372,7 @@ namespace RDP {
   uint8_t opcode(uint64_t addr) {
     uint32_t out = 0;
     if (status & 0x1) out = RSP::read<uint32_t>(addr);
-    else out = R4300::read<uint32_t>(addr);
+    else out = R4300::read<uint32_t, false>(addr);
     return (out >> 24) & 0x3f;
   }
 
@@ -380,7 +380,7 @@ namespace RDP {
     std::vector<uint32_t> out(len);
     for (uint8_t i = 0; i < len; ++i, addr += 4) {
       if (status & 0x1) out[i] = RSP::read<uint32_t>(addr);
-      else out[i] = R4300::read<uint32_t>(addr);
+      else out[i] = R4300::read<uint32_t, false>(addr);
     }
     return out;
   }
