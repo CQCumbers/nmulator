@@ -1291,11 +1291,11 @@ struct MipsJit {
   }
 
   template <bool cond>
-  uint32_t bc1f(uint32_t instr, uint32_t pc) {
+  uint32_t bc1t(uint32_t instr, uint32_t pc) {
     uint8_t cc = rt(instr) >> 2;
-    uint32_t mask = (cc ? 0x800 : (0x1000 << cc));
-    as.and_(x86_spill(32 + dev_cop1), ~mask);
-    as.mov(x86::edi, pc + 4);
+    uint32_t mask = (cc ? (0x1000 << cc) : 0x800);
+    as.mov(x86::eax, x86_spill(32 + dev_cop1));
+    as.and_(x86::eax, mask), as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
     if (cond) as.cmovnz(x86::edi, x86::eax);
     else as.cmovz(x86::edi, x86::eax);
@@ -1303,11 +1303,11 @@ struct MipsJit {
   }
 
   template <bool cond>
-  uint32_t bc1fl(uint32_t instr, uint32_t pc) {
+  uint32_t bc1tl(uint32_t instr, uint32_t pc) {
     uint8_t cc = rt(instr) >> 2;
-    uint32_t mask = (cc ? 0x800 : (0x1000 << cc));
-    as.and_(x86_spill(32 + dev_cop1), ~mask);
-    as.mov(x86::edi, pc + 4);
+    uint32_t mask = (cc ? (0x1000 << cc) : 0x800);
+    as.mov(x86::eax, x86_spill(32 + dev_cop1));
+    as.and_(x86::eax, mask), as.mov(x86::edi, pc + 4);
     if (cond) as.jz(end_label);
     else as.jnz(end_label);
     as.mov(x86::edi, pc + (imm(instr) << 2));
@@ -1966,10 +1966,10 @@ struct MipsJit {
         break;
       case 0x1: // COP1/3
         switch (rt(instr) & 0x3) {
-          case 0x0: next_pc = bc1f<false>(instr, pc); break;
-          case 0x1: next_pc = bc1f<true>(instr, pc); break;
-          case 0x2: next_pc = bc1fl<false>(instr, pc); break;
-          case 0x3: next_pc = bc1fl<true>(instr, pc); break;
+          case 0x0: next_pc = bc1t<false>(instr, pc); break;
+          case 0x1: next_pc = bc1t<true>(instr, pc); break;
+          case 0x2: next_pc = bc1tl<false>(instr, pc); break;
+          case 0x3: next_pc = bc1tl<true>(instr, pc); break;
           default: invalid(instr); break;
         }
         break;
