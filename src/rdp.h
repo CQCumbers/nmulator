@@ -546,7 +546,7 @@ namespace RDP {
 
   template <uint8_t type>
   void triangle() {
-    printf("[RDP] Triangle of type %x\n", type);
+    //printf("[RDP] Triangle of type %x\n", type);
     std::vector<uint32_t> instr = fetch(pc, 8);
     cmd_t cmd = {
       .xyh = { instr[4], instr[1] & 0x3fff },
@@ -577,7 +577,7 @@ namespace RDP {
 
   template <uint8_t type>
   void rectangle() {
-    printf("[RDP] Rectangle of type %x\n", type);
+    //printf("[RDP] Rectangle of type %x\n", type);
     std::vector<uint32_t> instr = fetch(pc, 2);
     cmd_t cmd = {
       .xyh = { (instr[1] >> 12) & 0xfff, instr[1] & 0xfff },
@@ -638,7 +638,7 @@ namespace RDP {
         case 0x3e: set_zbuf(); break;
         case 0x3f: set_image(); break;
         case 0x26: case 0x27: case 0x28: case 0x29:
-          printf("[RDP] SYNC\n"); pc += 8; break;
+          /*printf("[RDP] SYNC\n")*/; pc += 8; break;
         default: invalid(); break;
       }
     }

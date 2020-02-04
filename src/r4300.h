@@ -119,7 +119,7 @@ namespace R4300 {
     }
     ai_start = ai_len, ai_len = len & 0x1fff8;
     if (ai_start != 0) ai_status |= 0x80000001;
-    SDL_QueueAudio(audio_dev, pages[0] + ai_ram, ai_len << ai_bits);
+    SDL_QueueAudio(audio_dev, pages[0] + ai_ram, ai_len);
   }
 
   void ai_update() {
