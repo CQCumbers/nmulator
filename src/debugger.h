@@ -50,22 +50,36 @@ namespace Debugger {
   /* === GDB Protocol commands == */
 
   char cmd_buf[buf_size] = {0};
-  char reg_names[33][3] = {
-    "r0", "at", "v0", "v1", "a0", "a1", "a2", "a3",
-    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7",
-    "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
-    "t8", "t9", "k0", "k1", "gp", "sp", "fp", "ra", "pc",
+  char reg_names[38][8] = {
+    "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
+    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
+    "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
+    "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31",
+    "sr", "lo", "hi", "bad", "cause", "pc",
   };
   int gdb_sock = 0;
+
+  uint64_t reg_vals(uint32_t idx) {
+    if (idx < 32) return R4300::reg_array[idx];
+    switch (idx) {
+      case 32: return R4300::reg_array[12 + R4300::dev_cop0];
+      case 33: return R4300::reg_array[R4300::lo];
+      case 34: return R4300::reg_array[R4300::hi];
+      case 35: return R4300::reg_array[8 + R4300::dev_cop0];
+      case 36: return R4300::reg_array[13 + R4300::dev_cop0];
+      case 37: return R4300::pc;
+      default: printf("Invalid register: %x\n", idx), exit(1);
+    }
+  }
 
   void query(int sockfd, const char *cmd_buf) {
     char buf[buf_size - 4] = {0};
     if (strncmp(cmd_buf, "qSupported", strlen("qSupported")) == 0)
       send_gdb(sockfd, "PacketSize=2047");
     else if (strncmp(cmd_buf, "qHostInfo", strlen("qHostInfo")) == 0)
-      send_gdb(sockfd, "triple:6d6970732d6c696e75782d676e75;ptrsize:8;endian:big;");
+      send_gdb(sockfd, "triple:6d6970732d7367692d69726978;ptrsize:8;endian:big;");
     else if (strncmp(cmd_buf, "qProcessInfo", strlen("qProcessInfo")) == 0)
-      send_gdb(sockfd, "triple:6d6970732d6c696e75782d676e75;pid:1;");
+      send_gdb(sockfd, "triple:6d6970732d7367692d69726978;pid:1;");
     else if (strncmp(cmd_buf, "qfThreadInfo", strlen("qfThreadInfo")) == 0)
       send_gdb(sockfd, "m-1");
     else if (strncmp(cmd_buf, "qsThreadInfo", strlen("qsThreadInfo")) == 0)
@@ -74,40 +88,31 @@ namespace Debugger {
       send_gdb(sockfd, "1");  // Dummy PID
     else if (strncmp(cmd_buf, "qRegisterInfo", strlen("qRegisterInfo")) == 0) {
       unsigned long i = strtoul(cmd_buf + strlen("qRegisterInfo"), nullptr, 16);
-      if (i >= 33) return send_gdb(sockfd, "E45");
-      char *ptr = buf + sprintf(buf, "name:%s;bitsize:64;", reg_names[i]);
-      ptr += sprintf(ptr, "offset:%lu;encoding:sint;format:hex;", i * 8);
+      if (i >= 38) return send_gdb(sockfd, "E45");
+      char *ptr = buf + sprintf(buf, "name:%s;bitsize:32;gcc:%lu;", reg_names[i], i);
+      const char *set = (i < 32 ? "General Purpose" : "Control");
+      ptr += sprintf(ptr, "offset:%lu;encoding:uint;format:hex;", i * 8);
+      ptr += sprintf(ptr, "set:%s Registers;dwarf:%lu;", set, i); 
       if (i == 29) sprintf(ptr, "generic:sp;");
       if (i == 30) sprintf(ptr, "generic:fp;");
       if (i == 31) sprintf(ptr, "generic:ra;");
-      if (i == 32) sprintf(ptr, "generic:pc;");
+      if (i == 37) sprintf(ptr, "generic:pc;");
       send_gdb(sockfd, buf);
     } else send_gdb(sockfd, "");
   }
 
   void read_regs(int sockfd) {
     char buf[buf_size - 4] = {0};
-    for (unsigned i = 0; i < 32; ++i)
-      sprintf(buf + i * 16, "%016" PRIx64, R4300::reg_array[i]);
-    sprintf(buf + 32 * 16, "%016" PRIx64, static_cast<uint64_t>(R4300::pc));
+    for (unsigned idx = 0; idx < 38; ++idx)
+      sprintf(buf + idx * 16, "%08x", (uint32_t)reg_vals(idx));
     send_gdb(sockfd, buf);
   }
 
   void read_reg(int sockfd, const char *cmd_buf) {
     char buf[17] = {0};
     uint32_t idx = strtoul(cmd_buf + 1, nullptr, 16);
-    if (idx != 32) sprintf(buf, "%016" PRIx64, R4300::reg_array[idx]);
-    else sprintf(buf, "%016" PRIx64, static_cast<uint64_t>(R4300::pc));
+    sprintf(buf, "%08x", (uint32_t)reg_vals(idx));
     send_gdb(sockfd, buf);
-  }
-
-  void write_reg(int sockfd, const char *cmd_buf) {
-    char *ptr = (char*)cmd_buf;
-    uint32_t idx = strtoul(cmd_buf + 1, &ptr, 16);
-    printf("Writing to register %x: %lx\n", idx, strtoul(ptr + 1, nullptr, 16));
-    if (idx != 32) R4300::reg_array[idx] = strtoul(ptr + 1, nullptr, 16);
-    else R4300::pc = strtoul(ptr + 1, nullptr, 16);
-    send_gdb(sockfd, "OK");
   }
 
   void read_mem(int sockfd, const char *cmd_buf) {
@@ -139,7 +144,6 @@ namespace Debugger {
         case 's': R4300::moved = false; return;
         case 'g': read_regs(gdb_sock); break;
         case 'p': read_reg(gdb_sock, cmd_buf); break;
-        case 'P': write_reg(gdb_sock, cmd_buf); break;
         case 'H': send_gdb(gdb_sock, "OK"); break;   // Switch to thread
         case 'k': printf("Killed by gdb\n"); exit(0);
         case 'm': read_mem(gdb_sock, cmd_buf); break;

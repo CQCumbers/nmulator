@@ -20,7 +20,8 @@ typedef struct RDPCommand {
   uint32_t fill, fog, blend;
   uint32_t env, prim, zprim;
   uint32_t bl_mux, cc_mux, keys[3];
-  uint32_t lft, type, tile, two_cycle;
+  uint32_t lft, type, tile;
+  uint32_t two_cycle, zsrc;
 } cmd_t;
 
 typedef struct RDPTile {
@@ -75,7 +76,7 @@ namespace Vulkan {
   VkBuffer pixels = VK_NULL_HANDLE;
 
   const VkDeviceSize zbuf_offset = pixels_offset + pixels_size;
-  const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint16_t);
+  const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint32_t);
   uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
   VkBuffer zbuf = VK_NULL_HANDLE;
   const VkDeviceSize total_size = zbuf_offset + zbuf_size;
@@ -331,13 +332,13 @@ namespace Vulkan {
     cmds_ptr()[n_cmds++] = cmd;
   }
 
-  void render(uint8_t *pixels, uint32_t len) {
+  void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
     if (!pixels || n_cmds == 0) return;
     memcpy(pixels_ptr(), pixels, len);
-    //if (zbuf) memcpy(zbuf_ptr(), zbuf, len);
+    if (zbuf) memcpy(zbuf_ptr(), zbuf, len);
     run_commands(); n_cmds = 0; memset(tiles_ptr(), 0, tiles_size);
     memcpy(pixels, pixels_ptr(), len);
-    //if (zbuf) memcpy(zbuf, zbuf_ptr(), len);
+    if (zbuf) memcpy(zbuf, zbuf_ptr(), len);
   }
 }
 
@@ -367,7 +368,7 @@ namespace RDP {
   uint32_t fill = 0x0, fog = 0x0, blend = 0x0;
   uint32_t env = 0x0, prim = 0x0, zprim = 0x0;
   uint32_t bl_mux = 0x0, cc_mux = 0x0, keys[3] = {0};
-  bool two_cycle = false;
+  bool two_cycle = false, zsrc = false;
 
   uint8_t opcode(uint64_t addr) {
     uint32_t out = 0;
@@ -386,7 +387,7 @@ namespace RDP {
   }
 
   void render() {
-    Vulkan::render(img_addr, img_width * height * img_size);
+    Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
   }
 
   /* === Instruction Translations === */
@@ -413,6 +414,7 @@ namespace RDP {
     std::vector<uint32_t> instr = fetch(pc, 2);
     two_cycle = (instr[0] >> 20) & 0x1;
     bl_mux = instr[1] >> 16;
+    zsrc = (instr[1] >> 2) & 0x1;
   }
 
   void set_fill() {
@@ -442,7 +444,7 @@ namespace RDP {
   }
 
   void set_zprim() {
-    zprim = __builtin_bswap32(fetch(pc, 2)[1]);
+    zprim = fetch(pc, 2)[1];
   }
 
   void set_zbuf() {
@@ -556,7 +558,7 @@ namespace RDP {
       .bl_mux = bl_mux, .cc_mux = cc_mux,
       .keys = { keys[0], keys[1], keys[2] },
       .lft = (instr[0] >> 23) & 0x1, .type = type,
-      .two_cycle = two_cycle,
+      .two_cycle = two_cycle, .zsrc = zsrc
     };
     if (type & 0x4) shade_triangle(cmd);
     if (type & 0x2) tex_triangle(cmd);
@@ -585,7 +587,7 @@ namespace RDP {
       .bl_mux = bl_mux, .cc_mux = cc_mux,
       .keys = { keys[0], keys[1], keys[2] },
       .type = type, .tile = (instr[1] >> 24) & 0x7,
-      .two_cycle = two_cycle,
+      .two_cycle = two_cycle, .zsrc = zsrc
     };
     if (type == 0xa) tex_rectangle<false>(cmd);
     if (type == 0xb) tex_rectangle<true>(cmd);
