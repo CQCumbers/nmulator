@@ -239,6 +239,20 @@ struct MipsJit {
     as.psubw(x86::xmm13, x86::xmm0);
   }
 
+  uint32_t check_breaks(uint32_t pc, uint32_t next_pc) {
+    if (!is_rsp && !R4300::moved) { R4300::moved = true; return next_pc; }
+    if (is_rsp || (!R4300::breaks[pc] && !R4300::broke)) return next_pc;
+    if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
+    R4300::broke = true; return block_end;
+  }
+
+  void check_watch(uint32_t pc) {
+    if (is_rsp || R4300::watch_w.empty() || pc == block_end) return;
+    as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::broke));
+    as.cmp(x86::dword_ptr(x86::rax), 1), as.mov(x86::ecx, pc);
+    as.cmove(x86::edi, x86::ecx), as.je(end_label);
+  }
+
   /* === Instruction Translations === */
 
   template <typename T>
@@ -260,7 +274,7 @@ struct MipsJit {
   }
 
   template <typename T>
-  void sw(uint32_t instr) {
+  void sw(uint32_t instr, uint32_t pc) {
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SW BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
@@ -273,7 +287,7 @@ struct MipsJit {
     else as.mov(x86::rsi, x86_spilld(rt(instr)));
     if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
     else as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
-    x86_load_caller(); as.pop(x86::edi);
+    x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
   template <typename T, Dir dir>
@@ -316,7 +330,7 @@ struct MipsJit {
   }
 
   template <typename T, Dir dir>
-  void swl(uint32_t instr) {
+  void swl(uint32_t instr, uint32_t pc) {
     constexpr bool right = (dir != Dir::ll);
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SWL BASE(RS), RT, OFFSET(IMMEDIATE)
@@ -348,7 +362,7 @@ struct MipsJit {
     // write masked data to memory
     if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
     else as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
-    x86_load_caller(); as.pop(x86::edi);
+    x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
   void lui(uint32_t instr) {
@@ -1368,7 +1382,7 @@ struct MipsJit {
   }
 
   template <typename T>
-  void swc1(uint32_t instr) {
+  void swc1(uint32_t instr, uint32_t pc) {
     uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
     // SWC1 BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
@@ -1380,7 +1394,7 @@ struct MipsJit {
     if (rtx) as.movss(x86_spilld(rt(instr) + dev_cop1), x86::xmm(rtx));
     as.mov(x86::rsi, x86_spilld(rt(instr) + dev_cop1));
     as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
-    x86_load_caller(); as.pop(x86::edi);
+    x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
   template <bool dword, uint8_t round_mode>
@@ -2063,13 +2077,6 @@ struct MipsJit {
     return next_pc;
   }
 
-  uint32_t check_breaks(uint32_t pc, uint32_t next_pc) {
-    if (!is_rsp && !R4300::moved) { R4300::moved = true; return next_pc; }
-    if (is_rsp || (!R4300::breaks[pc] && !R4300::broke)) return next_pc;
-    if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
-    R4300::broke = true; return block_end;
-  }
-
   uint32_t jit_block() {
     as.push(x86::rbp);
     if (is_rsp) as.mov(x86::rbp, reinterpret_cast<uint64_t>(&RSP::reg_array));
@@ -2117,24 +2124,24 @@ struct MipsJit {
         case 0x25: lw<uint16_t>(instr); break;
         case 0x26: lwl<int32_t, Dir::rl>(instr); break;
         case 0x27: lw<uint32_t>(instr); break;
-        case 0x28: sw<uint8_t>(instr); break;
-        case 0x29: sw<uint16_t>(instr); break;
-        case 0x2a: swl<uint32_t, Dir::ll>(instr); break;
-        case 0x2b: sw<uint32_t>(instr); break;
-        case 0x2c: swl<uint64_t, Dir::ll>(instr); break;
-        case 0x2d: swl<uint64_t, Dir::rl>(instr); break;
-        case 0x2e: swl<uint32_t, Dir::rl>(instr); break;
+        case 0x28: sw<uint8_t>(instr, pc); break;
+        case 0x29: sw<uint16_t>(instr, pc); break;
+        case 0x2a: swl<uint32_t, Dir::ll>(instr, pc); break;
+        case 0x2b: sw<uint32_t>(instr, pc); break;
+        case 0x2c: swl<uint64_t, Dir::ll>(instr, pc); break;
+        case 0x2d: swl<uint64_t, Dir::rl>(instr, pc); break;
+        case 0x2e: swl<uint32_t, Dir::rl>(instr, pc); break;
         case 0x2f: printf("CACHE instruction %x\n", instr); break;
         case 0x30: lw<int32_t>(instr); break; // LL
         case 0x31: lwc1<int32_t>(instr); break;
         case 0x32: lwc2(instr); break;
         case 0x35: lwc1<uint64_t>(instr); break;
         case 0x37: lw<uint64_t>(instr); break;
-        case 0x38: sw<uint32_t>(instr); break; // SC
-        case 0x39: swc1<uint32_t>(instr); break;
+        case 0x38: sw<uint32_t>(instr, pc); break; // SC
+        case 0x39: swc1<uint32_t>(instr, pc); break;
         case 0x3a: swc2(instr); break;
-        case 0x3d: swc1<uint64_t>(instr); break;
-        case 0x3f: sw<uint64_t>(instr); break;
+        case 0x3d: swc1<uint64_t>(instr, pc); break;
+        case 0x3f: sw<uint64_t>(instr, pc); break;
         default: invalid(instr); break;
       }
     }

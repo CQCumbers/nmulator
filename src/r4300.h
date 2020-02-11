@@ -14,6 +14,10 @@ namespace R4300 {
   constexpr uint32_t addr_mask = 0x1fffffff;
   constexpr uint32_t page_mask = 0x1fffff;
 
+  bool broke = false, moved = false;
+  robin_hood::unordered_map<uint32_t, bool> breaks;
+  robin_hood::unordered_map<uint32_t, bool> watch_w;
+
   template <typename T, bool map=false>
   int64_t read(uint32_t addr);
   template <typename T, bool map=false>
@@ -359,6 +363,7 @@ namespace R4300 {
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
+    broke |= watch_w[addr];
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if (!page) return mmio_write<T>(addr, val);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
@@ -377,9 +382,9 @@ namespace R4300 {
   /* === Actual CPU Functions === */
 
   uint64_t reg_array[0x63] = {0};
-  uint32_t pc = 0xa4000040, broke = false, moved = false;
-  constexpr uint8_t hi = 0x20, lo = 0x21, dev_cop0 = 0x22, dev_cop1 = 0x42;
-  robin_hood::unordered_map<uint32_t, bool> breaks;
+  uint32_t pc = 0xa4000040;
+  constexpr uint8_t hi = 0x20, lo = 0x21;
+  constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
 
   void irqs_update(uint32_t cycles) {
     // update IP2 based on MI_INTR and MI_MASK

@@ -126,10 +126,17 @@ namespace Debugger {
 
   template <bool active>
   void set_break(int sockfd, const char *cmd_buf) {
-    // Execution breakpoints only
-    if (cmd_buf[1] != '0') return send_gdb(sockfd, "E01");
     uint32_t addr = strtoul(cmd_buf + 3, nullptr, 16);
-    R4300::breaks[addr] = active; send_gdb(sockfd, "OK");
+    switch (cmd_buf[1]) {
+      case '0':
+        R4300::breaks[addr] = active;
+        return send_gdb(sockfd, "OK");
+      case '2':
+        R4300::watch_w[addr] = active;
+        return send_gdb(sockfd, "OK");
+      default:
+        return send_gdb(sockfd, "E01");
+    }
   }
 
   void update() {
