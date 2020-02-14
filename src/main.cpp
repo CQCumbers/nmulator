@@ -28,7 +28,7 @@ int main(int argc, char* argv[]) {
   robin_hood::unordered_map<uint32_t, Block> rsp_blocks;
   Block *block = nullptr, *empty = new Block();
   Block *prev = empty;
-  while (true) {
+  for (uint8_t i = 0; ; ++i) {
     uint32_t hash = R4300::fetch(R4300::pc);
     bool cached = prev->next && prev->next_pc == R4300::pc;
     if (cached && prev->next->valid(hash)) block = prev->next;
@@ -47,7 +47,7 @@ int main(int argc, char* argv[]) {
     }
     R4300::pc = block->code();
 
-    if (!RSP::halted()) {
+    if (!RSP::halted() && (i & 0x1)) {
       Block &block2 = rsp_blocks[RSP::pc & RSP::addr_mask];
       uint32_t hash2 = RSP::fetch(RSP::pc);
       if (!block2.valid(hash2)) {

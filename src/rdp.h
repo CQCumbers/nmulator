@@ -638,7 +638,7 @@ namespace RDP {
         case 0x3e: set_zbuf(); break;
         case 0x3f: set_image(); break;
         case 0x26: case 0x27: case 0x28: case 0x29:
-          /*printf("[RDP] SYNC\n")*/; pc += 8; break;
+          printf("[RDP] SYNC\n"); pc += 8; break;
         default: invalid(); break;
       }
     }

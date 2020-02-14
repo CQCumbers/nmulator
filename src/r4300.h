@@ -37,7 +37,7 @@ namespace R4300 {
   template <bool write>
   void rsp_dma(uint32_t val) {
     uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
-    printf("[RSP] DMA with count %x, len %x\n", count, len);
+    printf("[RSP] DMA with count %x, len %x, from %llx to %llx\n", count + 1, len + 1, rsp_cop0[1], rsp_cop0[0]);
     uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
     for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
       if (write) memcpy(ram, mem, len + 1); else memcpy(mem, ram, len + 1);
@@ -62,7 +62,7 @@ namespace R4300 {
 
   void vi_update(uint32_t cycles) {
     vi_line_progress += cycles;
-    if (vi_line_progress < 6510) return;
+    if (vi_line_progress < 6510 * 8) return;
     if (vi_line == vi_irq) mi_irqs |= 0x8;
     vi_line_progress = 0, vi_line += 0x2;
 
@@ -141,8 +141,10 @@ namespace R4300 {
   int8_t stick_x = 0x0, stick_y = 0x0;
   uint16_t buttons = 0x0;
   uint32_t si_ram = 0x0;
+  uint64_t eeprom[0x200];
 
   void joy_status(uint32_t channel, uint32_t addr) {
+    if (channel == 4) return write<uint32_t>(addr, 0x8000ff);
     if (channel != 0) return write<uint8_t>(addr - 2, 0x83);
     write<uint16_t>(addr, 0x0500); // standard controller type
     write<uint8_t>(addr + 2, 0x02); // no mempack slot
@@ -194,6 +196,18 @@ namespace R4300 {
     }
   }
 
+  void eeprom_read(uint8_t len, uint32_t addr) {
+    uint8_t offset = read<uint8_t>(addr);  // assumes t = 2
+    for (uint8_t i = 0; i < len; i += 8)
+      write<uint64_t>(addr + 1 + i, eeprom[offset + i / 8]);
+  }
+
+  void eeprom_write(uint8_t len, uint32_t addr) {
+    uint8_t offset = read<uint8_t>(addr);  // assumes t = 10
+    eeprom[offset] = read<uint64_t>(addr + 1);
+    write<uint8_t>(addr + 9, 0);
+  }
+
   void si_update() {
     uint32_t busy = 0x1fc007ff;
     uint32_t pc = 0x1fc007c0, channel = 0;
@@ -201,11 +215,16 @@ namespace R4300 {
     while (pc < busy) {
       uint8_t t = read<uint8_t>(pc++);
       if (t == 0xfe) return;
+      if (t == 0) ++channel, t = 0x80;
       if (t >> 7) continue;
       uint8_t r = read<uint8_t>(pc++);
       switch (read<uint8_t>(pc++)) {
         case 0x00: joy_status(channel, pc); break;
         case 0x01: joy_read(channel, pc); break;
+        case 0x02: printf("[SI] mempack read\n"); break;
+        case 0x03: printf("[SI] mempack write\n"); break;
+        case 0x04: eeprom_read(r, pc); pc += 1; break;
+        case 0x05: eeprom_write(r, pc); pc += 9; break;
         case 0xff: joy_status(channel, pc); break;
       }
       pc += r, ++channel;
@@ -267,7 +286,7 @@ namespace R4300 {
       default: printf("[MMIO] write to %x: %x\n", addr, val); return;
       // RSP Interface
       case 0x4040000: rsp_cop0[0] = val & 0x1fff; return;
-      case 0x4040004: rsp_cop0[1] = val & 0xffffff; return;
+      case 0x4040004: rsp_cop0[1] = val & 0xffffff; printf("[MMIO] RSP DMA SRC = %x\n", val); return;
       case 0x4040008: rsp_dma<false>(val); return;
       case 0x404000c: rsp_dma<true>(val); return;
       case 0x4040010: RSP::set_status(val); return;
@@ -362,6 +381,7 @@ namespace R4300 {
 
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
+    //if (addr == 0x8014f030 && val == 0x66) val = 0x65;
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     broke |= watch_w[addr];
     uint8_t *page = pages[(addr >> 21) & 0xff];
@@ -381,8 +401,8 @@ namespace R4300 {
 
   /* === Actual CPU Functions === */
 
-  uint64_t reg_array[0x63] = {0};
   uint32_t pc = 0xa4000040;
+  uint64_t reg_array[0x63] = {0};
   constexpr uint8_t hi = 0x20, lo = 0x21;
   constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
 
@@ -468,6 +488,9 @@ namespace R4300 {
     write<uint32_t>(0xbfc007e4, 0x3f3f);
     write<uint32_t>(0xa0000318, 0x800000);
     write<uint32_t>(0xbfc007fc, 0x80);  // pif_status
+
+    // CEN64 does it?
+    write<uint32_t>(0xa5000508, 0x5000500);
   }
 }
 
