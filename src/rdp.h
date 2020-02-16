@@ -343,7 +343,7 @@ namespace Vulkan {
 }
 
 namespace RSP {
-  extern uint64_t reg_array[0x89];
+  extern uint64_t reg_array[0x100];
   extern const uint8_t dev_cop0;
   template <typename T, bool all>
   int64_t read(uint32_t addr);

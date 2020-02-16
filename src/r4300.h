@@ -62,7 +62,7 @@ namespace R4300 {
 
   void vi_update(uint32_t cycles) {
     vi_line_progress += cycles;
-    if (vi_line_progress < 6510 * 8) return;
+    if (vi_line_progress < 6510) return; // * 8) return;
     if (vi_line == vi_irq) mi_irqs |= 0x8;
     vi_line_progress = 0, vi_line += 0x2;
 
@@ -138,10 +138,21 @@ namespace R4300 {
 
   constexpr uint32_t pi_status = 0x0;
   uint32_t pi_ram = 0x0, pi_rom = 0x0;
+  uint32_t pi_len = 0, pi_cycles = 0;
+  bool pi_write = false;
   int8_t stick_x = 0x0, stick_y = 0x0;
   uint16_t buttons = 0x0;
   uint32_t si_ram = 0x0;
   uint64_t eeprom[0x200];
+
+  void pi_update(uint32_t cycles) {
+    if (!pi_cycles) return;
+    if (pi_cycles > cycles) { pi_cycles -= cycles; return; }
+    printf("[PI] DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, pi_len + 1);
+    if (pi_write) memcpy(pages[0] + pi_ram, pages[0] + pi_rom, pi_len + 1);
+    else memcpy(pages[0] + pi_rom, pages[0] + pi_ram, pi_len + 1);
+    mi_irqs |= 0x10; pi_cycles = 0; return;
+  }
 
   void joy_status(uint32_t channel, uint32_t addr) {
     if (channel == 4) return write<uint32_t>(addr, 0x8000ff);
@@ -267,7 +278,7 @@ namespace R4300 {
       // Peripheral Interface
       case 0x4600000: return pi_ram;
       case 0x4600004: return pi_rom;
-      case 0x4600010: return pi_status;
+      case 0x4600010: return pi_cycles > 0;//pi_status;
       // RDRAM Interface
       case 0x4700000: return 0xe;      // RI_MODE
       case 0x4700004: return 0x40;     // RI_CONFIG
@@ -333,13 +344,13 @@ namespace R4300 {
       case 0x4600000: pi_ram = val & 0xffffff; return;
       case 0x4600004: pi_rom = val & addr_mask; return;
       case 0x4600008:
-        printf("[PI] DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, val + 1);
-        memcpy(pages[0] + pi_rom, pages[0] + pi_ram, val + 1);
-        mi_irqs |= 0x10; return;
+        if (pi_cycles) return;
+        pi_len = val; pi_write = false;
+        pi_cycles = pi_len / 2; return;
       case 0x460000c:
-        printf("[PI] DMA from %x to %x, of %x bytes\n", pi_rom, pi_ram, val + 1);
-        memcpy(pages[0] + pi_ram, pages[0] + pi_rom, val + 1);
-        mi_irqs |= 0x10; return;
+        if (pi_cycles) return;
+        pi_len = val; pi_write = true;
+        pi_cycles = pi_len / 2; return;
       case 0x4600010: mi_irqs &= ~0x10; return;
       // Serial Interface
       case 0x4800000: si_ram = val & 0xffffff; return;

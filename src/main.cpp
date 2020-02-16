@@ -28,7 +28,8 @@ int main(int argc, char* argv[]) {
   robin_hood::unordered_map<uint32_t, Block> rsp_blocks;
   Block *block = nullptr, *empty = new Block();
   Block *prev = empty;
-  for (uint8_t i = 0; ; ++i) {
+  uint32_t rsp_cycles = 0;
+  while (true) {
     uint32_t hash = R4300::fetch(R4300::pc);
     bool cached = prev->next && prev->next_pc == R4300::pc;
     if (cached && prev->next->valid(hash)) block = prev->next;
@@ -47,10 +48,11 @@ int main(int argc, char* argv[]) {
     }
     R4300::pc = block->code();
 
-    if (!RSP::halted() && (i & 0x1)) {
+    if (!RSP::halted()) {
+      rsp_cycles += block->cycles;
       Block &block2 = rsp_blocks[RSP::pc & RSP::addr_mask];
       uint32_t hash2 = RSP::fetch(RSP::pc);
-      if (!block2.valid(hash2)) {
+      if (true) {//!block2.valid(hash2)) {
         block2.hash = hash2;
         CodeHolder code;
         code.init(runtime.codeInfo());
@@ -59,11 +61,15 @@ int main(int argc, char* argv[]) {
         block2.cycles = jit.jit_block();
         runtime.add(&block2.code, &code);
       }
-      RSP::pc = block2.code();
-      R4300::rsp_update();
+      if (rsp_cycles >= block2.cycles * 3) {
+        RSP::pc = block2.code();
+        R4300::rsp_update();
+        rsp_cycles -= block2.cycles * 3;
+      }
     }
 
     R4300::ai_update();
+    R4300::pi_update(block->cycles);
     R4300::vi_update(block->cycles);
     R4300::irqs_update(block->cycles);
     if (R4300::broke) {
