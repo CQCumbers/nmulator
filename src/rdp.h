@@ -546,7 +546,7 @@ namespace RDP {
 
   template <uint8_t type>
   void triangle() {
-    //printf("[RDP] Triangle of type %x\n", type);
+    printf("[RDP] Triangle of type %x\n", type);
     std::vector<uint32_t> instr = fetch(pc, 8);
     cmd_t cmd = {
       .xyh = { instr[4], instr[1] & 0x3fff },
@@ -577,7 +577,7 @@ namespace RDP {
 
   template <uint8_t type>
   void rectangle() {
-    //printf("[RDP] Rectangle of type %x\n", type);
+    printf("[RDP] Rectangle of type %x\n", type);
     std::vector<uint32_t> instr = fetch(pc, 2);
     cmd_t cmd = {
       .xyh = { (instr[1] >> 12) & 0xfff, instr[1] & 0xfff },
@@ -597,13 +597,13 @@ namespace RDP {
   void invalid() {
     std::vector<uint32_t> instr = fetch(pc, 2);
     printf("[RDP] Unimplemented instruction %x%x\n", instr[0], instr[1]);
-    exit(1);
+    //exit(1);
   }
 
   void update() {
     // interpret config instructions 
-    pc = pc_start;
     while (pc < pc_end) {
+      printf("Opcode %x\n", opcode(pc)); 
       switch (opcode(pc)) {
         case 0x00: pc += 8; break;
         case 0x08: triangle<0x0>(); break;

@@ -38,6 +38,8 @@ namespace R4300 {
   void rsp_dma(uint32_t val) {
     uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
     printf("[RSP] DMA with count %x, len %x, from %llx to %llx\n", count + 1, len + 1, rsp_cop0[1], rsp_cop0[0]);
+    if (rsp_cop0[1] == 0x38ff80)
+      printf("Break here!\n");
     uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
     for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
       if (write) memcpy(ram, mem, len + 1); else memcpy(mem, ram, len + 1);
@@ -255,7 +257,7 @@ namespace R4300 {
       case 0x4040004: return rsp_cop0[1];
       case 0x4040010: return rsp_cop0[4];
       case 0x404001c: return (rsp_cop0[7] ? 0x1 : rsp_cop0[7]++);
-      case 0x4080000: return RSP::pc;
+      case 0x4080000: return RSP::pc & 0xfff;
       // RDP Interface
       case 0x4100000: return RDP::pc_start;
       case 0x4100004: return RDP::pc_end;
@@ -291,8 +293,10 @@ namespace R4300 {
 
   template <typename T>
   void mmio_write(uint32_t addr, uint32_t val) {
-    if ((addr & addr_mask & ~0x1fff) == 0x4000000)
+    if ((addr & addr_mask & ~0x1fff) == 0x4000000) {
+      printf("RSP MMIO Write\n");
       return RSP::write<T, true>(addr, val);
+    }
     switch (addr & addr_mask) {
       default: printf("[MMIO] write to %x: %x\n", addr, val); return;
       // RSP Interface
@@ -304,13 +308,15 @@ namespace R4300 {
       case 0x404001c: rsp_cop0[7] = 0x0; return;
       case 0x4080000: RSP::pc = val & 0xfff; return;
       // RDP Interface
-      case 0x4100000: RDP::pc_start = val & addr_mask; return;
+      case 0x4100000:
+        RDP::pc_start = val & addr_mask;
+        RDP::pc = RDP::pc_start; return;
       case 0x4100004:
         RDP::pc_end = val & addr_mask;
         RDP::update(); return;
       case 0x410000c:
-        RDP::status &= ~_pext_u32(val, 0x155);
-        RDP::status |= _pext_u32(val, 0x2aa); return;
+        RDP::status &= ~_pext_u32(val, 0x15);
+        RDP::status |= _pext_u32(val, 0x2a); return;
       // MIPS Interface
       case 0x4300000: if (val & 0x800) mi_irqs &= ~0x20; return;
       case 0x430000c:
@@ -418,6 +424,9 @@ namespace R4300 {
   constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
 
   void irqs_update(uint32_t cycles) {
+    if (R4300::pages[0][0xfd880] == 0xc0)
+      printf("Wrong value written to FD880\n");
+
     // update IP2 based on MI_INTR and MI_MASK
     if (mi_irqs & mi_mask) reg_array[13 + dev_cop0] |= 0x400;
     else reg_array[13 + dev_cop0] &= ~0x400;
@@ -493,7 +502,7 @@ namespace R4300 {
     // setup RSP
     RSP::dmem = pages[0] + 0x04000000;
     RSP::imem = pages[0] + 0x04001000;
-    rsp_cop0[4] = 0x1, rsp_cop0[11] = 0x88;
+    rsp_cop0[4] = 0x1, rsp_cop0[11] = 0x80;
 
     // setup SI (assumes CIC-NUS-6102)
     write<uint32_t>(0xbfc007e4, 0x3f3f);

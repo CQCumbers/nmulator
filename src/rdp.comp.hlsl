@@ -189,7 +189,7 @@ uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   else if (m2a == 2) m = cmd.blend;
   else if (m2a == 3) m = cmd.fog;
   // select a
-  if (m1b == 0) a = (color >> 24) & 0xff;
+  if (m1b == 0) a = 0xff; //(color >> 24) & 0xff;
   else if (m1b == 1) a = (cmd.fog >> 24) & 0xff;
   else if (m1b == 2) a = (color >> 24) & 0xff; // should be shade, from before CC?
   else if (m1b == 3) a = 0x0;

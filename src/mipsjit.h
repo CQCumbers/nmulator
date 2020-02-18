@@ -92,6 +92,11 @@ struct MipsJit {
     return x86::dqword_ptr(x86::rbp, reg << 3);
   }
 
+  constexpr x86::Mem x86_spillh(uint8_t reg) {
+    uint32_t fpr = ((reg & ~0x1) + dev_cop1) << 3;
+    return x86::dword_ptr(x86::rbp, fpr + ((reg & 0x1) << 2));
+  }
+
   void x86_load_acc() {
     // the only saved xmm registers are RSP accumulators
     if (!is_rsp) return;
@@ -1331,9 +1336,16 @@ struct MipsJit {
   template <bool dword>
   void mfc1(uint32_t instr) {
     if (rt(instr) == 0) return;
-    uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
-    if (rdx) as.movsd(x86::xmm0, x86::xmm(rdx));
-    else as.movsd(x86::xmm0, x86_spilld(rd(instr) + dev_cop1));
+    bool fr = R4300::reg_array[12 + dev_cop0] & 0x4000000;
+    if (!dword && !fr) {
+      uint8_t rdx = x86_reg((rd(instr) & ~0x1) + dev_cop1);
+      if (rdx) as.insertps(x86::xmm0, x86::xmm(rdx), (rd(instr) & 0x1) << 6);
+      else as.movss(x86::xmm0, x86_spillh(rd(instr)));
+    } else {
+      uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
+      if (rdx) as.movsd(x86::xmm0, x86::xmm(rdx));
+      else as.movsd(x86::xmm0, x86_spilld(rd(instr)));
+    }
     as.movsd(x86_spilld(rt(instr)), x86::xmm0);
     uint8_t rtx = x86_reg(rt(instr));
     if (rtx) as.mov(x86::gpq(rtx), x86_spilld(rt(instr)));
@@ -1343,15 +1355,18 @@ struct MipsJit {
   template <bool dword>
   void mtc1(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr));
-    if (!dword) {
-      if (rtx) as.movsxd(x86::rax, x86::gpd(rtx));
-      else as.movsxd(x86::rax, x86_spill(rt(instr)));
-      as.mov(x86_spilld(rt(instr)), x86::rax);
-    } else if (rtx) as.mov(x86_spilld(rt(instr)), x86::gpq(rtx));
+    if (rtx) as.mov(x86_spilld(rt(instr)), x86::gpq(rtx));
     as.movsd(x86::xmm0, x86_spilld(rt(instr)));
-    uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
-    if (rdx) as.movsd(x86::xmm(rdx), x86::xmm0);
-    else as.movsd(x86_spilld(rd(instr) + dev_cop1), x86::xmm0);
+    bool fr = R4300::reg_array[12 + dev_cop0] & 0x4000000;
+    if (!dword && !fr) {
+      uint8_t rdx = x86_reg((rd(instr) & ~0x1) + dev_cop1);
+      if (rdx) as.insertps(x86::xmm(rdx), x86::xmm0, (rd(instr) & 0x1) << 4);
+      else as.movss(x86_spillh(rd(instr)), x86::xmm0);
+    } else {
+      uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
+      if (rdx) as.movsd(x86::xmm(rdx), x86::xmm0);
+      else as.movsd(x86_spilld(rd(instr) + dev_cop1), x86::xmm0);
+    }
   }
 
   void cfc1(uint32_t instr) {
@@ -1367,7 +1382,7 @@ struct MipsJit {
 
   template <typename T>
   void lwc1(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
+    uint8_t rsx = x86_reg(rs(instr));
     // LWC1 BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
@@ -1377,13 +1392,21 @@ struct MipsJit {
     }
     as.call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     x86_load_caller(); as.pop(x86::edi);
-    as.mov(x86_spilld(rt(instr) + dev_cop1), x86::rax);
-    if (rtx) as.movss(x86::xmm(rtx), x86_spilld(rt(instr) + dev_cop1));
+    bool fr = R4300::reg_array[12 + dev_cop0] & 0x4000000;
+    if (sizeof(T) < 8 && !fr) {
+      uint8_t rtx = x86_reg((rt(instr) & ~0x1) + dev_cop1);
+      as.mov(x86_spillh(rt(instr)), x86::eax);
+      if (rtx) as.pinsrd(x86::xmm(rtx), x86_spillh(rt(instr)), rt(instr) & 0x1);
+    } else {
+      uint8_t rtx = x86_reg(rt(instr) + dev_cop1);
+      as.mov(x86_spilld(rt(instr) + dev_cop1), x86::rax);
+      as.movsd(x86::xmm(rtx), x86_spilld(rt(instr) + dev_cop1));
+    }
   }
 
   template <typename T>
   void swc1(uint32_t instr, uint32_t pc) {
-    uint8_t rtx = x86_reg(rt(instr) + dev_cop1), rsx = x86_reg(rs(instr));
+    uint8_t rsx = x86_reg(rs(instr));
     // SWC1 BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
@@ -1391,8 +1414,16 @@ struct MipsJit {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
-    if (rtx) as.movss(x86_spilld(rt(instr) + dev_cop1), x86::xmm(rtx));
-    as.mov(x86::rsi, x86_spilld(rt(instr) + dev_cop1));
+    bool fr = R4300::reg_array[12 + dev_cop0] & 0x4000000;
+    if (sizeof(T) < 8 && !fr) {
+      uint8_t rtx = x86_reg((rt(instr) & ~0x1) + dev_cop1);
+      if (rtx) as.pextrd(x86_spillh(rt(instr)), x86::xmm(rtx), rt(instr) & 0x1);
+      as.mov(x86::rsi, x86_spillh(rt(instr)));
+    } else {
+      uint8_t rtx = x86_reg(rt(instr) + dev_cop1);
+      if (rtx) as.movsd(x86_spilld(rt(instr) + dev_cop1), x86::xmm(rtx));
+      as.mov(x86::rsi, x86_spilld(rt(instr) + dev_cop1));
+    }
     as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
     x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
@@ -1418,7 +1449,7 @@ struct MipsJit {
     uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
     if (rdx) as.movsd(x86_spilld(rd(instr) + dev_cop1), x86::xmm(rdx));
     if (rs(instr) == 17) as.cvtsd2ss(x86::xmm0, x86_spilld(rd(instr) + dev_cop1));
-    else as.cvtsi2ss(x86::xmm0, x86_spilld(rd(instr) + dev_cop1));
+    else as.cvtsi2ss(x86::xmm0, x86_spill(rd(instr) + dev_cop1));
     uint8_t sax = x86_reg(sa(instr) + dev_cop1);
     if (sax) as.movss(x86::xmm(sax), x86::xmm0);
     else as.movss(x86_spill(sa(instr) + dev_cop1), x86::xmm0);
@@ -1428,7 +1459,7 @@ struct MipsJit {
     uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
     if (rdx) as.movsd(x86_spilld(rd(instr) + dev_cop1), x86::xmm(rdx));
     if (rs(instr) == 16) as.cvtss2sd(x86::xmm0, x86_spill(rd(instr) + dev_cop1));
-    else as.cvtsi2sd(x86::xmm0, x86_spilld(rd(instr) + dev_cop1));
+    else as.cvtsi2sd(x86::xmm0, x86_spill(rd(instr) + dev_cop1));
     uint8_t sax = x86_reg(sa(instr) + dev_cop1);
     if (sax) as.movsd(x86::xmm(sax), x86::xmm0);
     else as.movsd(x86_spilld(sa(instr) + dev_cop1), x86::xmm0);
@@ -1563,6 +1594,7 @@ struct MipsJit {
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     as.pextrw(x86::eax, x86::xmm15, 7 - e);
     if (operation == Op::div || operation == Op::sqrt) {
+      printf("VRCP/VRSQ Operation\n");
       if (low) as.or_(x86::eax, x86_spilld(12 + dev_cop2c));
       as.bsr(x86::ecx, x86::eax); as.xor_(x86::ecx, 0x1f);
       as.shl(x86::eax, x86::cl); as.shr(x86::eax, 22);
@@ -2155,6 +2187,7 @@ struct MipsJit {
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
+      //if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
       pc = check_breaks(pc, next_pc), next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;

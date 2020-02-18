@@ -50,17 +50,22 @@ namespace Debugger {
   /* === GDB Protocol commands == */
 
   char cmd_buf[buf_size] = {0};
-  char reg_names[38][8] = {
+  char reg_names[70][8] = {
     "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
     "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23",
     "r24", "r25", "r26", "r27", "r28", "r29", "r30", "r31",
     "sr", "lo", "hi", "bad", "cause", "pc",
+    "f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7",
+    "f8", "f9", "f10", "f11", "f12", "f13", "f14", "f15",
+    "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23",
+    "f24", "f25", "f26", "f27", "f28", "f29", "f30", "f31",
   };
   int gdb_sock = 0;
 
   uint64_t reg_vals(uint32_t idx) {
     if (idx < 32) return R4300::reg_array[idx];
+    if (idx >= 38) return R4300::reg_array[idx + R4300::dev_cop1 - 38];
     switch (idx) {
       case 32: return R4300::reg_array[12 + R4300::dev_cop0];
       case 33: return R4300::reg_array[R4300::lo];
@@ -77,9 +82,9 @@ namespace Debugger {
     if (strncmp(cmd_buf, "qSupported", strlen("qSupported")) == 0)
       send_gdb(sockfd, "PacketSize=2047");
     else if (strncmp(cmd_buf, "qHostInfo", strlen("qHostInfo")) == 0)
-      send_gdb(sockfd, "triple:6d6970732d7367692d69726978;ptrsize:8;endian:big;");
+      send_gdb(sockfd, "triple:6d69707336342d7367692d69726978;ptrsize:8;endian:big;");
     else if (strncmp(cmd_buf, "qProcessInfo", strlen("qProcessInfo")) == 0)
-      send_gdb(sockfd, "triple:6d6970732d7367692d69726978;pid:1;");
+      send_gdb(sockfd, "triple:6d69707336342d7367692d69726978;pid:1;");
     else if (strncmp(cmd_buf, "qfThreadInfo", strlen("qfThreadInfo")) == 0)
       send_gdb(sockfd, "m-1");
     else if (strncmp(cmd_buf, "qsThreadInfo", strlen("qsThreadInfo")) == 0)
@@ -88,10 +93,11 @@ namespace Debugger {
       send_gdb(sockfd, "1");  // Dummy PID
     else if (strncmp(cmd_buf, "qRegisterInfo", strlen("qRegisterInfo")) == 0) {
       unsigned long i = strtoul(cmd_buf + strlen("qRegisterInfo"), nullptr, 16);
-      if (i >= 38) return send_gdb(sockfd, "E45");
-      char *ptr = buf + sprintf(buf, "name:%s;bitsize:32;gcc:%lu;", reg_names[i], i);
+      if (i >= 70) return send_gdb(sockfd, "E45");
+      char *ptr = buf + sprintf(buf, "name:%s;bitsize:64;gcc:%lu;", reg_names[i], i);
       const char *set = (i < 32 ? "General Purpose" : "Control");
-      ptr += sprintf(ptr, "offset:%lu;encoding:uint;format:hex;", i * 8);
+      if (i >= 38) set = "Floating Point";
+      ptr += sprintf(ptr, "offset:%lu;encoding:uint;format:hex;", i * 16);
       ptr += sprintf(ptr, "set:%s Registers;dwarf:%lu;", set, i); 
       if (i == 29) sprintf(ptr, "generic:sp;");
       if (i == 30) sprintf(ptr, "generic:fp;");
@@ -103,15 +109,15 @@ namespace Debugger {
 
   void read_regs(int sockfd) {
     char buf[buf_size - 4] = {0};
-    for (unsigned idx = 0; idx < 38; ++idx)
-      sprintf(buf + idx * 16, "%08x", (uint32_t)reg_vals(idx));
+    for (unsigned idx = 0; idx < 70; ++idx)
+      sprintf(buf + idx * 16, "%016llx", reg_vals(idx));
     send_gdb(sockfd, buf);
   }
 
   void read_reg(int sockfd, const char *cmd_buf) {
     char buf[17] = {0};
     uint32_t idx = strtoul(cmd_buf + 1, nullptr, 16);
-    sprintf(buf, "%08x", (uint32_t)reg_vals(idx));
+    sprintf(buf, "%016llx", reg_vals(idx));
     send_gdb(sockfd, buf);
   }
 

@@ -28,7 +28,10 @@ int main(int argc, char* argv[]) {
   robin_hood::unordered_map<uint32_t, Block> rsp_blocks;
   Block *block = nullptr, *empty = new Block();
   Block *prev = empty;
+
   uint32_t rsp_cycles = 0;
+  bool already_compiled = false;
+
   while (true) {
     uint32_t hash = R4300::fetch(R4300::pc);
     bool cached = prev->next && prev->next_pc == R4300::pc;
@@ -52,7 +55,7 @@ int main(int argc, char* argv[]) {
       rsp_cycles += block->cycles;
       Block &block2 = rsp_blocks[RSP::pc & RSP::addr_mask];
       uint32_t hash2 = RSP::fetch(RSP::pc);
-      if (true) {//!block2.valid(hash2)) {
+      if (!already_compiled) {//!block2.valid(hash2)) {
         block2.hash = hash2;
         CodeHolder code;
         code.init(runtime.codeInfo());
@@ -60,11 +63,16 @@ int main(int argc, char* argv[]) {
 
         block2.cycles = jit.jit_block();
         runtime.add(&block2.code, &code);
+        already_compiled = true;
       }
-      if (rsp_cycles >= block2.cycles * 3) {
+      if (rsp_cycles >= block2.cycles * 4) {
         RSP::pc = block2.code();
+        /*if ((RSP::pc & 0xfff) == 0x7fc) {
+          for (uint8_t i = 0; i < 32; ++i)
+            printf("Reg $%d: %llx\n", i, RSP::reg_array[i]);
+        }*/
         R4300::rsp_update();
-        rsp_cycles -= block2.cycles * 3;
+        rsp_cycles = 0; already_compiled = false;
       }
     }
 
