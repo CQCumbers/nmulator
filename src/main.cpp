@@ -67,6 +67,13 @@ int main(int argc, char* argv[]) {
       }
       if (rsp_cycles >= block2.cycles * 4) {
         RSP::pc = block2.code();
+        printf("- ACC: %llx %llx\n", RSP::reg_array[0x40 + 34 * 2], RSP::reg_array[0x41 + 34 * 2]);
+        printf("- R31: %llx %llx\n", RSP::reg_array[0x40 + 31 * 2], RSP::reg_array[0x41 + 31 * 2]);
+        printf("- R3: %llx %llx\n", RSP::reg_array[0x40 + 3 * 2], RSP::reg_array[0x41 + 3 * 2]);
+        printf("- $29: %llx\n", RSP::reg_array[29]);
+        printf("- 12c: %llx\n", RSP::read<uint32_t>(0x12c));
+        if ((RSP::reg_array[0x41 + 34 * 2] & 0xffffffff) == 0x5a0000)
+          printf("5a0000 present now\n");
         /*if ((RSP::pc & 0xfff) == 0x7fc) {
           for (uint8_t i = 0; i < 32; ++i)
             printf("Reg $%d: %llx\n", i, RSP::reg_array[i]);

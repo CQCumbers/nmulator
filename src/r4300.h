@@ -38,8 +38,6 @@ namespace R4300 {
   void rsp_dma(uint32_t val) {
     uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
     printf("[RSP] DMA with count %x, len %x, from %llx to %llx\n", count + 1, len + 1, rsp_cop0[1], rsp_cop0[0]);
-    if (rsp_cop0[1] == 0x38ff80)
-      printf("Break here!\n");
     uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
     for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
       if (write) memcpy(ram, mem, len + 1); else memcpy(mem, ram, len + 1);
@@ -301,7 +299,10 @@ namespace R4300 {
       default: printf("[MMIO] write to %x: %x\n", addr, val); return;
       // RSP Interface
       case 0x4040000: rsp_cop0[0] = val & 0x1fff; return;
-      case 0x4040004: rsp_cop0[1] = val & 0xffffff; printf("[MMIO] RSP DMA SRC = %x\n", val); return;
+      case 0x4040004: rsp_cop0[1] = val & 0xffffff;
+        if (rsp_cop0[1] == 0xda218)
+          printf("Break here!\n");
+        return;
       case 0x4040008: rsp_dma<false>(val); return;
       case 0x404000c: rsp_dma<true>(val); return;
       case 0x4040010: RSP::set_status(val); return;

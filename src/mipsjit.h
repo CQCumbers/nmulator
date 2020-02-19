@@ -1490,6 +1490,7 @@ struct MipsJit {
 
   template <Mul mul_type, bool accumulate, bool sat_sgn = true>
   void vmudn(uint32_t instr) {
+    printf("COP2 Multiply of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
     // add rounding value
     if (mul_type == Mul::frac && !accumulate) {
       as.pcmpeqd(x86::xmm15, x86::xmm15); as.psllw(x86::xmm15, 15);
@@ -1566,6 +1567,7 @@ struct MipsJit {
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     elem_spec(rs(instr));
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    printf("COP2 ADD of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
     if (operation == Op::abs) {
       if (rdx) as.psignw(x86::xmm15, x86::xmm(rdx));
       else as.psignw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
@@ -1593,6 +1595,7 @@ struct MipsJit {
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     as.pextrw(x86::eax, x86::xmm15, 7 - e);
+    printf("COP2 MOV of $%x to $%x\n", rt(instr), sa(instr));
     if (operation == Op::div || operation == Op::sqrt) {
       printf("VRCP/VRSQ Operation\n");
       if (low) as.or_(x86::eax, x86_spilld(12 + dev_cop2c));
@@ -1621,6 +1624,7 @@ struct MipsJit {
 
   template <bool eq, bool invert>
   void veq(uint32_t instr) {
+    printf("COP2 VEQ of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
@@ -1640,6 +1644,7 @@ struct MipsJit {
   }
 
   void vch(uint32_t instr) {
+    printf("COP2 VCH of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
@@ -1679,6 +1684,7 @@ struct MipsJit {
   }
 
   void vmrg(uint32_t instr) {
+    printf("COP2 VMRG of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
@@ -1696,6 +1702,7 @@ struct MipsJit {
 
   template <Op operation, bool invert>
   void vand(uint32_t instr) {
+    printf("COP2 VAND of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
@@ -1718,6 +1725,7 @@ struct MipsJit {
   }
 
   void vsar(uint32_t instr) {
+    printf("COP2 VSAR into $%x\n", sa(instr));
     uint8_t acc = (rs(instr) & 0x3) + 13;
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
     if (sax) as.movdqa(x86::xmm(sax), x86::xmm(acc));
@@ -1733,6 +1741,7 @@ struct MipsJit {
   }
 
   void mtc2(uint32_t instr) {
+    printf("COP2 MTC2 into $%x\n", rd(instr));
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2), rtx = x86_reg(rt(instr));
     auto result = (rdx ? x86::xmm(rdx) : x86::xmm0);
     if (!rdx) as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
@@ -1767,7 +1776,8 @@ struct MipsJit {
   void ldv(uint32_t instr) {
     // only handles T-bit aligned elements
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    uint32_t offset = (instr & 0x7) << __builtin_ctz(sizeof(T));
+    uint32_t offset = (instr & 0x7f) << __builtin_ctz(sizeof(T));
+    printf("LDV of %x + $%x of COP2 $%x\n", offset, rs(instr), rt(instr));
     // LDV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
@@ -1780,7 +1790,7 @@ struct MipsJit {
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
     switch (sizeof(T)) {
-      case 1: as.pinsrb(result, x86::rax, 0xf - (sa(instr) >> 1)); break;
+      case 1: as.pinsrb(result, x86::rax, (0xf - (sa(instr) >> 1)) ^ 0x1); break;
       case 2: as.pinsrw(result, x86::rax, 0x7 - (sa(instr) >> 2)); break;
       case 4: as.pinsrd(result, x86::rax, 0x3 - (sa(instr) >> 3)); break;
       case 8: as.pinsrq(result, x86::rax, 0x1 - (sa(instr) >> 4)); break;
@@ -1792,7 +1802,7 @@ struct MipsJit {
   void sdv(uint32_t instr) {
     // only handles T-bit aligned elements
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    uint32_t offset = (instr & 0x7) << __builtin_ctz(sizeof(T));
+    uint32_t offset = (instr & 0x7f) << __builtin_ctz(sizeof(T));
     // SDV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
@@ -1803,7 +1813,7 @@ struct MipsJit {
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
     switch (sizeof(T)) {
-      case 1: as.pextrb(x86::rsi, result, 0xf - (sa(instr) >> 1)); break;
+      case 1: as.pextrb(x86::rsi, result, (0xf - (sa(instr) >> 1)) ^ 0x1); break;
       case 2: as.pextrw(x86::rsi, result, 0x7 - (sa(instr) >> 2)); break;
       case 4: as.pextrd(x86::rsi, result, 0x3 - (sa(instr) >> 3)); break;
       case 8: as.pextrq(x86::rsi, result, 0x1 - (sa(instr) >> 4)); break;
@@ -1815,7 +1825,8 @@ struct MipsJit {
   void lqv(uint32_t instr) {
     // only handles 128-bit aligned elements and addresses
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    uint32_t offset = (instr & 0x7) << 4;
+    uint32_t offset = (instr & 0x7f) << 4;
+    printf("LQV of %x + $%x of COP2 $%x\n", offset, rs(instr), rt(instr));
     // LQV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
@@ -1836,7 +1847,8 @@ struct MipsJit {
   void sqv(uint32_t instr) {
     // only handles 128-bit aligned elements and addresses
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    uint32_t offset = (instr & 0x7) << 4;
+    uint32_t offset = (instr & 0x7f) << 4;
+    printf("SQV of %x + $%x of COP2 $%x\n", offset, rs(instr), rt(instr));
     // SQV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
@@ -1858,7 +1870,9 @@ struct MipsJit {
   void lpv(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     bool packed = (type == LWC2::lpv || type == LWC2::luv);
-    uint32_t offset = (instr & 0x7) << (4 - packed);
+    uint32_t offset = (instr & 0x7f) << (4 - packed);
+    printf("LPV of %x + $%x of COP2 $%x\n", offset, rs(instr), rt(instr));
+    // LQV BASE(RS), RT, OFFSET(IMMEDIATE)
     // LPV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
@@ -1896,7 +1910,7 @@ struct MipsJit {
   void spv(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     bool packed = (type == LWC2::lpv || type == LWC2::luv);
-    uint32_t offset = (instr & 0x7) << (4 - packed);
+    uint32_t offset = (instr & 0x7f) << (4 - packed);
     // SPV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), offset));
@@ -2187,7 +2201,7 @@ struct MipsJit {
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
-      //if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
+      if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
       pc = check_breaks(pc, next_pc), next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
