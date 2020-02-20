@@ -66,12 +66,25 @@ int main(int argc, char* argv[]) {
         already_compiled = true;
       }
       if (rsp_cycles >= block2.cycles * 4) {
-        RSP::pc = block2.code();
-        printf("- ACC: %llx %llx\n", RSP::reg_array[0x40 + 34 * 2], RSP::reg_array[0x41 + 34 * 2]);
-        printf("- R31: %llx %llx\n", RSP::reg_array[0x40 + 31 * 2], RSP::reg_array[0x41 + 31 * 2]);
-        printf("- R3: %llx %llx\n", RSP::reg_array[0x40 + 3 * 2], RSP::reg_array[0x41 + 3 * 2]);
-        printf("- $29: %llx\n", RSP::reg_array[29]);
-        printf("- 12c: %llx\n", RSP::read<uint32_t>(0x12c));
+        RSP::pc = block2.code(); printf("- ACC: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 34 * 2]))[7 - i]);
+        printf("\n- R5: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 5 * 2]))[7 - i]);
+        printf("\n- R3: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 3 * 2]))[7 - i]);
+        printf("\n- R1: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 1 * 2]))[7 - i]);
+        printf("\n- $3: %llx\n- 3e0: ", RSP::reg_array[3]);
+        for (uint8_t i = 0; i < 32; ++i)
+          printf("%llx ", RSP::read<uint8_t>(0x3e0 + i));
+        printf("\n- 460: ");
+        for (uint8_t i = 0; i < 16; ++i)
+          printf("%llx ", RSP::read<uint8_t>(0x460 + i));
+        printf("\n---\n");
         if ((RSP::reg_array[0x41 + 34 * 2] & 0xffffffff) == 0x5a0000)
           printf("5a0000 present now\n");
         /*if ((RSP::pc & 0xfff) == 0x7fc) {
