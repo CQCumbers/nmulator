@@ -13,6 +13,7 @@ namespace RSP {
   uint8_t *dmem = nullptr;
   uint8_t *imem = nullptr;
   constexpr uint32_t addr_mask = 0xfff;
+  bool step = false, moved = false;
   const uint16_t rcp_rsq_rom[1024] = {
     0xffff, 0xff00, 0xfe01, 0xfd04, 0xfc07, 0xfb0c, 0xfa11, 0xf918,
     0xf81f, 0xf727, 0xf631, 0xf53b, 0xf446, 0xf352, 0xf25f, 0xf16d,

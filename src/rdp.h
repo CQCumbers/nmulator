@@ -548,6 +548,8 @@ namespace RDP {
   void triangle() {
     printf("[RDP] Triangle of type %x\n", type);
     std::vector<uint32_t> instr = fetch(pc, 8);
+    for (uint8_t i = 0; i < 8; i += 2)
+      printf("%x %x\n", instr[i], instr[i + 1]);
     cmd_t cmd = {
       .xyh = { instr[4], instr[1] & 0x3fff },
       .xym = { instr[6], (instr[1] >> 16) & 0x3fff },
@@ -603,7 +605,9 @@ namespace RDP {
   void update() {
     // interpret config instructions 
     while (pc < pc_end) {
-      printf("Opcode %x\n", opcode(pc)); 
+      std::vector<uint32_t> instr = fetch(pc, 2);
+      printf("[RDP] Command %x %x\n", instr[0], instr[1]);
+      pc -= 8;
       switch (opcode(pc)) {
         case 0x00: pc += 8; break;
         case 0x08: triangle<0x0>(); break;

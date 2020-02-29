@@ -221,18 +221,23 @@ struct MipsJit {
     as.punpcklbw(x86::xmm0, x86::xmm1); as.pshufb(x86::xmm15, x86::xmm0);
   }
 
-  void update_acc() {
+  void update_acc(bool high) {
     // assuming old accumulator values stored in spillq
     // adds them to new accumulator values in xmm13-15
     as.pxor(x86::xmm1, x86::xmm1);
-    // calc lower accumulator overflow mask
-    as.movdqa(x86::xmm0, x86_spillq(34 * 2 + dev_cop2));
-    as.paddusw(x86::xmm0, x86::xmm15);
-    as.paddw(x86::xmm15, x86_spillq(34 * 2 + dev_cop2));
-    // add carry to mid if overflow
-    as.pcmpeqw(x86::xmm0, x86::xmm15);
-    as.pcmpeqw(x86::xmm0, x86::xmm1);
-    as.psubw(x86::xmm14, x86::xmm0);
+    if (high) as.movdqa(x86::xmm15, x86_spillq(34 * 2 + dev_cop2));
+    else {
+      // calc lower accumulator overflow mask
+      as.movdqa(x86::xmm0, x86_spillq(34 * 2 + dev_cop2));
+      as.paddusw(x86::xmm0, x86::xmm15);
+      as.paddw(x86::xmm15, x86_spillq(34 * 2 + dev_cop2));
+      // add carry to mid if overflow
+      as.pcmpeqw(x86::xmm0, x86::xmm15);
+      as.pcmpeqw(x86::xmm0, x86::xmm1);
+      as.psubw(x86::xmm14, x86::xmm0);
+      as.movdqa(x86::xmm13, x86::xmm14);
+      as.psraw(x86::xmm13, 15);
+    }
     // calc middle accumulator overflow mask
     as.movdqa(x86::xmm0, x86_spillq(33 * 2 + dev_cop2));
     as.paddusw(x86::xmm0, x86::xmm14);
@@ -245,10 +250,17 @@ struct MipsJit {
   }
 
   uint32_t check_breaks(uint32_t pc, uint32_t next_pc) {
-    if (!is_rsp && !R4300::moved) { R4300::moved = true; return next_pc; }
-    if (is_rsp || (!R4300::breaks[pc] && !R4300::broke)) return next_pc;
-    if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
-    R4300::broke = true; return block_end;
+    if (is_rsp) {
+      if (!RSP::moved) { RSP::moved = true; return next_pc; }
+      if (!RSP::step) return next_pc;
+      if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
+      return block_end;
+    } else {
+      if (!R4300::moved) { R4300::moved = true; return next_pc; }
+      if (!R4300::breaks[pc] && !R4300::broke) return next_pc;
+      if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
+      R4300::broke = true; return block_end;
+    }
   }
 
   void check_watch(uint32_t pc) {
@@ -1487,16 +1499,29 @@ struct MipsJit {
     exit(1);
   }
 
-  template <Mul mul_type, bool accumulate, bool sat_sgn = true>
+  template <Mul type, bool accumulate, bool sat_sgn = true>
   void vmudn(uint32_t instr) {
+    /*as.mov(x86::rax, (uint64_t)0x18400000ffa4ffa6);
+    as.pinsrq(x86::xmm15, x86::rax, 1);
+    as.mov(x86::rax, (uint64_t)0x00006a0900000000);
+    as.pinsrq(x86::xmm15, x86::rax, 0);
+    as.mov(x86::rax, (uint64_t)0x00000000ffffffff);
+    as.pinsrq(x86::xmm14, x86::rax, 1);
+    as.mov(x86::rax, (uint64_t)0x0000000200000000);
+    as.pinsrq(x86::xmm14, x86::rax, 0);
+    as.mov(x86::rax, (uint64_t)0x00000000ffffffff);
+    as.pinsrq(x86::xmm13, x86::rax, 1);
+    as.mov(x86::rax, (uint64_t)0x0000000000000000);
+    as.pinsrq(x86::xmm13, x86::rax, 0);*/
+
     printf("COP2 Multiply of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
     // add rounding value
-    if (mul_type == Mul::frac && !accumulate) {
+    if (type == Mul::frac && !accumulate) {
       as.pcmpeqd(x86::xmm15, x86::xmm15); as.psllw(x86::xmm15, 15);
       as.pxor(x86::xmm14, x86::xmm14); as.pxor(x86::xmm13, x86::xmm13);
     }
     // save old accumulator values
-    if (accumulate || mul_type == Mul::frac) x86_store_acc();
+    if (accumulate || type == Mul::frac) x86_store_acc();
     // move vt into accumulator
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
@@ -1506,20 +1531,18 @@ struct MipsJit {
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
     if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
     else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
-    if (mul_type == Mul::high) {
+    if (type == Mul::high) {
       // multiply signed vt by signed vs
-      as.pmullw(x86::xmm15, x86::xmm0);
-      as.pmulhw(x86::xmm14, x86::xmm0);
-      // shift product up by 16 bits
       as.movdqa(x86::xmm13, x86::xmm14);
-      as.movdqa(x86::xmm14, x86::xmm15);
+      as.pmullw(x86::xmm14, x86::xmm0);
+      as.pmulhw(x86::xmm13, x86::xmm0);
       as.pxor(x86::xmm15, x86::xmm15);
-    } else if (mul_type == Mul::low) {
+    } else if (type == Mul::low) {
       // multiply unsigned vt by unsigned vs
       as.pmulhuw(x86::xmm15, x86::xmm0);
       as.pxor(x86::xmm14, x86::xmm14);
       as.pxor(x86::xmm13, x86::xmm13);
-    } else if (mul_type == Mul::frac) {
+    } else if (type == Mul::frac) {
       // multiply signed vt by signed vs
       as.pmullw(x86::xmm15, x86::xmm0);
       as.pmulhw(x86::xmm14, x86::xmm0);
@@ -1527,7 +1550,7 @@ struct MipsJit {
       as.psllw(x86::xmm14, 1);
       as.movdqa(x86::xmm0, x86::xmm15); as.psrlw(x86::xmm0, 15);
       as.por(x86::xmm14, x86::xmm0);
-      as.psllw(x86::xmm15, 1); update_acc();
+      as.psllw(x86::xmm15, 1); update_acc(false);
       as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
     } else { // midm or midn
       // save sign of vt, to fix unsigned multiply
@@ -1536,16 +1559,22 @@ struct MipsJit {
       as.pmullw(x86::xmm15, x86::xmm0);
       as.pmulhuw(x86::xmm14, x86::xmm0);
       // subtract vs where vt was negative
-      if (mul_type == Mul::midn) as.psraw(x86::xmm1, 15);
+      if (type == Mul::midn) as.psraw(x86::xmm1, 15);
       else as.psraw(x86::xmm0, 15);
       as.pand(x86::xmm1, x86::xmm0);
       as.psubw(x86::xmm14, x86::xmm1);
       // sign extend to upper accumulator
       as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
     }
-    if (accumulate && mul_type != Mul::frac) update_acc();
-    if (mul_type == Mul::midn || mul_type == Mul::low) {
-      as.movdqa(x86::xmm0, x86::xmm15);
+    if (accumulate && type != Mul::frac) update_acc(type == Mul::high);
+    if (type == Mul::midn || type == Mul::low) {
+      // saturate unsigned value
+      as.movdqa(x86::xmm0, x86::xmm14); as.psraw(x86::xmm0, 15);
+      as.movdqa(x86::xmm1, x86::xmm13); as.psraw(x86::xmm1, 15);
+      as.pxor(x86::xmm2, x86::xmm2); as.pcmpeqw(x86::xmm2, x86::xmm1);
+      as.pcmpeqw(x86::xmm0, x86::xmm13); as.movdqa(x86::xmm1, x86::xmm15);
+      as.pand(x86::xmm1, x86::xmm0); as.pandn(x86::xmm0, x86::xmm2);
+      as.por(x86::xmm0, x86::xmm1);
     } else {
       // saturate signed value
       as.movdqa(x86::xmm0, x86::xmm14); as.movdqa(x86::xmm1, x86::xmm14);
@@ -1566,22 +1595,30 @@ struct MipsJit {
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     elem_spec(rs(instr));
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    if (rdx) as.movdqa(x86::xmm0, x86::xmm(rtx));
+    else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
     printf("COP2 ADD of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
     if (operation == Op::abs) {
-      if (rdx) as.psignw(x86::xmm15, x86::xmm(rdx));
-      else as.psignw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
-    } else if (operation == Op::add) { // doesn't handle VCO carry-in/clear
-      if (rdx) as.paddsw(x86::xmm15, x86::xmm(rdx));
-      else as.paddsw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
-    } else if (operation == Op::addc) { // doesn't handle VCO carry-out/equal
-      if (rdx) as.paddw(x86::xmm15, x86::xmm(rdx));
-      else as.paddw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+      as.psignw(x86::xmm15, x86::xmm0);
+    } else if (operation == Op::add) {  // doesn't handle VCO upper bits 
+      as.psubsw(x86::xmm0, x86_spillq(0 + dev_cop2c));
+      as.paddsw(x86::xmm15, x86::xmm0); as.pxor(x86::xmm0, x86::xmm0);
+      as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
+    } else if (operation == Op::addc) {
+      as.movdqa(x86::xmm1, x86::xmm15); as.paddw(x86::xmm15, x86::xmm0);
+      as.paddusw(x86::xmm1, x86::xmm0); as.pcmpeqw(x86::xmm1, x86::xmm15);
+      as.pxor(x86::xmm0, x86::xmm0); as.pcmpeqw(x86::xmm0, x86::xmm1);
+      as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
     } else if (operation == Op::sub) {
-      if (rdx) as.psubsw(x86::xmm15, x86::xmm(rdx));
-      else as.psubsw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+      as.psubsw(x86::xmm15, x86_spillq(0 + dev_cop2c));
+      as.psubsw(x86::xmm0, x86::xmm15); as.movdqa(x86::xmm15, x86::xmm0);
+      as.pxor(x86::xmm0, x86::xmm0); as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
     } else if (operation == Op::subc) {
-      if (rdx) as.psubw(x86::xmm15, x86::xmm(rdx));
-      else as.psubw(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
+      as.movdqa(x86::xmm1, x86::xmm0); as.psubusw(x86::xmm1, x86::xmm15);
+      as.movdqa(x86::xmm2, x86::xmm0); as.pcmpeqw(x86::xmm2, x86::xmm15);
+      as.psubw(x86::xmm0, x86::xmm15); as.movdqa(x86::xmm15, x86::xmm0);
+      as.pxor(x86::xmm0, x86::xmm0); as.pcmpeqw(x86::xmm0, x86::xmm1);
+      as.pandn(x86::xmm2, x86::xmm0); as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm2);
     }
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
     if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
@@ -1590,14 +1627,14 @@ struct MipsJit {
 
   template <Op operation, bool low>
   void vmov(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), e = rs(instr) >> 1;
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), e = rs(instr) & 0x7;
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
-    as.pextrw(x86::eax, x86::xmm15, 7 - e);
+    elem_spec(rs(instr)), as.pextrw(x86::eax, x86::xmm15, 7 - e);
     printf("COP2 MOV of $%x to $%x\n", rt(instr), sa(instr));
     if (operation == Op::div || operation == Op::sqrt) {
       printf("VRCP/VRSQ Operation\n");
-      if (low) as.or_(x86::eax, x86_spilld(12 + dev_cop2c));
+      if (low) as.or_(x86::eax, x86_spill(12 + dev_cop2c));
       as.bsr(x86::ecx, x86::eax); as.xor_(x86::ecx, 0x1f);
       as.shl(x86::eax, x86::cl); as.shr(x86::eax, 22);
       if (operation == Op::div) as.and_(x86::eax, 0x1ff), as.xor_(x86::ecx, 0x1f);
@@ -1607,14 +1644,15 @@ struct MipsJit {
         as.or_(x86::eax, 0x200); as.xor_(x86::ecx, 0x1f); as.shr(x86::ecx, 1);
       } // does not handle 0s, negatives
       as.mov(x86::rsi, reinterpret_cast<uint64_t>(&RSP::rcp_rsq_rom));
-      as.mov(x86::eax, x86::word_ptr(x86::rsi, x86::eax, 1));
+      as.mov(x86::ax, x86::word_ptr(x86::rsi, x86::eax, 1));
       as.or_(x86::eax, 0x10000); as.shl(x86::eax, 14); as.shr(x86::eax, x86::cl);
-      as.mov(x86_spilld(13 + dev_cop2c), x86::eax);
+      as.mov(x86_spill(13 + dev_cop2c), x86::eax);
     } else if (!low) {
-      as.shl(x86::eax, 16); as.mov(x86_spilld(12 + dev_cop2c), x86::eax);
-      as.mov(x86::eax, x86_spilld(13 + dev_cop2c)); as.shr(x86::eax, 16);
+      printf("VRCPH/VRSQH Operation\n");
+      as.shl(x86::eax, 16); as.mov(x86_spill(12 + dev_cop2c), x86::eax);
+      as.mov(x86::eax, x86_spill(13 + dev_cop2c)); as.shr(x86::eax, 16);
     }
-    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2), de = rd(instr) >> 1;
+    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2), de = rd(instr) & 0x7;
     auto result = (sax ? x86::xmm(sax) : x86::xmm0);
     if (!sax) as.movdqa(x86::xmm0, x86_spillq(sa(instr) * 2 + dev_cop2));
     as.pinsrw(result, x86::eax, 7 - de);
@@ -1682,6 +1720,25 @@ struct MipsJit {
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
   }
 
+  void vcl(uint32_t instr) {
+    printf("COP2 VCL of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
+    if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
+    else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
+    elem_spec(rs(instr)), as.movdqa(x86::xmm1, x86::xmm15);
+    uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
+    if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
+    else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
+    // just use vcc_lo as mask, for now
+    as.movdqa(x86::xmm15, x86_spillq(4 + dev_cop2c));
+    as.pand(x86::xmm1, x86::xmm15), as.pandn(x86::xmm15, x86::xmm0);
+    as.por(x86::xmm15, x86::xmm1); as.pxor(x86::xmm0, x86::xmm0);
+    as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
+    uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
+    if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
+    else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
+  }
+
   void vmrg(uint32_t instr) {
     printf("COP2 VMRG of $%x and $%x to $%x\n", rt(instr), rd(instr), sa(instr));
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
@@ -1736,7 +1793,12 @@ struct MipsJit {
     auto result = (rdx ? x86::xmm(rdx) : x86::xmm0);
     if (!rdx) as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
     as.pextrw(x86::eax, result, 7 - (sa(instr) >> 1));
-    from_eax(rt(instr));
+    uint8_t rtx = x86_reg(rt(instr));
+    if (rtx) as.movsx(x86::gpq(rtx), x86::ax);
+    else {
+      as.movsx(x86::rax, x86::ax);
+      as.mov(x86_spilld(rt(instr)), x86::rax);
+    }
   }
 
   void mtc2(uint32_t instr) {
@@ -1804,6 +1866,7 @@ struct MipsJit {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     uint8_t zeros = __builtin_ctz(sizeof(T));
     int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << zeros;
+    printf("SDV of %x + $%x of COP2 $%x\n", off, rs(instr), rt(instr));
     // SDV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), off));
@@ -1890,7 +1953,6 @@ struct MipsJit {
     bool packed = (type == LWC2::lpv || type == LWC2::luv);
     int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << (4 - packed);
     printf("LPV of %x + $%x of COP2 $%x\n", off, rs(instr), rt(instr));
-    // LQV BASE(RS), RT, OFFSET(IMMEDIATE)
     // LPV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), off));
@@ -1929,6 +1991,7 @@ struct MipsJit {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     bool packed = (type == LWC2::lpv || type == LWC2::luv);
     int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << (4 - packed);
+    printf("SPV of %x + $%x of COP2 $%x\n", off, rs(instr), rt(instr));
     // SPV BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
     if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), off));
@@ -2184,7 +2247,7 @@ struct MipsJit {
           case 0x21: veq<true, false>(instr); break;
           case 0x22: veq<true, true>(instr); break;
           case 0x23: veq<false, true>(instr); break;
-          case 0x24: /*printf("COP2 VCL\n");*/ break;
+          case 0x24: vcl(instr); break;
           case 0x25: vch(instr); break;
           case 0x26: vch(instr);  break;
           case 0x27: vmrg(instr); break;
@@ -2219,7 +2282,7 @@ struct MipsJit {
     end_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
-      if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
+      //if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
       pc = check_breaks(pc, next_pc), next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;

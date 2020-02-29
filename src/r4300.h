@@ -289,6 +289,8 @@ namespace R4300 {
     }
   }
 
+  bool logging_on = false;
+
   template <typename T>
   void mmio_write(uint32_t addr, uint32_t val) {
     if ((addr & addr_mask & ~0x1fff) == 0x4000000) {
@@ -300,8 +302,9 @@ namespace R4300 {
       // RSP Interface
       case 0x4040000: rsp_cop0[0] = val & 0x1fff; return;
       case 0x4040004: rsp_cop0[1] = val & 0xffffff;
-        if (rsp_cop0[1] == 0xda218)
-          printf("Break here!\n");
+        printf("Writing %llx to DMA_SRC\n", rsp_cop0[1]);
+        if (rsp_cop0[1] == 0xda218 || rsp_cop0[1] == 0x390198)
+          printf("Break here!\n"), logging_on = true;
         return;
       case 0x4040008: rsp_dma<false>(val); return;
       case 0x404000c: rsp_dma<true>(val); return;
