@@ -71,15 +71,18 @@ int main(int argc, char* argv[]) {
           printf("- ACC: ");
           for (uint8_t i = 0; i < 24; ++i)
             printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 32 * 2]))[23 - i]);
-          printf("\n- R31: ");
+          printf("\n- VCO: ");
+          for (uint8_t i = 0; i < 16; ++i)
+            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x86 + 0 * 2]))[15 - i]);
+          printf("\n- R30: ");
           for (uint8_t i = 0; i < 8; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 31 * 2]))[7 - i]);
+            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 30 * 2]))[7 - i]);
+          printf("\n- R18: ");
+          for (uint8_t i = 0; i < 8; ++i)
+            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 18 * 2]))[7 - i]);
           printf("\n- R6: ");
           for (uint8_t i = 0; i < 8; ++i)
             printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 6 * 2]))[7 - i]);
-          printf("\n- R21: ");
-          for (uint8_t i = 0; i < 8; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 21 * 2]))[7 - i]);
           printf("\n- R5: ");
           for (uint8_t i = 0; i < 8; ++i)
             printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 5 * 2]))[7 - i]);
@@ -96,9 +99,9 @@ int main(int argc, char* argv[]) {
               RSP::reg_array[3], RSP::reg_array[15], RSP::reg_array[17]);
           for (uint8_t i = 0; i < 32; ++i)
             printf("%llx ", RSP::read<uint8_t>(0xcf0 + i));
-          printf("\n- 460: ");
+          printf("\n- 160: ");
           for (uint8_t i = 0; i < 16; ++i)
-            printf("%llx ", RSP::read<uint8_t>(0x460 + i));
+            printf("%llx ", RSP::read<uint8_t>(0x160 + i));
           printf("\n---\n");
           if ((RSP::reg_array[0x41 + 34 * 2] & 0xffffffff) == 0x5a0000)
             printf("5a0000 present now\n");

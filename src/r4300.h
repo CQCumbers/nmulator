@@ -303,7 +303,7 @@ namespace R4300 {
       case 0x4040000: rsp_cop0[0] = val & 0x1fff; return;
       case 0x4040004: rsp_cop0[1] = val & 0xffffff;
         printf("Writing %llx to DMA_SRC\n", rsp_cop0[1]);
-        if (rsp_cop0[1] == 0xda218 || rsp_cop0[1] == 0x390198)
+        if (rsp_cop0[1] == 0x390198 || rsp_cop0[1] == 0xda218)
           printf("Break here!\n"), logging_on = true;
         return;
       case 0x4040008: rsp_dma<false>(val); return;

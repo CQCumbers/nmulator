@@ -1601,6 +1601,8 @@ struct MipsJit {
     if (operation == Op::abs) {
       as.psignw(x86::xmm15, x86::xmm0);
     } else if (operation == Op::add) {  // doesn't handle VCO upper bits 
+      as.movdqa(x86::xmm1, x86::xmm15); as.paddw(x86::xmm1, x86::xmm0);
+      as.psubw(x86::xmm1, x86_spillq(0 + dev_cop2c));
       as.psubsw(x86::xmm0, x86_spillq(0 + dev_cop2c));
       as.paddsw(x86::xmm15, x86::xmm0); as.pxor(x86::xmm0, x86::xmm0);
       as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
@@ -1610,6 +1612,8 @@ struct MipsJit {
       as.pxor(x86::xmm0, x86::xmm0); as.pcmpeqw(x86::xmm0, x86::xmm1);
       as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
     } else if (operation == Op::sub) {
+      as.movdqa(x86::xmm1, x86::xmm0); as.psubw(x86::xmm1, x86::xmm15);
+      as.paddw(x86::xmm1, x86_spillq(0 + dev_cop2c));
       as.psubsw(x86::xmm15, x86_spillq(0 + dev_cop2c));
       as.psubsw(x86::xmm0, x86::xmm15); as.movdqa(x86::xmm15, x86::xmm0);
       as.pxor(x86::xmm0, x86::xmm0); as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
@@ -1623,6 +1627,8 @@ struct MipsJit {
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
     if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
+    if (operation == Op::add) as.movdqa(x86::xmm15, x86::xmm1);
+    if (operation == Op::sub) as.movdqa(x86::xmm15, x86::xmm1);
   }
 
   template <Op operation, bool low>
@@ -1635,6 +1641,14 @@ struct MipsJit {
     if (operation == Op::div || operation == Op::sqrt) {
       printf("VRCP/VRSQ Operation\n");
       if (low) as.or_(x86::eax, x86_spill(12 + dev_cop2c));
+      // check for special cases, absolute value
+      Label after_recip = as.newLabel();
+      as.mov(x86::ecx, 0x7fffffff); as.test(x86::eax, x86::eax);
+      as.cmove(x86::eax, x86::ecx); as.je(after_recip);
+      as.cdq(); as.xor_(x86::eax, x86::edx); as.sub(x86::eax, x86::edx);
+      as.mov(x86::ecx, 0xffff0000); as.test(x86::eax, x86::eax);
+      as.cmove(x86::eax, x86::ecx); as.je(after_recip);
+      // calculate index into reciprocal rom, shift result
       as.bsr(x86::ecx, x86::eax); as.xor_(x86::ecx, 0x1f);
       as.shl(x86::eax, x86::cl); as.shr(x86::eax, 22);
       if (operation == Op::div) as.and_(x86::eax, 0x1ff), as.xor_(x86::ecx, 0x1f);
@@ -1642,11 +1656,11 @@ struct MipsJit {
         as.and_(x86::eax, 0x1fe); as.mov(x86::esi, x86::ecx);
         as.and_(x86::esi, 1); as.or_(x86::eax, x86::esi);
         as.or_(x86::eax, 0x200); as.xor_(x86::ecx, 0x1f); as.shr(x86::ecx, 1);
-      } // does not handle 0s, negatives
+      }
       as.mov(x86::rsi, reinterpret_cast<uint64_t>(&RSP::rcp_rsq_rom));
       as.mov(x86::ax, x86::word_ptr(x86::rsi, x86::eax, 1));
       as.or_(x86::eax, 0x10000); as.shl(x86::eax, 14); as.shr(x86::eax, x86::cl);
-      as.mov(x86_spill(13 + dev_cop2c), x86::eax);
+      as.bind(after_recip); as.mov(x86_spill(13 + dev_cop2c), x86::eax);
     } else if (!low) {
       printf("VRCPH/VRSQH Operation\n");
       as.shl(x86::eax, 16); as.mov(x86_spill(12 + dev_cop2c), x86::eax);
@@ -1669,12 +1683,16 @@ struct MipsJit {
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
     if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
     else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
-    if (eq) as.pcmpeqw(x86::xmm15, x86::xmm0);
-    else as.pcmpgtw(x86::xmm15, x86::xmm0);
+    if (!eq) {
+      as.movdqa(x86::xmm2, x86::xmm15); as.pcmpeqw(x86::xmm15, x86::xmm0);
+      as.pand(x86::xmm15, x86_spillq(0 + dev_cop2c));
+      as.pcmpgtw(x86::xmm2, x86::xmm0); as.por(x86::xmm15, x86::xmm2);
+    } else as.pcmpeqw(x86::xmm15, x86::xmm0);
     if (invert) as.pcmpeqd(x86::xmm2, x86::xmm2), as.pxor(x86::xmm15, x86::xmm2);
     as.movdqa(x86_spillq(4 + dev_cop2c), x86::xmm15);
     as.pand(x86::xmm0, x86::xmm15), as.pandn(x86::xmm15, x86::xmm1);
-    as.por(x86::xmm15, x86::xmm0);
+    as.por(x86::xmm15, x86::xmm0); as.pxor(x86::xmm0, x86::xmm0);
+    as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
     if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
