@@ -1810,7 +1810,11 @@ struct MipsJit {
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
     auto result = (rdx ? x86::xmm(rdx) : x86::xmm0);
     if (!rdx) as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
-    as.pextrw(x86::eax, result, 7 - (sa(instr) >> 1));
+    as.pextrw(x86::eax, result, 7 - (sa(instr) >> 2));
+    if (sa(instr) & 0x2) {
+      as.pextrw(x86::ecx, result, 6 - (sa(instr) >> 2));
+      as.shl(x86::eax, 8); as.shr(x86::ecx, 8); as.or_(x86::eax, x86::ecx);
+    }
     uint8_t rtx = x86_reg(rt(instr));
     if (rtx) as.movsx(x86::gpq(rtx), x86::ax);
     else {
@@ -1824,8 +1828,13 @@ struct MipsJit {
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2), rtx = x86_reg(rt(instr));
     auto result = (rdx ? x86::xmm(rdx) : x86::xmm0);
     if (!rdx) as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
-    if (rtx) as.pinsrw(result, x86::gpd(rtx), 7 - (sa(instr) >> 1));
-    else as.pinsrw(result, x86_spill(rt(instr)), 7 - (sa(instr) >> 1));
+    if (sa(instr) & 0x2) {
+      to_eax(rt(instr)); as.pinsrb(result, x86::eax, 14 - (sa(instr) >> 1));
+      as.shr(x86::eax, 8); as.pinsrb(result, x86::eax, 15 - (sa(instr) >> 1));
+    } else {
+      if (rtx) as.pinsrw(result, x86::gpd(rtx), 7 - (sa(instr) >> 2));
+      else as.pinsrw(result, x86_spill(rt(instr)), 7 - (sa(instr) >> 2));
+    }
     if (!rdx) as.movdqa(x86_spillq(rd(instr) * 2 + dev_cop2), x86::xmm0);
   }
 

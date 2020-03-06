@@ -8,7 +8,7 @@ struct RDPCommand {
   uint sh, sm, sl;
   uint shade[4], sde[4], sdx[4];
   uint zpos, zde, zdx;
-  uint tex[2], tde[2], tdx[2];
+  uint tex[3], tde[3], tdx[3];
   uint fill, fog, blend;
   uint env, prim, zprim;
   uint bl_mux, cc_mux, keys[3];
@@ -76,15 +76,17 @@ uint read_texel(RDPTile tex, uint s, uint t) {
 
 uint sample_color(uint2 pos, RDPCommand cmd) {
   if (cmd.type & 0x2) { // textured
-    RDPTile tex = texes[cmd.tile]; uint x, y, s, t;
+    RDPTile tex = texes[cmd.tile]; uint x, y, s, t, w;
     if (cmd.type & 0x8) { // rectangle
       s = pos.x - (cmd.xyh[0] >> 2); //s = (s * cmd.tdx[0]) >> 12;
       t = pos.y - (cmd.xyh[1] >> 2); //t = (t * cmd.tde[1]) >> 10;
     } else { // triangle
       uint x1 = cmd.xyh[0] + cmd.sh * (pos.y - (cmd.xyh[1] >> 2));
       x = pos.x - (x1 >> 16); y = pos.y - (cmd.xyh[1] >> 2);
-      s = (x * cmd.tdx[0] + y * cmd.tde[0] + cmd.tex[0]) >> 21;
-      t = (x * cmd.tdx[1] + y * cmd.tde[1] + cmd.tex[1]) >> 21;
+      return ~0x0;
+      //s = (x * cmd.tdx[0] + y * cmd.tde[0] + cmd.tex[0]) >> 21;
+      //t = (x * cmd.tdx[1] + y * cmd.tde[1] + cmd.tex[1]) >> 21;
+      //w = (x * cmd.tdx[2] + y * cmd.tde[2] + cmd.tex[2]) >> 21;
     }
     return cmd.type == 0xb ? read_texel(tex, t, s) : read_texel(tex, s, t);
   } else if (cmd.type & 0x4) { // shaded
@@ -175,6 +177,7 @@ uint visible(uint2 pos, RDPCommand cmd) {
 }*/
 
 uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
+  //if (cmd.type == 0x7) return ~0x0;
   uint a, p, b, m;
   uint m1a = (cmd.bl_mux >> 14) & 0x3, m1b = (cmd.bl_mux >> 10) & 0x3;
   uint m2a = (cmd.bl_mux >> 6) & 0x3, m2b = (cmd.bl_mux >> 2) & 0x3;
@@ -216,7 +219,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
 
   uint pixel = pixels.Load(tile_pos * global.size);
   if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
-  uint zval = 0x7fff;
+  //uint zval = 0x7fff;
   //uint zval = zbuf.Load(tile_pos * global.size);
   //zval = (tile_pos & 0x1 ? zval >> 16 : zval) & 0x7fff;
 
@@ -225,10 +228,10 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
     RDPCommand cmd = cmds[tile.cmd_idxs[i]];
     uint coverage = visible(GlobalID.xy, cmd);
     uint color = sample_color(GlobalID.xy, cmd);
-    uint z = sample_z(GlobalID.xy, cmd);
-    if (coverage == 0 || z > zval) continue;
+    //uint z = sample_z(GlobalID.xy, cmd);
+    if (coverage == 0/* || z > zval*/) continue;
     pixel = blend(pixel, color, coverage, cmd);
-    if (cmd.type & 0x1) zval = z;
+    //if (cmd.type & 0x1) zval = z;
   }
 
   if (tile_pos & 0x1) {
@@ -236,14 +239,14 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       pixels.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
       pixels.InterlockedOr(tile_pos * global.size, write_rgba16(pixel) << 16);
     } else pixels.Store(tile_pos * global.size, pixel);
-    zbuf.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
-    zbuf.InterlockedOr(tile_pos * global.size, (zval & 0xffff) << 16);
+    //zbuf.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
+    //zbuf.InterlockedOr(tile_pos * global.size, (zval & 0xffff) << 16);
   } else {
     if (global.size == 2) {
       pixels.InterlockedAnd(tile_pos * global.size, 0xffff0000);
       pixels.InterlockedOr(tile_pos * global.size, write_rgba16(pixel));
     } else pixels.Store(tile_pos * global.size, pixel);
-    zbuf.InterlockedAnd(tile_pos * global.size, 0xffff0000);
-    zbuf.InterlockedOr(tile_pos * global.size, zval & 0xffff);
+    //zbuf.InterlockedAnd(tile_pos * global.size, 0xffff0000);
+    //zbuf.InterlockedOr(tile_pos * global.size, zval & 0xffff);
   }
 }

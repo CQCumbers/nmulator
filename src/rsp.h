@@ -7,13 +7,14 @@
 
 namespace R4300 {
   extern uint32_t mi_irqs;
+  extern bool logging_on;
 }
 
 namespace RSP {
   uint8_t *dmem = nullptr;
   uint8_t *imem = nullptr;
   constexpr uint32_t addr_mask = 0xfff;
-  bool step = false, moved = false;
+  bool step = true, moved = false;
   const uint16_t rcp_rsq_rom[1024] = {
     0xffff, 0xff00, 0xfe01, 0xfd04, 0xfc07, 0xfb0c, 0xfa11, 0xf918,
     0xf81f, 0xf727, 0xf631, 0xf53b, 0xf446, 0xf352, 0xf25f, 0xf16d,
@@ -193,7 +194,8 @@ namespace RSP {
   }
 
   void set_status(uint32_t val) {
-    printf("Setting RSP STATUS to %x\n", val);
+    if (val == 0x400) printf("400 written to STATUS\n"), R4300::logging_on = true;
+    printf("Writing %x to RSP_STATUS, RSP PC: %x\n", val, pc);
     reg_array[4 + dev_cop0] &= ~(val & 0x1);       // HALT
     reg_array[4 + dev_cop0] |= (val & 0x2) >> 1;
     reg_array[4 + dev_cop0] &= ~(val & 0x4) >> 1;  // BROKE

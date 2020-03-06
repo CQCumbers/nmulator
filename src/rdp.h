@@ -16,7 +16,7 @@ typedef struct RDPCommand {
   uint32_t sh, sm, sl;
   uint32_t shade[4], sde[4], sdx[4];
   uint32_t zpos, zde, zdx;
-  uint32_t tex[2], tde[2], tdx[2];
+  uint32_t tex[3], tde[3], tdx[3];
   uint32_t fill, fog, blend;
   uint32_t env, prim, zprim;
   uint32_t bl_mux, cc_mux, keys[3];
@@ -350,6 +350,7 @@ namespace RSP {
 }
 
 namespace R4300 {
+  extern bool logging_on;
   extern uint32_t mi_irqs;
   extern uint8_t *pages[0x100];
   template <typename T, bool map>
@@ -360,6 +361,7 @@ namespace RDP {
   uint64_t *rsp_cop0 = RSP::reg_array + RSP::dev_cop0;
   uint64_t &pc_start = rsp_cop0[8], &pc_end = rsp_cop0[9];
   uint64_t &pc = rsp_cop0[10], &status = rsp_cop0[11];
+  bool running = false;
 
   uint32_t img_size = 0x0, img_width = 0, height = 240;
   uint8_t *img_addr = nullptr, *zbuf_addr = nullptr;
@@ -532,10 +534,13 @@ namespace RDP {
     std::vector<uint32_t> instr = fetch(pc, 16);
     cmd.tex[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
     cmd.tex[1] = (instr[0] << 16) | (instr[4] & 0xffff);
+    cmd.tex[2] = (instr[1] & 0xffff0000) | (instr[5] >> 16);
     cmd.tde[0] = (instr[8] & 0xffff0000) | (instr[12] >> 16);
     cmd.tde[1] = (instr[8] << 16) | (instr[12] & 0xffff);
+    cmd.tde[2] = (instr[9] & 0xffff0000) | (instr[13] >> 16);
     cmd.tdx[0] = (instr[2] & 0xffff0000) | (instr[6] >> 16);
     cmd.tdx[1] = (instr[2] << 16) | (instr[6] & 0xffff);
+    cmd.tdx[2] = (instr[3] & 0xffff0000) | (instr[7] >> 16);
   }
 
   void zbuf_triangle(cmd_t &cmd) {
@@ -602,11 +607,14 @@ namespace RDP {
     //exit(1);
   }
 
-  void update() {
+  void update(uint32_t cycles) {
     // interpret config instructions 
-    while (pc < pc_end) {
+    if (!running) return;
+    for (uint32_t i = 0; pc < pc_end && i < cycles; ++i) {
       std::vector<uint32_t> instr = fetch(pc, 2);
       printf("[RDP] Command %x %x\n", instr[0], instr[1]);
+      //if (instr[0] == 0xf2000000 && instr[1] == 0x500008)
+      //  R4300::logging_on = true;
       pc -= 8;
       switch (opcode(pc)) {
         case 0x00: pc += 8; break;
@@ -641,13 +649,17 @@ namespace RDP {
         case 0x3d: set_texture(); break;
         case 0x3e: set_zbuf(); break;
         case 0x3f: set_image(); break;
-        case 0x26: case 0x27: case 0x28: case 0x29:
+        case 0x29: R4300::mi_irqs |= 0x20;
+        case 0x26: case 0x27: case 0x28:
           printf("[RDP] SYNC\n"); pc += 8; break;
         default: invalid(); break;
       }
     }
-    // rasterize on GPU according to config
-    status |= 0x80, R4300::mi_irqs |= 0x20; render();
+    if (pc >= pc_end) {
+      // rasterize on GPU according to config
+      status |= 0x80; render(); running = false;
+      if (pc > pc_end) pc = pc_end;
+    }
   }
 }
 

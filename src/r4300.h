@@ -158,7 +158,7 @@ namespace R4300 {
     if (channel == 4) return write<uint32_t>(addr, 0x8000ff);
     if (channel != 0) return write<uint8_t>(addr - 2, 0x83);
     write<uint16_t>(addr, 0x0500); // standard controller type
-    write<uint8_t>(addr + 2, 0x02); // no mempack slot
+    write<uint8_t>(addr + 2, 0x0); // no mempack slot
   }
 
   void joy_read(uint32_t channel, uint32_t addr) {
@@ -303,8 +303,10 @@ namespace R4300 {
       case 0x4040000: rsp_cop0[0] = val & 0x1fff; return;
       case 0x4040004: rsp_cop0[1] = val & 0xffffff;
         printf("Writing %llx to DMA_SRC\n", rsp_cop0[1]);
-        if (rsp_cop0[1] == 0x390198 || rsp_cop0[1] == 0xda218)
-          printf("Break here!\n"), logging_on = true;
+        if (rsp_cop0[1] == 0x140490) {
+          //printf("Break here!\n"), logging_on = true;
+          printf("First word: %x\n", *(uint32_t*)(pages[0] + rsp_cop0[1]));
+        }
         return;
       case 0x4040008: rsp_dma<false>(val); return;
       case 0x404000c: rsp_dma<true>(val); return;
@@ -317,7 +319,7 @@ namespace R4300 {
         RDP::pc = RDP::pc_start; return;
       case 0x4100004:
         RDP::pc_end = val & addr_mask;
-        RDP::update(); return;
+        RDP::running = true; return;
       case 0x410000c:
         RDP::status &= ~_pext_u32(val, 0x15);
         RDP::status |= _pext_u32(val, 0x2a); return;
@@ -356,16 +358,21 @@ namespace R4300 {
       case 0x4600008:
         if (pi_cycles) return;
         pi_len = val; pi_write = false;
-        pi_cycles = pi_len / 2; return;
+        pi_cycles = pi_len * 7; return;
       case 0x460000c:
         if (pi_cycles) return;
         pi_len = val; pi_write = true;
-        pi_cycles = pi_len / 2; return;
+        pi_cycles = pi_len * 7; return;
       case 0x4600010: mi_irqs &= ~0x10; return;
       // Serial Interface
       case 0x4800000: si_ram = val & 0xffffff; return;
       case 0x4800004:
         si_update();
+        printf("PIF READ: \n");
+        for (uint8_t i = 0; i < 0x40; ++i)
+          printf("%x ", pages[0xfe][0x7c0 + i]);
+        printf("\n");
+
         memcpy(pages[0] + si_ram, pages[0xfe] + 0x7c0, 0x40);
         mi_irqs |= 0x2; return;
       case 0x4800010:
@@ -402,7 +409,6 @@ namespace R4300 {
 
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
-    //if (addr == 0x8014f030 && val == 0x66) val = 0x65;
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     broke |= watch_w[addr];
     uint8_t *page = pages[(addr >> 21) & 0xff];
@@ -439,8 +445,8 @@ namespace R4300 {
     uint64_t &count = reg_array[9 + dev_cop0];
     uint64_t compare = reg_array[11 + dev_cop0];
     if (count > compare) compare += 0x100000000;
-    if (count + cycles >= compare) reg_array[13 + dev_cop0] |= 0x8000;
-    count = (count + cycles) & 0xffffffff;
+    if (count + (cycles / 2 + 1) >= compare) reg_array[13 + dev_cop0] |= 0x8000;
+    count = (count + (cycles / 2 + 1)) & 0xffffffff;
 
     // if interrupt enabled and triggered, set pc to handler address
     uint8_t ip = (reg_array[13 + dev_cop0] >> 8) & 0xff;

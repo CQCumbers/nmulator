@@ -26,11 +26,11 @@ int main(int argc, char* argv[]) {
   JitRuntime runtime;
   robin_hood::unordered_node_map<uint32_t, Block> r4300_blocks;
   robin_hood::unordered_map<uint32_t, Block> rsp_blocks;
-  Block *block = nullptr, *empty = new Block();
+  Block *block = nullptr, *block2 = nullptr, *empty = new Block();
   Block *prev = empty;
 
   uint32_t rsp_cycles = 0;
-  bool already_compiled = false;
+  bool compiled = false;
 
   while (true) {
     uint32_t hash = R4300::fetch(R4300::pc);
@@ -52,69 +52,76 @@ int main(int argc, char* argv[]) {
     R4300::pc = block->code();
 
     if (!RSP::halted()) {
-      rsp_cycles += block->cycles;
-      Block &block2 = rsp_blocks[RSP::pc & RSP::addr_mask];
-      uint32_t hash2 = RSP::fetch(RSP::pc);
-      if (!already_compiled) {
-        block2.hash = hash2;
-        CodeHolder code;
-        code.init(runtime.codeInfo());
-        MipsJit<Device::rsp> jit(code);
+      //rsp_cycles += block->cycles;
+      for (uint8_t i = 0; i < block->cycles; ++i) {
+        block2 = &rsp_blocks[RSP::pc & RSP::addr_mask];
+        uint32_t hash2 = RSP::fetch(RSP::pc);
+        if (!compiled && (!block2->valid(hash2) /*|| RDP::tex_rect_hit*/)) {
+          block2->hash = hash2;
+          CodeHolder code;
+          code.init(runtime.codeInfo());
+          MipsJit<Device::rsp> jit(code);
 
-        block2.cycles = jit.jit_block();
-        runtime.add(&block2.code, &code);
-        already_compiled = true;
+          block2->cycles = jit.jit_block();
+          runtime.add(&block2->code, &code);
+          compiled = true;
+        }
+        RSP::pc = block2->code();
+        R4300::rsp_update(); RSP::moved = false;
+        compiled = false;
       }
-      if (rsp_cycles >= block2.cycles * 4) {
-        RSP::pc = block2.code();
-        /*if (R4300::logging_on) {
-          printf("- ACC: ");
-          for (uint8_t i = 0; i < 24; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 32 * 2]))[23 - i]);
-          printf("\n- VCO: ");
-          for (uint8_t i = 0; i < 16; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x86 + 0 * 2]))[15 - i]);
-          printf("\n- R30: ");
-          for (uint8_t i = 0; i < 8; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 30 * 2]))[7 - i]);
-          printf("\n- R18: ");
-          for (uint8_t i = 0; i < 8; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 18 * 2]))[7 - i]);
-          printf("\n- R6: ");
-          for (uint8_t i = 0; i < 8; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 6 * 2]))[7 - i]);
-          printf("\n- R5: ");
-          for (uint8_t i = 0; i < 8; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 5 * 2]))[7 - i]);
-          printf("\n- R4: ");
-          for (uint8_t i = 0; i < 8; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 4 * 2]))[7 - i]);
-          printf("\n- R3: ");
-          for (uint8_t i = 0; i < 8; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 3 * 2]))[7 - i]);
-          printf("\n- R1: ");
-          for (uint8_t i = 0; i < 8; ++i)
-            printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 1 * 2]))[7 - i]);
-          printf("\n- $3: %llx $15: %llx $17: %llx\n- cf0: ",
-              RSP::reg_array[3], RSP::reg_array[15], RSP::reg_array[17]);
-          for (uint8_t i = 0; i < 32; ++i)
-            printf("%llx ", RSP::read<uint8_t>(0xcf0 + i));
-          printf("\n- 160: ");
-          for (uint8_t i = 0; i < 16; ++i)
-            printf("%llx ", RSP::read<uint8_t>(0x160 + i));
-          printf("\n---\n");
-          if ((RSP::reg_array[0x41 + 34 * 2] & 0xffffffff) == 0x5a0000)
-            printf("5a0000 present now\n");
-        }*/
+      /*if (rsp_cycles >= block2->cycles * 4) {
+        RSP::pc = block2->code();*/
+      /*if (RDP::tex_rect_hit) { //R4300::logging_on) {
+        printf("- ACC: ");
+        for (uint8_t i = 0; i < 24; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 32 * 2]))[23 - i]);
+        printf("\n- VCO: ");
+        for (uint8_t i = 0; i < 16; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x86 + 0 * 2]))[15 - i]);
+        printf("\n- R30: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 30 * 2]))[7 - i]);
+        printf("\n- R18: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 18 * 2]))[7 - i]);
+        printf("\n- R6: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 6 * 2]))[7 - i]);
+        printf("\n- R5: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 5 * 2]))[7 - i]);
+        printf("\n- R4: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 4 * 2]))[7 - i]);
+        printf("\n- R3: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 3 * 2]))[7 - i]);
+        printf("\n- R1: ");
+        for (uint8_t i = 0; i < 8; ++i)
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 1 * 2]))[7 - i]);
+        printf("\n- $3: %llx $23: %llx $19: %llx\n- ce0: ",
+            RSP::reg_array[3], RSP::reg_array[23], RSP::reg_array[19]);
+        for (uint8_t i = 0; i < 32; ++i)
+          printf("%llx ", RSP::read<uint8_t>(0xce0 + i));
+        printf("\n- %llx: ", RSP::reg_array[30]);
+        for (uint8_t i = 0; i < 16; ++i)
+          printf("%llx ", RSP::read<uint8_t>(RSP::reg_array[30] + i));
+        printf("\n---\n");
+        if ((RSP::reg_array[0x41 + 34 * 2] & 0xffffffff) == 0x5a0000)
+          printf("5a0000 present now\n");
+      }*/
         /*if ((RSP::pc & 0xfff) == 0x7fc) {
           for (uint8_t i = 0; i < 32; ++i)
             printf("Reg $%d: %llx\n", i, RSP::reg_array[i]);
-        }*/
+        }
         R4300::rsp_update(); RSP::moved = false;
-        rsp_cycles = 0; already_compiled = false;
+        rsp_cycles = 0; compiled = false;
       }
+      if (RSP::halted()) rsp_blocks.clear();*/
     }
 
+    RDP::update(block->cycles);
     R4300::ai_update();
     R4300::pi_update(block->cycles);
     R4300::vi_update(block->cycles);
