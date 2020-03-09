@@ -194,7 +194,7 @@ namespace RSP {
   }
 
   void set_status(uint32_t val) {
-    if (val == 0x400) printf("400 written to STATUS\n"), R4300::logging_on = true;
+    //if (val == 0x400) printf("400 written to STATUS\n"), R4300::logging_on = true;
     printf("Writing %x to RSP_STATUS, RSP PC: %x\n", val, pc);
     reg_array[4 + dev_cop0] &= ~(val & 0x1);       // HALT
     reg_array[4 + dev_cop0] |= (val & 0x2) >> 1;
