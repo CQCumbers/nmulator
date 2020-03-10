@@ -39,7 +39,9 @@ namespace R4300 {
     uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
     //if (rsp_cop0[1] == 0x3bb790) logging_on = true;
     printf("[RSP] DMA with count %x, len %x, from %llx to %llx\n", count + 1, len + 1, rsp_cop0[1], rsp_cop0[0]);
-    //if (rsp_cop0[1] == 0x3c6200 && RSP::read<uint32_t>(0xd24)) exit(0);
+    //if (rsp_cop0[1] == 0x3c6200 && RSP::read<uint32_t>(0xd24))
+    //  print("Check DMEM here\n");
+    //  exit(0);
     uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
     for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
       write ? memcpy(ram, mem, len + 1) : memcpy(mem, ram, len + 1);
@@ -307,7 +309,7 @@ namespace R4300 {
         printf("Writing %llx to DMA_SRC\n", rsp_cop0[1]);
         printf("DMEM 4e0 is %llx %llx\n", RSP::read<uint32_t>(0x4e0), RSP::read<uint32_t>(0x4e4));
         printf("DMEM 5f8 is %llx %llx\n", RSP::read<uint32_t>(0x5f8), RSP::read<uint32_t>(0x5fc));
-        if (rsp_cop0[1] == 0x140490) {
+        if (rsp_cop0[1] == 0x3c6200/*0x3bb790 || rsp_cop0[1] == 0x3aa538*/) {
           //printf("Break here!\n"), logging_on = true;
           printf("First word: %x\n", *(uint32_t*)(pages[0] + rsp_cop0[1]));
         }

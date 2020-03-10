@@ -1914,6 +1914,7 @@ struct MipsJit {
     x86_load_caller(); as.pop(x86::edi);
   }
 
+  template <bool right>
   void lqv(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << 4;
@@ -1926,23 +1927,27 @@ struct MipsJit {
       as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
     }
     // load possibly unaligned data from memory
+    if (right) as.sub(x86::edi, 0x8);
     as.push(x86::edi); as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
     as.pop(x86::edi); as.mov(x86::ecx, x86::edi); as.and_(x86::ecx, 0xf);
     Label after = as.newLabel(); as.cmp(x86::ecx, 0x8); as.jae(after);
-    as.mov(x86_spilld(rt(instr) * 2 + 1 + dev_cop2), x86::rax); as.add(x86::edi, 8);
-    as.push(x86::ecx); as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+    as.push(x86::ecx); as.mov(x86_spilld(rt(instr) * 2 + !right + dev_cop2), x86::rax);
+    right ? as.sub(x86::edi, 0x8) : as.add(x86::edi, 0x8);
+    as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
     as.pop(x86::ecx); as.bind(after); as.shl(x86::ecx, 3);
     // compute mask for loaded data
     as.xor_(x86::rdx, x86::rdx); as.not_(x86::rdx); as.shl(x86::rdx, x86::cl);
+    if (right) as.not_(x86::rdx), as.sub(x86::ecx, 0x8 << 3);
     as.and_(x86::rax, x86::rdx); as.not_(x86::rdx);
     // apply mask to appropriate half of register
-    as.shr(x86::ecx, 3); as.and_(x86::ecx, 0x8); as.add(x86::rbp, x86::ecx);
+    as.shr(x86::ecx, 3); as.and_(x86::ecx, 0x8); as.add(x86::rbp, x86::rcx);
     as.and_(x86_spilld(rt(instr) * 2 + dev_cop2), x86::rdx);
     as.or_(x86_spilld(rt(instr) * 2 + dev_cop2), x86::rax);
-    as.sub(x86::rbp, x86::ecx); x86_load_caller(); as.pop(x86::edi);
+    as.sub(x86::rbp, x86::rcx); x86_load_caller(); as.pop(x86::edi);
     if (rtx) as.movdqa(x86::xmm(rtx), x86_spillq(rt(instr) * 2 + dev_cop2));
   }
 
+  template <bool right>
   void sqv(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
     int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << 4;
@@ -1954,22 +1959,26 @@ struct MipsJit {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
     }
+    if (right) as.sub(x86::edi, 0x8);
     if (rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm(rtx));
     as.mov(x86::ecx, x86::edi); as.and_(x86::ecx, 0xf); as.push(x86::ecx);
     Label after = as.newLabel(); as.cmp(x86::ecx, 0x8); as.jae(after);
     // write unmasked half of register, if applicable
-    as.mov(x86::rsi, x86_spilld(rt(instr) * 2 + 1 + dev_cop2));
+    as.mov(x86::rsi, x86_spilld(rt(instr) * 2 + !right + dev_cop2));
     as.push(x86::edi); as.call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
-    as.pop(x86::edi); as.add(x86::edi, 8); as.bind(after);
+    as.pop(x86::edi);
+    right ? as.sub(x86::edi, 0x8) : as.add(x86::edi, 0x8);
+    as.bind(after);
     as.push(x86::edi); as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
     // compute mask for half of register
     as.pop(x86::edi); as.pop(x86::ecx); as.shl(x86::ecx, 3);
     as.xor_(x86::rdx, x86::rdx); as.not_(x86::rdx); as.shl(x86::rdx, x86::cl);
+    if (right) as.not_(x86::rdx), as.sub(x86::ecx, 0x8 << 3);
     // calculate address for masked half of register
-    as.shr(x86::ecx, 3); as.and_(x86::ecx, 0x8); as.add(x86::rbp, x86::ecx);
+    as.shr(x86::ecx, 3); as.and_(x86::ecx, 0x8); as.add(x86::rbp, x86::rcx);
     as.mov(x86::rsi, x86_spilld(rt(instr) * 2 + dev_cop2));
     // apply mask to loaded data
-    as.sub(x86::rbp, x86::ecx); as.and_(x86::rsi, x86::rdx); as.not_(x86::rdx);
+    as.sub(x86::rbp, x86::rcx); as.and_(x86::rsi, x86::rdx); as.not_(x86::rdx);
     as.and_(x86::rax, x86::rdx); as.or_(x86::rsi, x86::rax);
     as.call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
     x86_load_caller(); as.pop(x86::edi);
@@ -2052,8 +2061,8 @@ struct MipsJit {
       case 0x1: ldv<uint16_t>(instr); break;
       case 0x2: ldv<uint32_t>(instr); break;
       case 0x3: ldv<uint64_t>(instr); break;
-      case 0x4: lqv(instr); break;
-      case 0x5: printf("COP2 instruction LQR\n"); break;
+      case 0x4: lqv<false>(instr); break;
+      case 0x5: lqv<true>(instr); break;
       case 0x6: lpv<LWC2::lpv>(instr); break;
       case 0x7: lpv<LWC2::luv>(instr); break;
       case 0x8: lpv<LWC2::lhv>(instr); break;
@@ -2069,8 +2078,8 @@ struct MipsJit {
       case 0x1: sdv<uint16_t>(instr); break;
       case 0x2: sdv<uint32_t>(instr); break;
       case 0x3: sdv<uint64_t>(instr); break;
-      case 0x4: sqv(instr); break;
-      case 0x5: printf("COP2 instruction SQR\n"); break;
+      case 0x4: sqv<false>(instr); break;
+      case 0x5: sqv<true>(instr); break;
       case 0x6: spv<LWC2::lpv>(instr); break;
       case 0x7: spv<LWC2::luv>(instr); break;
       case 0x8: spv<LWC2::lhv>(instr); break;

@@ -163,11 +163,6 @@ namespace RSP {
   void write(uint32_t addr, T val) {
     const uint32_t mask = (all ? 0x1fff : addr_mask);
     T *ptr = reinterpret_cast<T*>(dmem + (addr & mask));
-    /*if ((addr & mask) == 0x514 && val == 0x33)
-      printf("0x33 not written to %x\n", addr & mask), val = 0;*/
-    if ((addr & mask) == 0x3e0 && val == 0) {
-      printf("0 not written to %x\n", addr & mask); return;
-    }
     switch (sizeof(T)) {
       case 1: *ptr = val; return;
       case 2: *ptr = __builtin_bswap16(val); return;

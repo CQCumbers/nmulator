@@ -68,6 +68,9 @@ int main(int argc, char* argv[]) {
       R4300::rsp_update(); RSP::moved = false;
       compiled = false;
 
+      if (RSP::pc == 0x20 || RSP::pc == 0x24)
+        printf("break here!\n");
+
       if (R4300::logging_on) {
         printf("- ACC: ");
         for (uint8_t i = 0; i < 24; ++i)
@@ -75,15 +78,15 @@ int main(int argc, char* argv[]) {
         printf("\n- VCO: ");
         for (uint8_t i = 0; i < 16; ++i)
           printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x86 + 0 * 2]))[15 - i]);
-        printf("\n- R30: ");
+        printf("\n- R29: ");
         for (uint8_t i = 0; i < 8; ++i)
-          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 30 * 2]))[7 - i]);
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 29 * 2]))[7 - i]);
         printf("\n- R27: ");
         for (uint8_t i = 0; i < 8; ++i)
           printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 27 * 2]))[7 - i]);
-        printf("\n- R21: ");
+        printf("\n- R17: ");
         for (uint8_t i = 0; i < 8; ++i)
-          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 21 * 2]))[7 - i]);
+          printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 17 * 2]))[7 - i]);
         printf("\n- R5: ");
         for (uint8_t i = 0; i < 8; ++i)
           printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 5 * 2]))[7 - i]);
@@ -96,13 +99,13 @@ int main(int argc, char* argv[]) {
         printf("\n- R1: ");
         for (uint8_t i = 0; i < 8; ++i)
           printf("%hx ", ((uint16_t*)(&RSP::reg_array[0x40 + 1 * 2]))[7 - i]);
-        printf("\n- $3: %llx $2: %llx $19: %llx $13: %llx\n- d20: ",
+        printf("\n- $3: %llx $2: %llx $19: %llx $13: %llx\n- de0: ",
             RSP::reg_array[3], RSP::reg_array[2], RSP::reg_array[19], RSP::reg_array[13]);
         for (uint8_t i = 0; i < 32; ++i)
-          printf("%llx ", RSP::read<uint8_t>(0xd20 + i));
-        printf("\n- 4e0: ");
+          printf("%llx ", RSP::read<uint8_t>(0xde0 + i));
+        printf("\n- 3e0: ");
         for (uint8_t i = 0; i < 16; ++i)
-          printf("%llx ", RSP::read<uint8_t>(0x4e0 + i));
+          printf("%llx ", RSP::read<uint8_t>(0x3e0 + i));
         printf("\n- 5f8: ");
         for (uint8_t i = 0; i < 16; ++i)
           printf("%llx ", RSP::read<uint8_t>(0x5f8 + i));

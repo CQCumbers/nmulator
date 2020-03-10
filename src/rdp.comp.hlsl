@@ -7,14 +7,13 @@ struct RDPCommand {
   int xyh[2], xym[2], xyl[2];
   int sh, sm, sl;
   int shade[4], sde[4], sdx[4];
-  uint zpos, zde, zdx;
+  int zpos, zde, zdx;
   int tex[3], tde[3], tdx[3];
   uint fill, fog, blend;
   uint env, prim, zprim;
-  uint bl_mux, cc_mux, tlut;
-  uint keys[3];
+  uint cc_mux, tlut;
+  uint keys[3], modes[2];
   uint lft, type, tile;
-  uint two_cycle, zsrc, tlut_ia;
 };
 
 struct RDPTile {
@@ -26,6 +25,16 @@ struct RDPTile {
 struct GlobalData {
   uint width, size;
 };
+
+#define M0_COPY     0x00200000
+#define M0_PERSP    0x00080000
+#define M0_TLUT_IA  0x00004000
+#define M1_ZSRC     0x00000004
+#define T_ZBUF      0x1
+#define T_TEX       0x2
+#define T_SHADE     0x4
+#define T_RECT      0x8
+#define T_FLIP      0xb
 
 [[vk::binding(0)]] StructuredBuffer<RDPCommand> cmds;
 [[vk::binding(1)]] StructuredBuffer<PerTileData> tiles;
@@ -78,7 +87,7 @@ uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
     uint idx = (tmem.Load(tex_pos) >> ((s & 0x3) * 8)) & 0xff;
     uint texel = tmem.Load(cmd.tlut + idx * 2);
     texel = idx & 0x1 ? texel >> 16 : texel & 0xffff;
-    if (cmd.tlut_ia) {
+    if (cmd.modes[0] & M0_TLUT_IA) {
       uint i = texel & 0xff, a = texel >> 8;
       return (a << 24) | (i << 16) | (i << 8) | i;
     } else return read_rgba16(texel);
@@ -89,7 +98,7 @@ uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
     idx = (s & 0x1 ? idx : idx >> 4) & 0xf;
     uint texel = tmem.Load(cmd.tlut + (tex.pal << 5) + idx * 2);
     texel = idx & 0x1 ? texel >> 16 : texel & 0xffff;
-    if (cmd.tlut_ia) {
+    if (cmd.modes[0] & M0_TLUT_IA) {
       uint i = texel & 0xff, a = texel >> 8;
       return (a << 24) | (i << 16) | (i << 8) | i;
     } else return read_rgba16(texel);
@@ -124,14 +133,13 @@ uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
     uint i = (s & 0x1 ? texel << 4 : texel) & 0xf0;
     return (i << 24) | (i << 16) | (i << 8) | i;
   }
-  return 0xff00ffff; //~0x0;
+  return 0xffff00ff;
 }
 
 int sadd(int a, int b) {
-  return b == 0 ? a : a + max(b, -a);
-  //uint val = a + b, sat = (a >> 31) + 0x7fffffff;
-  //return ((int)((a ^ b) | ~(b ^ val)) >= 0) ? sat : val;
-  //return val | -(int)(val < a);
+  int res = (a < 0) ? -2147483648 : 2147483647;
+  if ((a < 0) == (b > res - a)) res = a + b;
+  return res;
 }
 
 int mul16(int a, int b) {
@@ -142,21 +150,27 @@ int mul16(int a, int b) {
 }
 
 uint sample_color(uint2 pos, RDPCommand cmd) {
-  if (cmd.type & 0x2) { // textured
+  if (cmd.type & T_TEX) {
     RDPTile tex = texes[cmd.tile]; uint s, t, w;
     int x = pos.x << 16, dy = (pos.y << 2) - cmd.xyh[1];
-    if (cmd.type & 0x8) { // rectangle
+    if (cmd.modes[0] & M0_COPY) {
+      s = cmd.tex[0] + ((x - cmd.xyh[0]) << 5);
+      t = cmd.tex[1] + (cmd.tde[1] * dy >> 2);
+    } else if (cmd.type & T_RECT) {
       s = cmd.tex[0] + mul16(cmd.tde[0], x - cmd.xyh[0]);
       t = cmd.tex[1] + (cmd.tde[1] * dy >> 2);
     } else { // triangle
       int x1 = cmd.xyh[0] + (cmd.sh * dy >> 2);
       s = cmd.tex[0] + (cmd.tde[0] * dy >> 2) + mul16(cmd.tdx[0], x - x1);
       t = cmd.tex[1] + (cmd.tde[1] * dy >> 2) + mul16(cmd.tdx[1], x - x1);
-      w = cmd.tex[2] + (cmd.tde[2] * dy >> 2) + mul16(cmd.tdx[2], x - x1);
+      /*if (cmd.modes[0] & M0_PERSP) {
+        w = cmd.tex[2] + (cmd.tde[2] * dy >> 2) + mul16(cmd.tdx[2], x - x1);
+        s = (s << 16) / w, t = (t  << 16) / w;
+      }*/
     }
-    if (cmd.type == 0xb) return read_texel(tex, cmd, t, s);
+    if (cmd.type == T_FLIP) return read_texel(tex, cmd, t, s);
     else return read_texel(tex, cmd, s, t);
-  } else if (cmd.type & 0x4) { // shaded
+  } else if (cmd.type & T_SHADE) {
     // convert to subpixels, calculate major edge
     int x = pos.x << 16, y = pos.y << 2;
     int dy = y - cmd.xyh[1]; uint color = 0x0;
@@ -173,14 +187,13 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
 }
 
 uint sample_z(uint2 pos, RDPCommand cmd) {
-  if (~cmd.type & 0x1) return 0x7fff;
-  uint y = pos.y - (cmd.xyh[1] >> 2);
-  uint x = pos.x - ((cmd.xyh[0] + cmd.sh * y) >> 16);
-  if (cmd.zsrc) return cmd.zprim >> 16;
-  uint z = cmd.zpos, z1 = x * cmd.zdx, z2 = y * cmd.zde;
-  if (z1 != 0) z += max(z1, -z);
-  if (z2 != 0) z += max(z2, -z);
-  return z >> 16;
+  if (~cmd.type & T_ZBUF) return 0x7fff;
+  if (cmd.modes[1] & M1_ZSRC) return cmd.zprim >> 16;
+  int neg = cmd.lft ? 1 : -1;
+  int x = pos.x << 16, dy = (pos.y << 2) - cmd.xyh[1];
+  int x1 = cmd.xyh[0] + (cmd.sh * dy >> 2);
+  int z = sadd(cmd.zpos, neg * cmd.zde * dy >> 2);
+  return sadd(z, mul16(cmd.zdx, x - x1)) >> 16;
 }
 
 uint visible(uint2 pos, RDPCommand cmd) {
@@ -188,7 +201,7 @@ uint visible(uint2 pos, RDPCommand cmd) {
   int x = pos.x << 16, y = pos.y << 2;
   int y1 = cmd.xyh[1] & ~0x3, y2 = cmd.xyl[1] & ~0x3;
   if (!(y1 <= y && y <= y2 + 0x3)) return 0;
-  if (cmd.type & 0x8) return cmd.xyh[0] <= x && x <= cmd.xyl[0];
+  if (cmd.type & T_RECT) return cmd.xyh[0] <= x && x <= cmd.xyl[0];
   // calculate x bounds from slopes
   int dy = y + 2 - cmd.xyh[1], x2 = 0;
   int x1 = cmd.xyh[0] + (cmd.sh * dy >> 2);
@@ -244,9 +257,10 @@ uint visible(uint2 pos, RDPCommand cmd) {
 }*/
 
 uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
-  uint a, p, b, m;
-  uint m1a = (cmd.bl_mux >> 14) & 0x3, m1b = (cmd.bl_mux >> 10) & 0x3;
-  uint m2a = (cmd.bl_mux >> 6) & 0x3, m2b = (cmd.bl_mux >> 2) & 0x3;
+  uint a, p, b, m; uint mux = cmd.modes[1] >> 16;
+  uint m1a = (mux >> 14) & 0x3, m1b = (mux >> 10) & 0x3;
+  uint m2a = (mux >> 6) & 0x3, m2b = (mux >> 2) & 0x3;
+  if (cmd.modes[0] & M0_COPY) m1a = 0, m2a = 1, m1b = 0, m2b = 0;
   // select p 
   if (m1a == 0) p = color;
   else if (m1a == 1) p = pixel;
@@ -285,19 +299,19 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
 
   uint pixel = pixels.Load(tile_pos * global.size);
   if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
-  uint zval = 0x7fff;
   //uint zval = zbuf.Load(tile_pos * global.size);
   //zval = (tile_pos & 0x1 ? zval >> 16 : zval) & 0x7fff;
+  int zval = 0x7fff;
 
   PerTileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < tile.n_cmds; ++i) {
     RDPCommand cmd = cmds[tile.cmd_idxs[i]];
     uint coverage = visible(GlobalID.xy, cmd);
     uint color = sample_color(GlobalID.xy, cmd);
-    uint z = sample_z(GlobalID.xy, cmd);
-    if (coverage == 0 || z > zval) continue;
+    int z = sample_z(GlobalID.xy, cmd);
+    if (coverage == 0 /*|| z > zval*/) continue;
     pixel = blend(pixel, color, coverage, cmd);
-    if (cmd.type & 0x1) zval = z;
+    if (cmd.type & T_ZBUF) zval = z;
   }
 
   if (tile_pos & 0x1) {
