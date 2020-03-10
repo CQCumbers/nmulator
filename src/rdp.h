@@ -485,7 +485,7 @@ namespace RDP {
   }
 
   void set_tile() {
-    std::vector<uint32_t> instr = fetch(pc, 2);// render();
+    std::vector<uint32_t> instr = fetch(pc, 2);
     Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7] = {
       .format = (instr[0] >> 21) & 0x7, .size = (instr[0] >> 19) & 0x3,
       .width = ((instr[0] >> 9) & 0xff) << 3,
@@ -634,7 +634,7 @@ namespace RDP {
     };
     if (type == 0xa) tex_rectangle<false>(cmd);
     if (type == 0xb) tex_rectangle<true>(cmd);
-    Vulkan::add_rdp_cmd(cmd); render();
+    Vulkan::add_rdp_cmd(cmd);
   }
 
   void invalid() {
@@ -689,7 +689,7 @@ namespace RDP {
         case 0x3f: set_image(); break;
         case 0x29: R4300::mi_irqs |= 0x20;
         case 0x26: case 0x27: case 0x28:
-          printf("[RDP] SYNC\n"); pc += 8; break;
+          printf("[RDP] SYNC\n"); render(); pc += 8; break;
         default: invalid(); break;
       }
     }

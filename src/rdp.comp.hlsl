@@ -64,13 +64,13 @@ uint write_rgba16(uint input) {
 uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
   s >>= 21, t >>= 21; // convert 16.16 texture coords to texels
   uint ms = s & (1 << tex.mask[0]), mt = t & (1 << tex.mask[1]);
+  if (tex.shift[0] <= 10) { s >>= tex.shift[0]; } else { s <<= (16 - tex.shift[0]); }
+  if (tex.shift[1] <= 10) { t >>= tex.shift[1]; } else { t <<= (16 - tex.shift[1]); }
   if (tex.mask[0]) { s &= ((1 << tex.mask[0]) - 1); if (ms) s = ((1 << tex.mask[0]) - 1) - s; }
   if (tex.mask[1]) { t &= ((1 << tex.mask[1]) - 1); if (mt) t = ((1 << tex.mask[1]) - 1) - t; }
-  if (tex.shift[0] < 10) { s >>= tex.shift[0]; } else { s <<= (16 - tex.shift[0]); }
-  if (tex.shift[1] < 10) { t >>= tex.shift[1]; } else { t <<= (16 - tex.shift[1]); }
   
   if (tex.format == 0 && tex.size == 2) {        // 16 bit RGBA
-    if (s * 2 >= tex.width) return 0;
+    //if (s * 2 >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s * 2;
     uint texel = tmem.Load(tex_pos);
     return read_rgba16(s & 0x1 ? texel >> 16 : texel & 0xffff);
@@ -142,6 +142,10 @@ int sadd(int a, int b) {
   return res;
 }
 
+uint usadd(uint a, uint b) {
+  return b == 0 ? a : a + max(b, -a);
+}
+
 int mul16(int a, int b) {
    // multiply 16.16 ints, with 16.16 result
    int a1 = a >> 16, a2 = a & 0xffff;
@@ -152,7 +156,7 @@ int mul16(int a, int b) {
 uint sample_color(uint2 pos, RDPCommand cmd) {
   if (cmd.type & T_TEX) {
     RDPTile tex = texes[cmd.tile]; uint s, t, w;
-    int x = pos.x << 16, dy = (pos.y << 2) - cmd.xyh[1];
+    int x = pos.x << 16, dy = (pos.y << 2) + 2 - cmd.xyh[1];
     if (cmd.modes[0] & M0_COPY) {
       s = cmd.tex[0] + ((x - cmd.xyh[0]) << 5);
       t = cmd.tex[1] + (cmd.tde[1] * dy >> 2);
@@ -160,13 +164,13 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
       s = cmd.tex[0] + mul16(cmd.tde[0], x - cmd.xyh[0]);
       t = cmd.tex[1] + (cmd.tde[1] * dy >> 2);
     } else { // triangle
-      int x1 = cmd.xyh[0] + (cmd.sh * dy >> 2);
+      int x1 = cmd.xyh[0] + (cmd.sh * dy >> 2) - 0x10000;
       s = cmd.tex[0] + (cmd.tde[0] * dy >> 2) + mul16(cmd.tdx[0], x - x1);
       t = cmd.tex[1] + (cmd.tde[1] * dy >> 2) + mul16(cmd.tdx[1], x - x1);
-      /*if (cmd.modes[0] & M0_PERSP) {
-        w = cmd.tex[2] + (cmd.tde[2] * dy >> 2) + mul16(cmd.tdx[2], x - x1);
-        s = (s << 16) / w, t = (t  << 16) / w;
-      }*/
+      w = cmd.tex[2] + (cmd.tde[2] * dy >> 2) + mul16(cmd.tdx[2], x - x1);
+      if (cmd.modes[0] & M0_PERSP) s = sadd(s, s), t = sadd(t, t);
+      //if (w && (cmd.modes[0] & M0_PERSP))
+      //  return (0xff << 24) | ((w >> 8) & 0xff0000) | ((w >> 24) & 0xff);
     }
     if (cmd.type == T_FLIP) return read_texel(tex, cmd, t, s);
     else return read_texel(tex, cmd, s, t);
@@ -177,8 +181,8 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
     int x1 = cmd.xyh[0] + (cmd.sh * dy >> 2);
     // interpolate shading along major edge and line
     for (uint i = 0; i < 4; ++i) {
-      int chan = sadd(cmd.shade[i], cmd.sde[i] * (dy + 1) >> 2);
-      chan = sadd(chan, mul16(cmd.sdx[i], x - x1));
+      uint chan = usadd(cmd.shade[i], cmd.sde[i] * (dy + 1) >> 2);
+      chan = usadd(chan, mul16(cmd.sdx[i], x - x1));
       color |= ((chan >> 16) & 0xff) << (i * 8);
     }
     return color;
@@ -189,10 +193,14 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
 uint sample_z(uint2 pos, RDPCommand cmd) {
   if (~cmd.type & T_ZBUF) return 0x7fff;
   if (cmd.modes[1] & M1_ZSRC) return cmd.zprim >> 16;
-  int neg = cmd.lft ? 1 : -1;
   int x = pos.x << 16, dy = (pos.y << 2) - cmd.xyh[1];
   int x1 = cmd.xyh[0] + (cmd.sh * dy >> 2);
-  int z = sadd(cmd.zpos, neg * cmd.zde * dy >> 2);
+
+  //int x2 = 0, y = (pos.y << 2);
+  //if (y < cmd.xym[1]) x2 = cmd.xym[0] + (cmd.sm * dy >> 2);
+  //else x2 = cmd.xyl[0] + (cmd.sl * (y + 2 - cmd.xym[1]) >> 2);
+
+  int z = sadd(cmd.zpos, -1 * cmd.zde * dy >> 2);
   return sadd(z, mul16(cmd.zdx, x - x1)) >> 16;
 }
 
@@ -277,13 +285,13 @@ uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   else if (m1b == 2) a = (color >> 24) & 0xff; // should be shade, from before CC?
   else if (m1b == 3) a = 0x0;
   // select b
-  if (m2b == 0) b = 0xff - a;
+  if (m2b == 0) b = 0x100 - a;
   else if (m2b == 1) b = (pixel >> 24) & 0xff;
   else if (m2b == 2) b = 0xff;
   else if (m2b == 3) b = 0x0;
   // blend selected colors
-  uint output = 0xff000000;
-  for (uint i = 0; i < 3; ++i) {
+  uint output = 0x00000000;
+  for (uint i = 0; i < 4; ++i) {
     uint pc = (p >> (i * 8)) & 0xff;
     uint mc = (m >> (i * 8)) & 0xff;
     uint oc = (a * pc + b * mc) / (a + b);
@@ -299,7 +307,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
 
   uint pixel = pixels.Load(tile_pos * global.size);
   if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
-  //uint zval = zbuf.Load(tile_pos * global.size);
+  //int zval = zbuf.Load(tile_pos * global.size);
   //zval = (tile_pos & 0x1 ? zval >> 16 : zval) & 0x7fff;
   int zval = 0x7fff;
 
@@ -309,8 +317,8 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
     uint coverage = visible(GlobalID.xy, cmd);
     uint color = sample_color(GlobalID.xy, cmd);
     int z = sample_z(GlobalID.xy, cmd);
-    if (coverage == 0 /*|| z > zval*/) continue;
-    pixel = blend(pixel, color, coverage, cmd);
+    if (coverage == 0/* || z > zval*/) continue;
+    pixel = /*z << 16 | z;*/ blend(pixel, color, coverage, cmd);
     if (cmd.type & T_ZBUF) zval = z;
   }
 
