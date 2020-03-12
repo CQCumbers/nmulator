@@ -2316,10 +2316,12 @@ struct MipsJit {
     x86_load_all();
 
     uint32_t cycles = 0, pc = (is_rsp ? RSP::pc : R4300::pc);
-    end_label = as.newLabel();
+    end_label = as.newLabel(); uint32_t hpage = block_end;
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
-      uint32_t instr = (is_rsp ? RSP::fetch(pc) : R4300::fetch(pc));
-      if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
+      uint32_t instr = is_rsp ? RSP::fetch(pc) : R4300::fetch(pc);
+      uint32_t pg = pc & R4300::hpage_mask;
+      if (!is_rsp && pg != hpage) R4300::protect(hpage = pg);
+      //if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
       pc = check_breaks(pc, next_pc), next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;

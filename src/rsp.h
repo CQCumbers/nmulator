@@ -2,8 +2,20 @@
 #define RSP_H
 
 #include <stdio.h>
-#include <x86intrin.h>
 #include <stdint.h>
+#include <x86intrin.h>
+#include "robin_hood.h"
+
+typedef uint32_t (*Function)();
+
+struct Block {
+  Function code = nullptr;
+  Block *next = nullptr;
+  uint32_t next_pc = 0;
+  uint32_t cycles = 0;
+  bool valid = false;
+  uint32_t hash = 0;
+};
 
 namespace R4300 {
   extern uint32_t mi_irqs;
@@ -14,7 +26,7 @@ namespace RSP {
   uint8_t *dmem = nullptr;
   uint8_t *imem = nullptr;
   constexpr uint32_t addr_mask = 0xfff;
-  bool step = true, moved = false;
+  bool step = false, moved = false;
   const uint16_t rcp_rsq_rom[1024] = {
     0xffff, 0xff00, 0xfe01, 0xfd04, 0xfc07, 0xfb0c, 0xfa11, 0xf918,
     0xf81f, 0xf727, 0xf631, 0xf53b, 0xf446, 0xf352, 0xf25f, 0xf16d,
@@ -177,8 +189,9 @@ namespace RSP {
   }
 
   uint64_t reg_array[0x100] = {0};
-  uint32_t pc = 0x0;
   constexpr uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
+  robin_hood::unordered_node_map<uint32_t, Block> blocks;
+  uint32_t pc = 0x0;
 
   bool halted() {
     return reg_array[4 + dev_cop0] & 0x1;

@@ -1,20 +1,6 @@
 #include "mipsjit.h"
 #include "debugger.h"
 
-typedef uint32_t (*Function)();
-
-struct Block {
-  Function code = nullptr;
-  uint32_t cycles = 0;
-  uint32_t hash = 0;
-  uint32_t next_pc = 0;
-  Block *next = nullptr;
-  
-  bool valid(uint32_t hash) {
-    return code && this->hash == hash;
-  }
-};
-
 int main(int argc, char* argv[]) {
   // initialize system components
   if (argc != 2 && argc != 3) printf("error: must provide file\n"), exit(1);
@@ -24,49 +10,62 @@ int main(int argc, char* argv[]) {
   if (argc == 3) Debugger::init(atoi(argv[2]));
 
   JitRuntime runtime;
-  robin_hood::unordered_node_map<uint32_t, Block> r4300_blocks;
-  robin_hood::unordered_map<uint32_t, Block> rsp_blocks;
-  Block *block = nullptr, *block2 = nullptr, *empty = new Block();
-  Block *prev = empty;
-
-  uint32_t rsp_cycles = 0;
-  bool compiled = false;
+  Block *empty = new Block();
+  Block *block = nullptr, *block2 = nullptr;
+  Block *prev = empty, *prev2 = empty;
 
   while (true) {
-    uint32_t hash = R4300::fetch(R4300::pc);
     bool cached = prev->next && prev->next_pc == R4300::pc;
-    if (cached && prev->next->valid(hash)) block = prev->next;
+    if (cached) block = prev->next;
     else {
       prev->next_pc = R4300::pc;
-      block = prev->next = &r4300_blocks[R4300::pc & R4300::addr_mask]; 
-      if (!block->valid(hash)) {
-        block->hash = hash;
-        CodeHolder code;
-        code.init(runtime.codeInfo());
-        MipsJit<Device::r4300> jit(code);
+      block = prev->next = &R4300::blocks[R4300::pc & R4300::addr_mask];
+    }
+    if (!block->valid) {
+      CodeHolder code;
+      code.init(runtime.codeInfo());
+      MipsJit<Device::r4300> jit(code);
 
-        block->cycles = jit.jit_block();
-        runtime.add(&block->code, &code);
-      }
+      block->cycles = jit.jit_block();
+      runtime.add(&block->code, &code);
+      block->valid = true;
     }
     R4300::pc = block->code();
+    if (R4300::modified) {
+      printf("Unprotect function hit before pc: %x\n", R4300::pc);
+      R4300::modified = false;
+    }
 
-    for (uint8_t i = 0; i < block->cycles && !RSP::halted(); i += 3) {
-      block2 = &rsp_blocks[RSP::pc & RSP::addr_mask];
-      uint32_t hash2 = RSP::fetch(RSP::pc);
-      if (!compiled && (!block2->valid(hash2) || R4300::logging_on)) {
-        block2->hash = hash2;
+    for (uint8_t i = 0; i < block->cycles && !RSP::halted();) {
+      uint32_t hash = RSP::fetch(RSP::pc);
+      if (prev2->valid && prev2->hash == hash) {
+        RSP::pc = prev2->code();
+        R4300::rsp_update(); RSP::moved = false;
+        i += prev2->cycles * 2;
+        if (R4300::modified) {
+          printf("Unprotect function hit before RSP pc: %x\n", RSP::pc);
+          R4300::modified = false;
+        }
+        hash = RSP::fetch(RSP::pc);
+      }
+
+      bool cached = prev2->next && prev2->next_pc == RSP::pc;
+      if (cached) block2 = prev2->next;
+      else {
+        prev2->next_pc = RSP::pc;
+        block2 = prev2->next = &RSP::blocks[RSP::pc & RSP::addr_mask];
+      }
+      if (!block2->valid || block2->hash != hash|| R4300::logging_on) {
         CodeHolder code;
         code.init(runtime.codeInfo());
         MipsJit<Device::rsp> jit(code);
 
         block2->cycles = jit.jit_block();
         runtime.add(&block2->code, &code);
-        compiled = true;
+        block2->valid = true;
+        block2->hash = hash;
       }
-      RSP::pc = block2->code();
-      R4300::rsp_update(); RSP::moved = false;
-      compiled = false;
+      prev2 = block2;
 
       if (RSP::pc == 0x20 || RSP::pc == 0x24)
         printf("break here!\n");
@@ -122,7 +121,7 @@ int main(int argc, char* argv[]) {
     R4300::irqs_update(block->cycles);
     if (R4300::broke) {
       Debugger::update();
-      r4300_blocks.clear();
+      R4300::blocks.clear();
       block = empty;
       block->next = nullptr;
     }

@@ -5,8 +5,7 @@
 #include "rdp.h"
 #include <SDL2/SDL.h>
 #include <sys/mman.h>
-#include <x86intrin.h>
-#include "robin_hood.h"
+#include <signal.h>
 
 namespace R4300 {
   uint8_t *pages[0x100] = {nullptr};
@@ -464,6 +463,46 @@ namespace R4300 {
     }
   }
 
+  robin_hood::unordered_node_map<uint32_t, Block> blocks;
+  robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
+  constexpr uint32_t hpage_mask = addr_mask & ~0xfff;
+  bool modified = false;
+
+  void protect(uint32_t hpage) {
+    if (prot_pages[hpage].empty())
+      mprotect(pages[0] + hpage, 0x1000, PROT_READ);
+    prot_pages[hpage].push_back(pc & addr_mask);
+  }
+
+  void unprotect(uint32_t hpage) {
+    for (uint32_t addr : prot_pages[hpage]) blocks[addr].valid = false;
+    mprotect(pages[0] + hpage, 0x1000, PROT_READ | PROT_WRITE);
+    prot_pages[hpage].clear(); modified = true;
+  }
+
+  void fault_handler(int sig, siginfo_t *info, void *raw_ctx) {
+    if (sig != SIGBUS) return;
+    int64_t hpage = (uint8_t*)info->si_addr - pages[0];
+    if (0 <= hpage && hpage <= addr_mask) unprotect(hpage & hpage_mask);
+    else exit(1);
+  }
+
+  /*void update() {
+    pc = block->code();
+    if (block->next_pc != pc)
+      block->next_pc = pc, block->next = &blocks[pc];
+    block = block->next;
+    if (!block->valid) {
+      CodeHolder code; 
+      code.init(runtime.codeInfo());
+      MipsJit<Device::r4300> jit(code);
+      block->cycles = jit.jit_block();
+      runtime.add(&block->code, &code);
+      block->valid = true;
+    }
+    sched(update, block->cycles);
+  }*/
+
   void init(FILE *file) {
     // setup registers (assumes CIC-NUS-6102)
     reg_array[1] = 0x1;
@@ -496,6 +535,14 @@ namespace R4300 {
     for (uint32_t i = 0x1; i < 0x100; ++i) {
       if (i < 0x20 || i > 0x24) pages[i] = pages[0] + i * (page_mask + 1);
     }
+
+    // setup mprotect fault handler
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    act.sa_sigaction = fault_handler;
+    act.sa_flags = SA_RESTART | SA_SIGINFO;
+    sigemptyset(&act.sa_mask);
+    sigaction(SIGBUS, &act, nullptr);
 
     // read ROM file into memory
     fseek(file, 0, SEEK_END);
