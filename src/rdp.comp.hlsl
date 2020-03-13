@@ -1,6 +1,6 @@
 struct PerTileData {
   uint n_cmds;
-  uint cmd_idxs[31];
+  uint cmd_idxs[16];
 };
 
 struct RDPCommand {
@@ -11,7 +11,7 @@ struct RDPCommand {
   int tex[3], tde[3], tdx[3];
   uint fill, fog, blend;
   uint env, prim, zprim;
-  uint cc_mux, tlut;
+  uint cc_mux, tlut, tmem;
   uint keys[3], modes[2];
   uint lft, type, tile;
 };
@@ -69,6 +69,7 @@ uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
   if (tex.mask[0]) { s &= ((1 << tex.mask[0]) - 1); if (ms) s = ((1 << tex.mask[0]) - 1) - s; }
   if (tex.mask[1]) { t &= ((1 << tex.mask[1]) - 1); if (mt) t = ((1 << tex.mask[1]) - 1) - t; }
   
+  tex.addr += cmd.tmem * 0x1000;
   if (tex.format == 0 && tex.size == 2) {        // 16 bit RGBA
     //if (s * 2 >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s * 2;
@@ -164,12 +165,12 @@ uint sample_color(uint2 pos, RDPCommand cmd) {
       s = cmd.tex[0] + mul16(cmd.tde[0], x - cmd.xyh[0]);
       t = cmd.tex[1] + (cmd.tde[1] * dy >> 2);
     } else { // triangle
-      int x1 = cmd.xyh[0]; //+ (cmd.sh * dy >> 2);
+      int x1 = cmd.xyh[0] + (cmd.sh * dy >> 2);
       s = cmd.tex[0] + (cmd.tde[0] * dy >> 2) + mul16(cmd.tdx[0], x - x1);
       t = cmd.tex[1] + (cmd.tde[1] * dy >> 2) + mul16(cmd.tdx[1], x - x1);
       w = cmd.tex[2] + (cmd.tde[2] * dy >> 2) + mul16(cmd.tdx[2], x - x1);
       if (cmd.modes[0] & M0_PERSP) s *= 2, t *= 2;
-      if (w && (cmd.modes[0] & M0_PERSP)) return 0xffff00ff;
+      //if (w && (cmd.modes[0] & M0_PERSP)) return 0xffff00ff;
       //  return (0xff << 24) | ((w >> 8) & 0xff0000) | ((w >> 16) & 0xff00) | ((w >> 24) & 0xff);
     }
     if (cmd.type == T_FLIP) return read_texel(tex, cmd, t, s);
@@ -281,7 +282,7 @@ uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
   else if (m1b == 3) a = 0x0;
   // select b
   if (m2b == 0) b = 0x100 - a;
-  else if (m2b == 1) b = 0; //(pixel >> 24) & 0xff;
+  else if (m2b == 1) b = (pixel >> 24) & 0xff;
   else if (m2b == 2) b = 0xff;
   else if (m2b == 3) b = 0x0;
   // blend selected colors

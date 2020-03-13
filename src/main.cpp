@@ -1,4 +1,4 @@
-#include "mipsjit.h"
+#include "r4300.h"
 #include "debugger.h"
 
 int main(int argc, char* argv[]) {
@@ -9,12 +9,15 @@ int main(int argc, char* argv[]) {
   R4300::init(file), fclose(file);
   if (argc == 3) Debugger::init(atoi(argv[2]));
 
-  JitRuntime runtime;
-  Block *empty = new Block();
+  /*JitRuntime runtime;
   Block *block = nullptr, *block2 = nullptr;
-  Block *prev = empty, *prev2 = empty;
+  Block *prev = empty, *prev2 = empty;*/
 
-  while (true) {
+  sched(R4300::update, 0);
+  sched(R4300::vi_update, 6510);
+  while (true) exec_next();
+
+  /*
     bool cached = prev->next && prev->next_pc == R4300::pc;
     if (cached) block = prev->next;
     else {
@@ -126,5 +129,5 @@ int main(int argc, char* argv[]) {
       block->next = nullptr;
     }
     prev = block;
-  }
+  }*/
 }

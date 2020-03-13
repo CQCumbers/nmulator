@@ -1,12 +1,63 @@
 #ifndef MIPSJIT_H
 #define MIPSJIT_H
 
-#include "r4300.h"
+#include "robin_hood.h"
 #include "asmjit/asmjit.h"
 
 using namespace asmjit;
 
 enum class Device { r4300, rsp };
+
+namespace R4300 {
+  extern uint32_t mi_irqs;
+  extern bool logging_on;
+
+  extern uint32_t pc;
+  extern uint64_t reg_array[0x63];
+
+  extern bool broke, moved;
+  extern robin_hood::unordered_map<uint32_t, bool> breaks;
+  extern robin_hood::unordered_map<uint32_t, bool> watch_w;
+
+  extern uint32_t tlb[0x20][4];
+
+  template <typename T, bool map=false>
+  int64_t read(uint32_t addr);
+  template <typename T, bool map=false>
+  void write(uint32_t addr, int64_t val);
+  template <typename T>
+  void mmio_write(uint32_t addr, uint32_t val);
+  uint32_t fetch(uint32_t addr);
+  void protect(uint32_t hpage);
+  void timer_update();
+}
+
+namespace RSP {
+  extern bool step, moved;
+  extern uint64_t reg_array[0x100];
+  extern uint32_t pc;
+
+  uint32_t fetch(uint32_t addr);
+  template <typename T, bool all=false>
+  void write(uint32_t addr, T val);
+  template <typename T, bool all=false>
+  int64_t read(uint32_t addr);
+  extern const uint16_t rcp_rsq_rom[1024];
+}
+
+typedef uint32_t (*Function)();
+
+struct Block {
+  Function code = nullptr;
+  Block *next = nullptr;
+  uint32_t next_pc = 0;
+  uint32_t cycles = 0;
+  bool valid = false;
+  uint32_t hash = 0;
+};
+
+JitRuntime runtime;
+Block empty = {};
 
 template <Device device>
 struct MipsJit {
@@ -24,10 +75,11 @@ struct MipsJit {
   static constexpr uint32_t block_end = 0x04ffffff;
 
   static constexpr bool is_rsp = (device == Device::rsp);
-  static constexpr uint8_t hi = R4300::hi, lo = R4300::lo;
-  static constexpr uint8_t dev_cop0 = (is_rsp ? RSP::dev_cop0 : R4300::dev_cop0);
-  static constexpr uint8_t dev_cop1 = R4300::dev_cop1, dev_cop2 = RSP::dev_cop2;
-  static constexpr uint8_t dev_cop2c = RSP::dev_cop2c;
+  static constexpr uint8_t hi = 0x20, lo = 0x21;
+  static constexpr uint8_t dev_cop0 = (is_rsp ? 0x20 : 0x22);
+  static constexpr uint8_t dev_cop1 = 0x42, dev_cop2 = 0x40;
+  static constexpr uint8_t dev_cop2c = 0x86;
+  static constexpr uint32_t hpage_mask = 0x1ffff000;
 
   MipsJit(CodeHolder &code) : as(&code) {}
 
@@ -1208,6 +1260,8 @@ struct MipsJit {
     }
     if (rt(instr) == 0) as.mov(x86_spilld(rd(instr) + dev_cop0), 0);
     else move(rd(instr) + dev_cop0, rt(instr));
+    if (!is_rsp && (rd(instr) == 9 || rd(instr) == 11))
+      as.call(reinterpret_cast<uint64_t>(R4300::timer_update));
   }
 
   template <Op operation>
@@ -2315,11 +2369,21 @@ struct MipsJit {
     else as.mov(x86::rbp, reinterpret_cast<uint64_t>(&R4300::reg_array));
     x86_load_all();
 
+    //if (!is_rsp)
+      // check interrupts? Or do that only when status/cause is changed?
+      // probably the latter, it actually reduces work and exiting JIT on
+      // interrupts shouldn't be too frequent
+  
+    // at end of block, direct branch to next block instead of returning
+    // if edi = next_pc, next block is valid, and still_top is true
+    // RSP should also check the first instruction remains the same (without calling out to C++)
+    // patch this epilogue in whenever next_pc is set to a new value.
+
     uint32_t cycles = 0, pc = (is_rsp ? RSP::pc : R4300::pc);
     end_label = as.newLabel(); uint32_t hpage = block_end;
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = is_rsp ? RSP::fetch(pc) : R4300::fetch(pc);
-      uint32_t pg = pc & R4300::hpage_mask;
+      uint32_t pg = pc & hpage_mask;
       if (!is_rsp && pg != hpage) R4300::protect(hpage = pg);
       //if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
       pc = check_breaks(pc, next_pc), next_pc += 4;
@@ -2382,10 +2446,9 @@ struct MipsJit {
     }
 
     as.bind(end_label);
-    x86_store_all();
-    as.pop(x86::rbp);
-    as.mov(x86::eax, x86::edi);
-    as.ret();
+    if (!is_rsp) as.add(x86_spill(9 + dev_cop0), cycles / 2);
+    x86_store_all(); as.pop(x86::rbp);
+    as.mov(x86::eax, x86::edi); as.ret();
     return cycles;
   }
 };

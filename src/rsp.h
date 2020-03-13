@@ -4,22 +4,13 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <x86intrin.h>
-#include "robin_hood.h"
-
-typedef uint32_t (*Function)();
-
-struct Block {
-  Function code = nullptr;
-  Block *next = nullptr;
-  uint32_t next_pc = 0;
-  uint32_t cycles = 0;
-  bool valid = false;
-  uint32_t hash = 0;
-};
+#include "util.h"
+#include "mipsjit.h"
 
 namespace R4300 {
-  extern uint32_t mi_irqs;
   extern bool logging_on;
+  void set_irqs(uint32_t mask);
+  void unset_irqs(uint32_t mask);
 }
 
 namespace RSP {
@@ -159,7 +150,7 @@ namespace RSP {
   };
 
 
-  template <typename T, bool all = false>
+  template <typename T, bool all>
   int64_t read(uint32_t addr) {
     const uint32_t mask = (all ? 0x1fff : addr_mask);
     T *ptr = reinterpret_cast<T*>(dmem + (addr & mask));
@@ -171,7 +162,7 @@ namespace RSP {
     }
   }
 
-  template <typename T, bool all = false>
+  template <typename T, bool all>
   void write(uint32_t addr, T val) {
     const uint32_t mask = (all ? 0x1fff : addr_mask);
     T *ptr = reinterpret_cast<T*>(dmem + (addr & mask));
@@ -191,24 +182,69 @@ namespace RSP {
   uint64_t reg_array[0x100] = {0};
   constexpr uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
   robin_hood::unordered_node_map<uint32_t, Block> blocks;
-  uint32_t pc = 0x0;
+  uint32_t pc = 0x0; Block *block = &empty;
 
-  bool halted() {
+  inline bool halted() {
     return reg_array[4 + dev_cop0] & 0x1;
   }
 
-  bool broke() {
+  inline bool broke() {
     return (reg_array[4 + dev_cop0] & 0x42) == 0x42;
   }
 
+  void update() {
+    uint32_t cycles = 0;
+    while (still_top(cycles)) {
+      uint32_t hash = fetch(pc);
+      bool run = false;
+      if (block->valid && block->hash == hash) {
+        pc = block->code();
+        moved = false, run = true;
+        if (broke()) R4300::set_irqs(0x1);
+
+        if (block->next_pc != pc)
+          block->next_pc = pc, block->next = &blocks[pc & addr_mask];
+        block = block->next, hash = fetch(pc);
+      }
+
+      if (!block->valid || block->hash != hash) {
+        CodeHolder code; 
+        code.init(runtime.codeInfo());
+        MipsJit<Device::rsp> jit(code);
+
+        block->cycles = jit.jit_block();
+        runtime.add(&block->code, &code);
+        block->valid = true, block->hash = hash;
+      }
+      if (halted()) return;
+      cycles = run ? block->cycles * 2 : 0;
+    }
+    sched(update, cycles);
+  }
+
   void set_status(uint32_t val) {
-    //if (val == 0x400) printf("400 written to STATUS\n"), R4300::logging_on = true;
     printf("Writing %x to RSP_STATUS, RSP PC: %x\n", val, pc);
+    if (halted() && (val & 0x1)) {
+      printf("Scheduling RSP\n");
+      uint32_t hash = fetch(pc);
+      block = &blocks[pc & addr_mask];
+      if (!block->valid || block->hash != hash) {
+        CodeHolder code; 
+        code.init(runtime.codeInfo());
+        MipsJit<Device::rsp> jit(code);
+
+        block->cycles = jit.jit_block();
+        runtime.add(&block->code, &code);
+        block->valid = true, block->hash = hash;
+      }
+      sched(update, block->cycles * 2);
+    }
+    //if (val == 0x400) printf("400 written to STATUS\n"), R4300::logging_on = true;
     reg_array[4 + dev_cop0] &= ~(val & 0x1);       // HALT
     reg_array[4 + dev_cop0] |= (val & 0x2) >> 1;
     reg_array[4 + dev_cop0] &= ~(val & 0x4) >> 1;  // BROKE
-    R4300::mi_irqs &= ~(val & 0x8) >> 3;           // IRQ
-    R4300::mi_irqs |= (val & 0x10) >> 4;
+    R4300::unset_irqs((val & 0x8) >> 3);           // IRQ
+    R4300::set_irqs((val & 0x10) >> 4);
     reg_array[4 + dev_cop0] &= ~(_pext_u32(val, 0xaaaaa0) << 5);
     reg_array[4 + dev_cop0] |= _pext_u32(val, 0x1555540) << 5;
   }

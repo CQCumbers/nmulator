@@ -17,17 +17,40 @@ namespace R4300 {
   robin_hood::unordered_map<uint32_t, bool> breaks;
   robin_hood::unordered_map<uint32_t, bool> watch_w;
 
-  template <typename T, bool map=false>
+  uint32_t pc = 0xa4000040;
+  uint64_t reg_array[0x63] = {0};
+  constexpr uint8_t hi = 0x20, lo = 0x21;
+  constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
+
+  uint64_t &count = reg_array[9 + dev_cop0];
+  uint64_t &compare = reg_array[11 + dev_cop0];
+  uint64_t &status = reg_array[12 + dev_cop0];
+  uint64_t &cause = reg_array[13 + dev_cop0];
+
+  template <typename T, bool map>
   int64_t read(uint32_t addr);
-  template <typename T, bool map=false>
+  template <typename T, bool map>
   void write(uint32_t addr, int64_t val);
   void joy_update(SDL_Event &event);
+  void update();
 
   /* === MIPS Interface registers === */
 
   // put into array and read offset without switch?
   constexpr uint32_t mi_version = 0x01010101;
   uint32_t mi_irqs = 0x0, mi_mask = 0x0;
+
+  void set_irqs(uint32_t mask) {
+    mi_irqs |= mask;
+    if (mi_irqs & mi_mask) cause |= 0x400;
+    else cause &= ~0x400;
+  }
+
+  void unset_irqs(uint32_t mask) {
+    mi_irqs &= ~mask;
+    if (mi_irqs & mi_mask) cause |= 0x400;
+    else cause &= ~0x400;
+  }
 
   /* === RSP Interface registers === */
 
@@ -36,18 +59,10 @@ namespace R4300 {
   template <bool write>
   void rsp_dma(uint32_t val) {
     uint32_t skip = val >> 20, count = (val >> 12) & 0xff, len = val & 0xfff;
-    //if (rsp_cop0[1] == 0x3bb790) logging_on = true;
-    printf("[RSP] DMA with count %x, len %x, from %llx to %llx\n", count + 1, len + 1, rsp_cop0[1], rsp_cop0[0]);
-    //if (rsp_cop0[1] == 0x3c6200 && RSP::read<uint32_t>(0xd24))
-    //  print("Check DMEM here\n");
-    //  exit(0);
+    //printf("[RSP] DMA with count %x, len %x, from %llx to %llx\n", count + 1, len + 1, rsp_cop0[1], rsp_cop0[0]);
     uint8_t *ram = pages[0] + rsp_cop0[1], *mem = RSP::dmem + rsp_cop0[0];
     for (uint8_t i = 0; i <= count; ++i, ram += skip, mem += skip)
       write ? memcpy(ram, mem, len + 1) : memcpy(mem, ram, len + 1);
-  }
-
-  void rsp_update() {
-    mi_irqs |= RSP::broke();
   }
 
   /* === Video Interface registers === */
@@ -63,11 +78,9 @@ namespace R4300 {
   SDL_Texture *texture = nullptr;
   uint8_t *pixels = nullptr;
 
-  void vi_update(uint32_t cycles) {
-    vi_line_progress += cycles;
-    if (vi_line_progress < 6510) return; // * 8) return;
-    if (vi_line == vi_irq) mi_irqs |= 0x8;
-    vi_line_progress = 0, vi_line += 0x2;
+  void vi_update() {
+    if (vi_line == vi_irq) set_irqs(0x8);
+    vi_line += 0x2, sched(vi_update, 6510);
 
     if (vi_line < vi_height) return;
     bool interlaced = vi_status & 0x40;
@@ -112,9 +125,18 @@ namespace R4300 {
   bool ai_run = false, ai_dirty = false;
   SDL_AudioDeviceID audio_dev;
 
+  void ai_update() {
+    if (!ai_run || ai_len == 0) return;
+    uint32_t new_len = SDL_GetQueuedAudioSize(audio_dev) >> ai_bits;
+    if (new_len <= ai_start || new_len == 0)
+      ai_status &= ~0x80000001, ai_start = 0, set_irqs(0x4);
+    else sched(ai_update, (new_len - ai_start) << 10);
+    ai_len = new_len - ai_start;
+  }
+
   void ai_dma(uint32_t len) {
     if (!ai_run || ai_start != 0) return;
-    printf("[AI] DMA started with len %x\n", len);
+    //printf("[AI] DMA started with len %x\n", len);
     if (ai_dirty) {
       SDL_AudioFormat fmt = (ai_bits ? AUDIO_S16MSB : AUDIO_S8);
       SDL_AudioSpec spec = {
@@ -127,34 +149,24 @@ namespace R4300 {
     ai_start = ai_len, ai_len = len & 0x1fff8;
     if (ai_start != 0) ai_status |= 0x80000001;
     SDL_QueueAudio(audio_dev, pages[0] + ai_ram, ai_len);
-  }
-
-  void ai_update() {
-    if (!ai_run || ai_len == 0) return;
-    uint32_t new_len = SDL_GetQueuedAudioSize(audio_dev) >> ai_bits;
-    if (new_len <= ai_start || new_len == 0)
-      ai_status &= ~0x80000001, ai_start = 0, mi_irqs |= 0x4;
-    ai_len = new_len - ai_start;
+    sched(ai_update, ai_len << 10);
   }
 
   /* === Peripheral & Serial Interface registers === */
 
-  constexpr uint32_t pi_status = 0x0;
+  uint32_t pi_status = 0x0, pi_len = 0;
   uint32_t pi_ram = 0x0, pi_rom = 0x0;
-  uint32_t pi_len = 0, pi_cycles = 0;
   bool pi_write = false;
   int8_t stick_x = 0x0, stick_y = 0x0;
   uint16_t buttons = 0x0;
   uint32_t si_ram = 0x0;
   uint64_t eeprom[0x200];
 
-  void pi_update(uint32_t cycles) {
-    if (!pi_cycles) return;
-    if (pi_cycles > cycles) { pi_cycles -= cycles; return; }
-    printf("[PI] DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, pi_len + 1);
+  void pi_update() {
+    //printf("[PI] DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, pi_len + 1);
     if (pi_write) memcpy(pages[0] + pi_ram, pages[0] + pi_rom, pi_len + 1);
     else memcpy(pages[0] + pi_rom, pages[0] + pi_ram, pi_len + 1);
-    mi_irqs |= 0x10; pi_cycles = 0; return;
+    set_irqs(0x10); pi_status &= ~0x1;
   }
 
   void joy_status(uint32_t channel, uint32_t addr) {
@@ -166,7 +178,7 @@ namespace R4300 {
 
   void joy_read(uint32_t channel, uint32_t addr) {
     if (channel != 0) return write<uint8_t>(addr - 2, 0x84);
-    printf("[SI] buttons: %x stick: %x\n", buttons, stick_y);
+    //printf("[SI] buttons: %x stick: %x\n", buttons, stick_y);
     write<uint16_t>(addr, buttons);
     write<int8_t>(addr + 2, stick_x);
     write<int8_t>(addr + 3, stick_y);
@@ -252,7 +264,7 @@ namespace R4300 {
     if ((addr & addr_mask & ~0x1fff) == 0x4000000)
       return RSP::read<T, true>(addr);
     switch (addr & addr_mask) {
-      default: printf("[MMIO] read from %x\n", addr); return 0;
+      default: /*printf("[MMIO] read from %x\n", addr);*/ return 0;
       // RSP Interface
       case 0x4040000: return rsp_cop0[0];
       case 0x4040004: return rsp_cop0[1];
@@ -281,7 +293,7 @@ namespace R4300 {
       // Peripheral Interface
       case 0x4600000: return pi_ram;
       case 0x4600004: return pi_rom;
-      case 0x4600010: return pi_cycles > 0;//pi_status;
+      case 0x4600010: return pi_status;
       // RDRAM Interface
       case 0x4700000: return 0xe;      // RI_MODE
       case 0x4700004: return 0x40;     // RI_CONFIG
@@ -301,17 +313,15 @@ namespace R4300 {
       return RSP::write<T, true>(addr, val);
     }
     switch (addr & addr_mask) {
-      default: printf("[MMIO] write to %x: %x\n", addr, val); return;
+      default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
       // RSP Interface
       case 0x4040000: rsp_cop0[0] = val & 0x1fff; return;
       case 0x4040004: rsp_cop0[1] = val & 0xffffff;
-        printf("Writing %llx to DMA_SRC\n", rsp_cop0[1]);
-        printf("DMEM 4e0 is %llx %llx\n", RSP::read<uint32_t>(0x4e0), RSP::read<uint32_t>(0x4e4));
-        printf("DMEM 5f8 is %llx %llx\n", RSP::read<uint32_t>(0x5f8), RSP::read<uint32_t>(0x5fc));
-        if (rsp_cop0[1] == 0x3c6200/*0x3bb790 || rsp_cop0[1] == 0x3aa538*/) {
-          //printf("Break here!\n"), logging_on = true;
-          printf("First word: %x\n", *(uint32_t*)(pages[0] + rsp_cop0[1]));
-        }
+        //printf("Writing %llx to DMA_SRC\n", rsp_cop0[1]);
+        //printf("DMEM 4e0 is %llx %llx\n", RSP::read<uint32_t>(0x4e0), RSP::read<uint32_t>(0x4e4));
+        //printf("DMEM 5f8 is %llx %llx\n", RSP::read<uint32_t>(0x5f8), RSP::read<uint32_t>(0x5fc));
+        //if (rsp_cop0[1] == 0x3bb790 || rsp_cop0[1] == 0x3aa538*)
+        //  printf("First word: %x\n", *(uint32_t*)(pages[0] + rsp_cop0[1]));
         return;
       case 0x4040008: rsp_dma<false>(val); return;
       case 0x404000c: rsp_dma<true>(val); return;
@@ -323,16 +333,18 @@ namespace R4300 {
         RDP::pc_start = val & addr_mask;
         RDP::pc = RDP::pc_start; return;
       case 0x4100004:
-        RDP::pc_end = val & addr_mask;
-        RDP::running = true; return;
+        cancel(RDP::update), sched(RDP::update, 1);
+        RDP::pc_end = val & addr_mask; return;
       case 0x410000c:
         RDP::status &= ~_pext_u32(val, 0x15);
         RDP::status |= _pext_u32(val, 0x2a); return;
       // MIPS Interface
-      case 0x4300000: if (val & 0x800) mi_irqs &= ~0x20; return;
+      case 0x4300000: if (val & 0x800) unset_irqs(0x20); return;
       case 0x430000c:
         mi_mask &= ~_pext_u32(val, 0x555);
-        mi_mask |= _pext_u32(val, 0xaaa); return;
+        mi_mask |= _pext_u32(val, 0xaaa);
+        if (mi_irqs & mi_mask) cause |= 0x400;
+        else cause &= ~0x400; return;
       // Video Interface
       case 0x4400000: 
         if (val == vi_status) return;
@@ -342,7 +354,7 @@ namespace R4300 {
         if ((val & 0xfff) == vi_width) return;
         vi_width = val & 0xfff; vi_dirty = true; return;
       case 0x440000c: vi_irq = val & 0x3ff; return;
-      case 0x4400010: mi_irqs &= ~0x8; return;
+      case 0x4400010: unset_irqs(0x8); return;
       case 0x4400018:
         if ((val & 0x3ff) == vi_height) return;
         vi_height = val & 0x3ff; vi_dirty = true; return;
@@ -350,7 +362,7 @@ namespace R4300 {
       case 0x4500000: ai_ram = val & 0xfffff8; return;
       case 0x4500004: ai_dma(val); return;
       case 0x4500008: ai_run = val & 0x1; return;
-      case 0x450000c: mi_irqs &= ~0x4; return;
+      case 0x450000c: unset_irqs(0x4); return;
       case 0x4500010:
         if ((val & 0xfff) == ai_rate) return;
         ai_rate = val & 0xfff; ai_dirty = true; return;
@@ -361,29 +373,25 @@ namespace R4300 {
       case 0x4600000: pi_ram = val & 0xffffff; return;
       case 0x4600004: pi_rom = val & addr_mask; return;
       case 0x4600008:
-        if (pi_cycles) return;
-        pi_len = val; pi_write = false;
-        pi_cycles = pi_len * 7; return;
+        if (pi_status & 0x1) return;
+        pi_len = val, pi_write = false;
+        sched(pi_update, pi_len * 7);
+        pi_status |= 0x1; return;
       case 0x460000c:
-        if (pi_cycles) return;
-        pi_len = val; pi_write = true;
-        pi_cycles = pi_len * 7; return;
-      case 0x4600010: mi_irqs &= ~0x10; return;
+        if (pi_status & 0x1) return;
+        pi_len = val, pi_write = true;
+        sched(pi_update, pi_len * 7);
+        pi_status |= 0x1; return;
+      case 0x4600010: unset_irqs(0x10); return;
       // Serial Interface
       case 0x4800000: si_ram = val & 0xffffff; return;
-      case 0x4800004:
-        si_update();
-        printf("PIF READ: \n");
-        for (uint8_t i = 0; i < 0x40; ++i)
-          printf("%x ", pages[0xfe][0x7c0 + i]);
-        printf("\n");
-
+      case 0x4800004: si_update();
         memcpy(pages[0] + si_ram, pages[0xfe] + 0x7c0, 0x40);
-        mi_irqs |= 0x2; return;
+        set_irqs(0x2); return;
       case 0x4800010:
         memcpy(pages[0xfe] + 0x7c0, pages[0] + si_ram, 0x40);
-        mi_irqs |= 0x2; return;
-      case 0x4800018: mi_irqs &= ~0x2; return;
+        set_irqs(0x2); return;
+      case 0x4800018: unset_irqs(0x2); return;
     }
   }
 
@@ -433,40 +441,29 @@ namespace R4300 {
 
   /* === Actual CPU Functions === */
 
-  uint32_t pc = 0xa4000040;
-  uint64_t reg_array[0x63] = {0};
-  constexpr uint8_t hi = 0x20, lo = 0x21;
-  constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
-
-  void irqs_update(uint32_t cycles) {
-    if (R4300::pages[0][0xfd880] == 0xc0)
-      printf("Wrong value written to FD880\n");
-
-    // update IP2 based on MI_INTR and MI_MASK
-    if (mi_irqs & mi_mask) reg_array[13 + dev_cop0] |= 0x400;
-    else reg_array[13 + dev_cop0] &= ~0x400;
-
-    // check ++COUNT against COMPARE, set IP7
-    uint64_t &count = reg_array[9 + dev_cop0];
-    uint64_t compare = reg_array[11 + dev_cop0];
-    if (count > compare) compare += 0x100000000;
-    if (count + (cycles / 2 + 1) >= compare) reg_array[13 + dev_cop0] |= 0x8000;
-    count = (count + (cycles / 2 + 1)) & 0xffffffff;
-
-    // if interrupt enabled and triggered, set pc to handler address
-    uint8_t ip = (reg_array[13 + dev_cop0] >> 8) & 0xff;
-    uint8_t im = (reg_array[12 + dev_cop0] >> 8) & 0xff;
-    if ((reg_array[12 + dev_cop0] & 0x3) == 0x1 && (ip & im)) {
-      printf("Jumping to interrupt instead of %x: %x\n", pc, fetch(pc));
-      printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_irqs, mi_mask, vi_irq);
-      reg_array[14 + dev_cop0] = pc; pc = 0x80000180; reg_array[12 + dev_cop0] |= 0x2;
-    }
-  }
-
   robin_hood::unordered_node_map<uint32_t, Block> blocks;
   robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
   constexpr uint32_t hpage_mask = addr_mask & ~0xfff;
-  bool modified = false;
+  bool modified = false; Block *block = &empty;
+
+  void timer_fire() {
+    cause |= 0x8000;
+  }
+
+  void timer_update() {
+    uint32_t cycles = (compare - count) * 2;
+    cancel(timer_fire), sched(timer_fire, cycles);
+  }
+
+  inline void irqs_update() {
+    // if interrupt enabled and triggered, set pc to handler address
+    uint8_t ip = ((cause & status) >> 8) & 0xff;
+    if ((status & 0x3) == 0x1 && ip) {
+      printf("Jumping to interrupt instead of %x: %x\n", pc, fetch(pc));
+      printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_irqs, mi_mask, vi_irq);
+      reg_array[14 + dev_cop0] = pc; pc = 0x80000180; status |= 0x2;
+    }
+  }
 
   void protect(uint32_t hpage) {
     if (prot_pages[hpage].empty())
@@ -487,21 +484,33 @@ namespace R4300 {
     else exit(1);
   }
 
-  /*void update() {
-    pc = block->code();
-    if (block->next_pc != pc)
-      block->next_pc = pc, block->next = &blocks[pc];
-    block = block->next;
-    if (!block->valid) {
-      CodeHolder code; 
-      code.init(runtime.codeInfo());
-      MipsJit<Device::r4300> jit(code);
-      block->cycles = jit.jit_block();
-      runtime.add(&block->code, &code);
-      block->valid = true;
+  void update() {
+    uint32_t cycles = 0;
+    while (still_top(cycles)) {
+      bool run = false;
+      if (block->valid) {
+        pc = block->code(), run = true;
+        //RDP::update(block->cycles);
+        R4300::irqs_update();
+
+        if (block->next_pc != pc)
+          block->next_pc = pc, block->next = &blocks[pc & addr_mask];
+        block = block->next;
+      }
+
+      if (!block->valid) {
+        CodeHolder code; 
+        code.init(runtime.codeInfo());
+        MipsJit<Device::r4300> jit(code);
+
+        block->cycles = jit.jit_block();
+        runtime.add(&block->code, &code);
+        block->valid = true;
+      }
+      cycles = run ? block->cycles : 0;
     }
-    sched(update, block->cycles);
-  }*/
+    sched(update, cycles);
+  }
 
   void init(FILE *file) {
     // setup registers (assumes CIC-NUS-6102)
