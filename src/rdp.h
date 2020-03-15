@@ -4,7 +4,7 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <cstring>
-#include "util.h"
+#include "scheduler.h"
 #include "rdp.spv.array"
 
 typedef struct PerTileData {
@@ -334,7 +334,6 @@ namespace Vulkan {
   void add_rdp_cmd(cmd_t cmd) {
     uint32_t yh = (cmd.xyh[1] < 0 ? 0 : cmd.xyh[1] / (group_size * 4));
     uint32_t yl = (cmd.xyl[1] < 0 ? 0 : cmd.xyl[1] / (group_size * 4));
-    if (n_cmds >= max_cmds) RDP::render();
     for (uint32_t i = yh; i <= yl && i < gheight; ++i) {
       for (uint32_t j = 0; j < gwidth; ++j) {
         tile_t *tile = tiles_ptr() + i * gwidth + j;
@@ -342,6 +341,7 @@ namespace Vulkan {
       }
     }
     cmds_ptr()[n_cmds++] = cmd;
+    if (n_cmds >= max_cmds) RDP::render();
   }
 
   void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
@@ -377,7 +377,7 @@ namespace RDP {
   uint32_t img_size = 0x0, img_width = 0, height = 240;
   uint8_t *img_addr = nullptr, *zbuf_addr = nullptr;
   uint32_t tex_nibs = 0x0, tex_width = 0, tex_addr = 0x0;
-  bool tile_dirty[8] = {false};
+  //bool tile_dirty[8] = {false};
 
   uint32_t fill = 0x0, fog = 0x0, blend = 0x0;
   uint32_t env = 0x0, prim = 0x0, zprim = 0x0;
@@ -412,7 +412,7 @@ namespace RDP {
   }
 
   void render() {
-    memset(tile_dirty, 0, 8);
+    //memset(tile_dirty, 0, 8);
     Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
   }
 
@@ -495,6 +495,8 @@ namespace RDP {
   void set_tile() {
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint8_t tex_idx = (instr[1] >> 24) & 0x7;
+    //if (tile_dirty[tex_idx]) render();
+    //else tile_dirty[tex_idx] = true;
     Vulkan::texes_ptr()[tex_idx] = {
       .format = (instr[0] >> 21) & 0x7, .size = (instr[0] >> 19) & 0x3,
       .width = ((instr[0] >> 9) & 0xff) << 3,
@@ -502,12 +504,10 @@ namespace RDP {
       .mask = { (instr[1] >> 4) & 0xf, (instr[1] >> 14) & 0xf },
       .shift = { instr[1] & 0xf, (instr[1] >> 10) & 0xf }
     };
-    //if (tile_dirty[tex_idx]) render();
-    //else tile_dirty[tex_idx] = true;
   }
 
   void load_tile() {
-    std::vector<uint32_t> instr = fetch(pc, 2); //render();
+    std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 12) & 0xfff, th = instr[1] & 0xfff;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
     th >>= 2, tl >>= 2, sh >>= 2, sl >>= 2;
@@ -530,7 +530,7 @@ namespace RDP {
   }
 
   void load_block() {
-    std::vector<uint32_t> instr = fetch(pc, 2); //render();
+    std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 12) & 0xfff/*, dxt = instr[1] & 0xfff*/;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
     tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
@@ -597,9 +597,9 @@ namespace RDP {
     //for (uint8_t i = 0; i < 8; i += 2)
     //  printf("%x %x\n", instr[i], instr[i + 1]);
     cmd_t cmd = {
-      .xyh = { sext(instr[4]), sext(instr[1], 14) },
-      .xym = { sext(instr[6]), sext((instr[1] >> 16), 14) },
-      .xyl = { sext(instr[2]), sext(instr[0], 14) },
+      .xyh = { sext(instr[4], 30), sext(instr[1], 14) },
+      .xym = { sext(instr[6], 30), sext((instr[1] >> 16), 14) },
+      .xyl = { sext(instr[2], 30), sext(instr[0], 14) },
       .sh = sext(instr[5]), .sm = sext(instr[7]), .sl = sext(instr[3]),
       .fill = fill, .fog = fog, .blend = blend,
       .env = env, .prim = prim, .zprim = zprim,
@@ -656,9 +656,15 @@ namespace RDP {
     // interpret config instructions 
     uint32_t cycles = 0;
     while (still_top(cycles)) {
-      //std::vector<uint32_t> instr = fetch(pc, 4);
-      //printf("[RDP] Command %x %x\n", instr[0], instr[1]);
-      //pc -= 16;
+      /*std::vector<uint32_t> instr = fetch(pc, 4);
+      printf("[RDP] Command %x %x\n", instr[0], instr[1]);
+      pc -= 16;
+      if (instr[0] == 0xe45003c0 && instr[1] == 0x3b8
+        && instr[2] == 0x1dc0 && instr[3] == 0x4000400)
+        R4300::logging_on = true;
+      if (instr[0] == 0xe448002c && instr[1] == 0x8001c
+        && instr[2] == 0x0 && instr[3] == 0x4000400)
+        printf("Ending rectangle hit\n"), exit(0);*/
       switch (opcode(pc)) {
         case 0x00: pc += 8; break;
         case 0x08: triangle<0x0>(); break;
@@ -694,7 +700,7 @@ namespace RDP {
         case 0x3f: set_image(); break;
         case 0x29: R4300::set_irqs(0x20);
         case 0x26: case 0x27: case 0x28:
-          /*printf("[RDP] SYNC\n");*/ pc += 8; break;
+          render(); pc += 8; break;
         default: invalid(); break;
       }
       if (pc > pc_end) pc = pc_end;

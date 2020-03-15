@@ -8,6 +8,20 @@ using namespace asmjit;
 
 enum class Device { r4300, rsp };
 
+typedef uint32_t (*Function)();
+
+struct Block {
+  Function code;
+  Block *next;
+  uint32_t next_pc;
+  uint32_t cycles;
+  bool valid;
+  uint32_t hash;
+};
+
+JitRuntime runtime;
+Block empty = {};
+
 namespace R4300 {
   extern uint32_t mi_irqs;
   extern bool logging_on;
@@ -20,6 +34,7 @@ namespace R4300 {
   extern robin_hood::unordered_map<uint32_t, bool> watch_w;
 
   extern uint32_t tlb[0x20][4];
+  extern Block *block;
 
   template <typename T, bool map=false>
   int64_t read(uint32_t addr);
@@ -36,6 +51,7 @@ namespace RSP {
   extern bool step, moved;
   extern uint64_t reg_array[0x100];
   extern uint32_t pc;
+  extern uint8_t *imem;
 
   uint32_t fetch(uint32_t addr);
   template <typename T, bool all=false>
@@ -44,20 +60,6 @@ namespace RSP {
   int64_t read(uint32_t addr);
   extern const uint16_t rcp_rsq_rom[1024];
 }
-
-typedef uint32_t (*Function)();
-
-struct Block {
-  Function code = nullptr;
-  Block *next = nullptr;
-  uint32_t next_pc = 0;
-  uint32_t cycles = 0;
-  bool valid = false;
-  uint32_t hash = 0;
-};
-
-JitRuntime runtime;
-Block empty = {};
 
 template <Device device>
 struct MipsJit {
@@ -2446,7 +2448,59 @@ struct MipsJit {
     }
 
     as.bind(end_label);
-    if (!is_rsp) as.add(x86_spill(9 + dev_cop0), cycles / 2);
+    if (!is_rsp) {
+      as.add(x86_spill(9 + dev_cop0), cycles / 2);
+      Label cont_label = as.newLabel();
+      // check cause and status registers
+      as.mov(x86::eax, x86_spill(12 + dev_cop0));
+      as.mov(x86::ecx, x86::eax); as.and_(x86::ecx, 0x3);
+      as.cmp(x86::ecx, 0x1); as.jne(cont_label);
+      as.and_(x86::eax, x86_spill(13 + dev_cop0));
+      as.and_(x86::eax, 0xff00); as.jz(cont_label);
+      // set interrupt pc, status
+      as.mov(x86_spill(14 + dev_cop0), x86::edi);
+      as.mov(x86::edi, 0x80000180);
+      as.or_(x86_spill(12 + dev_cop0), 0x2);
+      as.bind(cont_label);
+    }
+
+    // check next_pc matches and block valid
+    Label exit_label = as.newLabel(), jump_label = as.newLabel();
+    constexpr uint8_t next = 8, npc = 16, ncycles = 20, valid = 24, hash = 28;
+    as.mov(x86::rax, reinterpret_cast<uint64_t>(R4300::block));
+    as.cmp(x86::edi, x86::dword_ptr(x86::rax, npc)); as.jne(exit_label);
+    as.mov(x86::rax, x86::qword_ptr(x86::rax, next)); as.mov(x86::rsi, x86::rax);
+    as.cmp(x86::byte_ptr(x86::rax, valid), 1); as.jne(exit_label);
+
+    if (is_rsp) {
+      as.mov(x86::rdx, reinterpret_cast<uint64_t>(RSP::imem));
+      as.and_(x86::edi, 0xfff); as.add(x86::rdx, x86::rdi);
+      as.mov(x86::edx, x86::dword_ptr(x86::rdx));
+      as.cmp(x86::edx, x86::dword_ptr(x86::rax, hash)); as.jne(exit_label);
+    }
+
+    as.mov(x86::edx, x86::dword_ptr(x86::rax, ncycles));
+    // check still_top (no intervening events)
+    constexpr uint32_t n_events = 0, now = 8, next_time = 16, top = 32;
+    as.mov(x86::rax, reinterpret_cast<uint64_t>(scheduler()));
+    as.cmp(x86::byte_ptr(x86::rax, n_events), 0); as.je(jump_label);
+    as.mov(x86::rcx, x86::qword_ptr(x86::rax, now)); as.add(x86::rcx, x86::rdx);
+    as.sub(x86::rcx, x86::qword_ptr(x86::rax, top)); as.test(x86::rcx, x86::rcx);
+    as.jg(exit_label); as.bind(jump_label);
+
+    // update values of now and next_time
+    as.movq(x86::xmm0, x86::qword_ptr(x86::rax, next_time));
+    as.add(x86::rdx, x86::qword_ptr(x86::rax, next_time));
+    as.movq(x86::xmm1, x86::rdx); as.punpcklqdq(x86::xmm0, x86::xmm1);
+    as.movdqu(x86::dqword_ptr(x86::rax, now), x86::xmm0);
+
+    // update value of block, jump to code
+    as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::block));
+    as.mov(x86::qword_ptr(x86::rax), x86::rsi);
+    as.mov(x86::rdx, x86::qword_ptr(x86::rsi)); as.add(x86::rdx, 67);
+    as.jmp(x86::rdx); // prologue size
+    as.bind(exit_label);
+
     x86_store_all(); as.pop(x86::rbp);
     as.mov(x86::eax, x86::edi); as.ret();
     return cycles;

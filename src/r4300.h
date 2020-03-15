@@ -43,13 +43,11 @@ namespace R4300 {
   void set_irqs(uint32_t mask) {
     mi_irqs |= mask;
     if (mi_irqs & mi_mask) cause |= 0x400;
-    else cause &= ~0x400;
   }
 
   void unset_irqs(uint32_t mask) {
     mi_irqs &= ~mask;
-    if (mi_irqs & mi_mask) cause |= 0x400;
-    else cause &= ~0x400;
+    if (!(mi_irqs & mi_mask)) cause &= ~0x400;
   }
 
   /* === RSP Interface registers === */
@@ -333,7 +331,7 @@ namespace R4300 {
         RDP::pc_start = val & addr_mask;
         RDP::pc = RDP::pc_start; return;
       case 0x4100004:
-        cancel(RDP::update), sched(RDP::update, 1);
+        resched(RDP::update, 1);
         RDP::pc_end = val & addr_mask; return;
       case 0x410000c:
         RDP::status &= ~_pext_u32(val, 0x15);
@@ -452,17 +450,17 @@ namespace R4300 {
 
   void timer_update() {
     uint32_t cycles = (compare - count) * 2;
-    cancel(timer_fire), sched(timer_fire, cycles);
+    resched(timer_fire, cycles);
   }
 
   inline void irqs_update() {
-    // if interrupt enabled and triggered, set pc to handler address
     uint8_t ip = ((cause & status) >> 8) & 0xff;
-    if ((status & 0x3) == 0x1 && ip) {
-      printf("Jumping to interrupt instead of %x: %x\n", pc, fetch(pc));
-      printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_irqs, mi_mask, vi_irq);
-      reg_array[14 + dev_cop0] = pc; pc = 0x80000180; status |= 0x2;
-    }
+    if ((status & 0x3) != 0x1 || ip == 0x0) return;
+
+    // if interrupt enabled and triggered, set pc to handler address
+    printf("Jumping to interrupt instead of %x: %x\n", pc, fetch(pc));
+    printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_irqs, mi_mask, vi_irq);
+    reg_array[14 + dev_cop0] = pc; pc = 0x80000180; status |= 0x2;
   }
 
   void protect(uint32_t hpage) {
@@ -487,12 +485,10 @@ namespace R4300 {
   void update() {
     uint32_t cycles = 0;
     while (still_top(cycles)) {
-      bool run = false;
-      if (block->valid) {
-        pc = block->code(), run = true;
-        //RDP::update(block->cycles);
-        R4300::irqs_update();
-
+      bool run = block->valid;
+      if (run) {
+        pc = block->code();
+        //irqs_update();
         if (block->next_pc != pc)
           block->next_pc = pc, block->next = &blocks[pc & addr_mask];
         block = block->next;

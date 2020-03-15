@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <x86intrin.h>
-#include "util.h"
+#include "scheduler.h"
 #include "mipsjit.h"
 
 namespace R4300 {
@@ -192,6 +192,47 @@ namespace RSP {
     return (reg_array[4 + dev_cop0] & 0x42) == 0x42;
   }
 
+  void print_state() {
+    printf("- ACC: ");
+    for (uint8_t i = 0; i < 24; ++i)
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 32 * 2]))[23 - i]);
+    printf("\n- VCO: ");
+    for (uint8_t i = 0; i < 16; ++i)
+      printf("%hx ", ((uint16_t*)(&reg_array[0x86 + 0 * 2]))[15 - i]);
+    printf("\n- R29: ");
+    for (uint8_t i = 0; i < 8; ++i)
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 29 * 2]))[7 - i]);
+    printf("\n- R27: ");
+    for (uint8_t i = 0; i < 8; ++i)
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 27 * 2]))[7 - i]);
+    printf("\n- R17: ");
+    for (uint8_t i = 0; i < 8; ++i)
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 17 * 2]))[7 - i]);
+    printf("\n- R5: ");
+    for (uint8_t i = 0; i < 8; ++i)
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 5 * 2]))[7 - i]);
+    printf("\n- R3: ");
+    for (uint8_t i = 0; i < 8; ++i)
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 3 * 2]))[7 - i]);
+    printf("\n- R2: ");
+    for (uint8_t i = 0; i < 8; ++i)
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 2 * 2]))[7 - i]);
+    printf("\n- R1: ");
+    for (uint8_t i = 0; i < 8; ++i)
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 1 * 2]))[7 - i]);
+    printf("\n- $3: %llx $2: %llx $19: %llx $13: %llx\n- de0: ",
+        reg_array[3], reg_array[2], reg_array[19], reg_array[13]);
+    for (uint8_t i = 0; i < 32; ++i)
+      printf("%llx ", read<uint8_t>(0xde0 + i));
+    printf("\n- 3e0: ");
+    for (uint8_t i = 0; i < 16; ++i)
+      printf("%llx ", read<uint8_t>(0x3e0 + i));
+    printf("\n- 5f8: ");
+    for (uint8_t i = 0; i < 16; ++i)
+      printf("%llx ", read<uint8_t>(0x5f8 + i));
+    printf("\n---\n");
+  }
+
   void update() {
     uint32_t cycles = 0;
     while (still_top(cycles)) {
@@ -201,13 +242,14 @@ namespace RSP {
         pc = block->code();
         moved = false, run = true;
         if (broke()) R4300::set_irqs(0x1);
+        if (R4300::logging_on) print_state();
 
         if (block->next_pc != pc)
           block->next_pc = pc, block->next = &blocks[pc & addr_mask];
         block = block->next, hash = fetch(pc);
       }
 
-      if (!block->valid || block->hash != hash) {
+      if (!block->valid || block->hash != hash || R4300::logging_on) {
         CodeHolder code; 
         code.init(runtime.codeInfo());
         MipsJit<Device::rsp> jit(code);
