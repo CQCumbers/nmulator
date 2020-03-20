@@ -69,7 +69,7 @@ uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
   if (tex.mask[0]) { s &= ((1 << tex.mask[0]) - 1); if (ms) s = ((1 << tex.mask[0]) - 1) - s; }
   if (tex.mask[1]) { t &= ((1 << tex.mask[1]) - 1); if (mt) t = ((1 << tex.mask[1]) - 1) - t; }
   
-  tex.addr += cmd.tmem * 0x1000;
+  tex.addr = (tex.addr & 0xfff) | (cmd.tmem << 12);
   if (tex.format == 0 && tex.size == 2) {        // 16 bit RGBA
     //if (s * 2 >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s * 2;
@@ -156,7 +156,7 @@ int mul16(int a, int b) {
 
 uint sample_color(uint2 pos, RDPCommand cmd) {
   if (cmd.type & T_TEX) {
-    RDPTile tex = texes[cmd.tile]; uint s, t, w;
+    RDPTile tex = texes[(cmd.tmem << 3) | (cmd.tile & 0x7)]; uint s, t, w;
     int x = pos.x << 16, dy = (pos.y << 2) + 1 - cmd.xyh[1];
     if (cmd.modes[0] & M0_COPY) {
       s = cmd.tex[0] + ((x - cmd.xyh[0]) << 5) >> 16;

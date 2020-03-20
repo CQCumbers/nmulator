@@ -49,7 +49,7 @@ namespace Vulkan {
   /* === Descriptor Memory Access === */
 
   uint8_t *mapped_mem;
-  const uint32_t group_size = 8, max_cmds = 16, max_copies = 1;
+  const uint32_t group_size = 8, max_cmds = 16, max_copies = 16;
   uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0, n_tmems = 0;
 
@@ -63,8 +63,8 @@ namespace Vulkan {
   VkBuffer tiles = VK_NULL_HANDLE;
 
   const VkDeviceSize texes_offset = tiles_offset + tiles_size;
-  const VkDeviceSize texes_size = 8 * sizeof(tex_t);
-  tex_t *texes_ptr() { return (tex_t*)(mapped_mem + texes_offset); }
+  const VkDeviceSize texes_size = ((max_copies + 1) * sizeof(tex_t)) << 3;
+  tex_t *texes_ptr() { return (tex_t*)(mapped_mem + texes_offset) + (n_tmems << 3); }
   VkBuffer texes = VK_NULL_HANDLE;
 
   const VkDeviceSize globals_offset = texes_offset + texes_size;
@@ -73,8 +73,8 @@ namespace Vulkan {
   VkBuffer globals = VK_NULL_HANDLE;
 
   const VkDeviceSize tmem_offset = globals_offset + globals_size;
-  const VkDeviceSize tmem_size = 0x1000 * max_copies;
-  uint8_t *tmem_ptr() { return mapped_mem + tmem_offset + 0x1000 * n_tmems; }
+  const VkDeviceSize tmem_size = (max_copies + 1) << 12;
+  uint8_t *tmem_ptr() { return mapped_mem + tmem_offset + (n_tmems << 12); }
   VkBuffer tmem = VK_NULL_HANDLE;
 
   const VkDeviceSize pixels_offset = tmem_offset + tmem_size;
@@ -315,9 +315,12 @@ namespace Vulkan {
   /* === Runtime Methods === */
 
   void add_tmem_copy() {
+    //RDP::render(); return;
     uint8_t *last_tmem = tmem_ptr();
+    tex_t *last_texes = texes_ptr();
     if (++n_tmems >= max_copies) RDP::render(), n_tmems = 0;
     memcpy(tmem_ptr(), last_tmem, 0x1000);
+    memcpy(texes_ptr(), last_texes, (sizeof(tex_t) << 3));
   }
 
   void run_commands() {
@@ -419,6 +422,7 @@ namespace RDP {
   /* === Instruction Translations === */
 
   void set_image() {
+    render();
     std::vector<uint32_t> instr = fetch(pc, 2);
     img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
     img_width = (instr[0] & 0x3ff) + 1;
@@ -493,6 +497,7 @@ namespace RDP {
   }
 
   void set_tile() {
+    Vulkan::add_tmem_copy();
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint8_t tex_idx = (instr[1] >> 24) & 0x7;
     //if (tile_dirty[tex_idx]) render();
@@ -526,7 +531,6 @@ namespace RDP {
       } else memcpy(mem, R4300::pages[0] + ram, width);
       mem += tex.width, ram += tex_width * tex_nibs / 2;
     }
-    //Vulkan::add_tmem_copy();
   }
 
   void load_block() {
@@ -539,7 +543,6 @@ namespace RDP {
     uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
     uint32_t width = (sh - sl + 1) * tex_nibs / 2;
     memcpy(mem, R4300::pages[0] + tex_addr + offset, width);
-    //Vulkan::add_tmem_copy();
   }
 
   void load_tlut() {
@@ -700,7 +703,7 @@ namespace RDP {
         case 0x3f: set_image(); break;
         case 0x29: R4300::set_irqs(0x20);
         case 0x26: case 0x27: case 0x28:
-          render(); pc += 8; break;
+          Vulkan::add_tmem_copy(); pc += 8; break;
         default: invalid(); break;
       }
       if (pc > pc_end) pc = pc_end;

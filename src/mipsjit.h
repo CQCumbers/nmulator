@@ -2371,16 +2371,6 @@ struct MipsJit {
     else as.mov(x86::rbp, reinterpret_cast<uint64_t>(&R4300::reg_array));
     x86_load_all();
 
-    //if (!is_rsp)
-      // check interrupts? Or do that only when status/cause is changed?
-      // probably the latter, it actually reduces work and exiting JIT on
-      // interrupts shouldn't be too frequent
-  
-    // at end of block, direct branch to next block instead of returning
-    // if edi = next_pc, next block is valid, and still_top is true
-    // RSP should also check the first instruction remains the same (without calling out to C++)
-    // patch this epilogue in whenever next_pc is set to a new value.
-
     uint32_t cycles = 0, pc = (is_rsp ? RSP::pc : R4300::pc);
     end_label = as.newLabel(); uint32_t hpage = block_end;
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
@@ -2497,8 +2487,8 @@ struct MipsJit {
     // update value of block, jump to code
     as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::block));
     as.mov(x86::qword_ptr(x86::rax), x86::rsi);
-    as.mov(x86::rdx, x86::qword_ptr(x86::rsi)); as.add(x86::rdx, 67);
-    as.jmp(x86::rdx); // prologue size
+    as.mov(x86::rdx, x86::qword_ptr(x86::rsi));
+    as.add(x86::rdx, 67); as.jmp(x86::rdx); // skip prologue
     as.bind(exit_label);
 
     x86_store_all(); as.pop(x86::rbp);
