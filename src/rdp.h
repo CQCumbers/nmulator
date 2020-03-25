@@ -8,23 +8,30 @@
 #include "rdp.spv.array"
 
 typedef struct PerTileData {
-  uint32_t n_cmds;
-  uint32_t cmd_idxs[16];
+  uint32_t cmd_idxs[2];
 } tile_t;
+
+typedef struct Bounds {
+  int32_t xh, xl, yh, yl;
+} bounds_t;
 
 // all coeffs are 16.16 fixed point
 // except yh/yl/ym, which is 12.2
 typedef struct RDPCommand {
-  int32_t xyh[2], xym[2], xyl[2];
+  uint32_t type, tile;
+  int32_t xh, xm, xl;
+  int32_t yh, ym, yl;
   int32_t sh, sm, sl;
+
   int32_t shade[4], sde[4], sdx[4];
-  int32_t zpos, zde, zdx;
   int32_t tex[3], tde[3], tdx[3];
+  int32_t zpos, zde, zdx;
+
   uint32_t fill, fog, blend;
   uint32_t env, prim, zprim;
   uint32_t cc_mux, tlut, tmem;
   uint32_t keys[3], modes[2];
-  uint32_t lft, type, tile;
+  bounds_t sci;
 } cmd_t;
 
 typedef struct RDPTile {
@@ -49,9 +56,9 @@ namespace Vulkan {
   /* === Descriptor Memory Access === */
 
   uint8_t *mapped_mem;
-  const uint32_t group_size = 8, max_cmds = 16, max_copies = 16;
+  const uint32_t group_size = 8, max_cmds = 64, max_copies = 64;
   uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
-  uint32_t n_cmds = 0, n_tmems = 0;
+  uint32_t n_cmds = 0, n_tmems = 4;
 
   const VkDeviceSize cmds_size = max_cmds * sizeof(cmd_t);
   cmd_t *cmds_ptr() { return (cmd_t*)(mapped_mem); }
@@ -335,12 +342,23 @@ namespace Vulkan {
   }
 
   void add_rdp_cmd(cmd_t cmd) {
-    uint32_t yh = (cmd.xyh[1] < 0 ? 0 : cmd.xyh[1] / (group_size * 4));
-    uint32_t yl = (cmd.xyl[1] < 0 ? 0 : cmd.xyl[1] / (group_size * 4));
+    uint32_t yh = (cmd.yh < 0 ? 0 : cmd.yh / (group_size << 2));
+    uint32_t yl = (cmd.yl < 0 ? 0 : cmd.yl / (group_size << 2));
+
+    /*uint32_t xh = cmd.xyh[0] + (cmd.sh * (cmd.xyl[1] - cmd.xyh[1]) >> 2);
+    xh = (xh < 0 ? 0 : xh / (group_size << 16));
+    uint32_t xl = (cmd.xyl[0] < 0 ? 0 : cmd.xyl[0] / (group_size << 16));
+    uint32_t x1 = (cmd.lft ? xl : xh), x2 = (cmd.lft ? xh : xl);
+    if (cmd.type & 0x8) {
+      x1 = cmd.xyh[0] >> 2, x2 = cmd.xyl[0] >> 2;
+    }*/
+    uint32_t x1 = 0, x2 = gwidth + 1;
+
     for (uint32_t i = yh; i <= yl && i < gheight; ++i) {
-      for (uint32_t j = 0; j < gwidth; ++j) {
+      for (uint32_t j = x1; j <= x2 && j < gwidth; ++j) {
         tile_t *tile = tiles_ptr() + i * gwidth + j;
-        tile->cmd_idxs[(tile->n_cmds)++] = n_cmds;
+        tile->cmd_idxs[n_cmds >> 5] |= 0x1 << (n_cmds & 0x1f);
+        //printf("cmd_idxs: %x\n", tile->cmd_idxs[0]);
       }
     }
     cmds_ptr()[n_cmds++] = cmd;
@@ -350,10 +368,10 @@ namespace Vulkan {
   void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
     if (!pixels || n_cmds == 0) return;
     memcpy(pixels_ptr(), pixels, len);
-    if (zbuf) memcpy(zbuf_ptr(), zbuf, len);
+    //if (zbuf) memcpy(zbuf_ptr(), zbuf, len);
     run_commands(); n_cmds = 0; memset(tiles_ptr(), 0, tiles_size);
     memcpy(pixels, pixels_ptr(), len);
-    if (zbuf) memcpy(zbuf, zbuf_ptr(), len);
+    //if (zbuf) memcpy(zbuf, zbuf_ptr(), len);
   }
 }
 
@@ -362,6 +380,7 @@ namespace RSP {
   extern const uint8_t dev_cop0;
   template <typename T, bool all>
   int64_t read(uint32_t addr);
+  extern bool step;
 }
 
 namespace R4300 {
@@ -386,6 +405,7 @@ namespace RDP {
   uint32_t env = 0x0, prim = 0x0, zprim = 0x0;
   uint32_t cc_mux = 0x0, tlut = 0x0;
   uint32_t keys[3] = {0}, modes[2] = {0};
+  bounds_t sci;
 
   inline int32_t sext(uint32_t val, uint32_t bits=32) {
     if (bits >= 32) return val;
@@ -422,7 +442,7 @@ namespace RDP {
   /* === Instruction Translations === */
 
   void set_image() {
-    render();
+    //render();
     std::vector<uint32_t> instr = fetch(pc, 2);
     img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
     img_width = (instr[0] & 0x3ff) + 1;
@@ -435,8 +455,11 @@ namespace RDP {
 
   void set_scissor() {
     std::vector<uint32_t> instr = fetch(pc, 2);
-    uint32_t yh = instr[0] & 0xfff, yl = instr[1] & 0xfff;
-    height = (yl >> 2) - (yh >> 2);
+    sci.xh = zext(instr[0] >> 12, 12) << 14, sci.yh = zext(instr[0], 12);
+    sci.xl = zext(instr[1] >> 12, 12) << 14, sci.yl = sext(instr[1], 12);
+    height = (sci.yl >> 2) - (sci.yh >> 2);
+    //uint32_t yh = instr[0] & 0xfff, yl = instr[1] & 0xfff;
+    //height = (yl >> 2) - (yh >> 2);
     Vulkan::gheight = height / Vulkan::group_size;
   }
 
@@ -559,6 +582,8 @@ namespace RDP {
 
   void shade_triangle(cmd_t &cmd) {
     std::vector<uint32_t> instr = fetch(pc, 16);
+    for (uint8_t i = 0; i < 16; i += 2)
+      printf("%x %x\n", instr[i], instr[i + 1]);
     cmd.shade[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
     cmd.shade[1] = (instr[0] << 16) | (instr[4] & 0xffff);
     cmd.shade[2] = (instr[1] & 0xffff0000) | (instr[5] >> 16);
@@ -575,6 +600,8 @@ namespace RDP {
 
   void tex_triangle(cmd_t &cmd) {
     std::vector<uint32_t> instr = fetch(pc, 16);
+    for (uint8_t i = 0; i < 16; i += 2)
+      printf("%x %x\n", instr[i], instr[i + 1]);
     cmd.tex[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
     cmd.tex[1] = (instr[0] << 16) | (instr[4] & 0xffff);
     cmd.tex[2] = (instr[1] & 0xffff0000) | (instr[5] >> 16);
@@ -589,27 +616,38 @@ namespace RDP {
 
   void zbuf_triangle(cmd_t &cmd) {
     std::vector<uint32_t> instr = fetch(pc, 4);
+    for (uint8_t i = 0; i < 4; i += 2)
+      printf("%x %x\n", instr[i], instr[i + 1]);
     cmd.zpos = instr[0], cmd.zde = instr[2];
     cmd.zdx = instr[1];
   }
 
   template <uint8_t type>
   void triangle() {
-    //printf("[RDP] Triangle of type %x\n", type);
+    printf("[RDP] Triangle of type %x\n", type);
     std::vector<uint32_t> instr = fetch(pc, 8);
-    //for (uint8_t i = 0; i < 8; i += 2)
-    //  printf("%x %x\n", instr[i], instr[i + 1]);
+    for (uint8_t i = 0; i < 8; i += 2)
+      printf("%x %x\n", instr[i], instr[i + 1]);
+
+    /*if (R4300::logging_on)
+      printf("Ending triangle hit\n"), exit(0);
+    if (instr[0] == 0xce0001d8  && instr[1] == 0x1d301d3
+      && instr[2] == 0x9ec000 && instr[3] == 0x1cccc)
+      R4300::logging_on = RSP::step = true;*/
+
+    uint32_t t = type | ((instr[0] >> 19) & 0x10);
     cmd_t cmd = {
-      .xyh = { sext(instr[4], 30), sext(instr[1], 14) },
-      .xym = { sext(instr[6], 30), sext((instr[1] >> 16), 14) },
-      .xyl = { sext(instr[2], 30), sext(instr[0], 14) },
+      .type = t, .tile = (instr[0] >> 16) & 0x7,
+      .xh = sext(instr[4], 30), .yh = sext(instr[1], 14),
+      .xm = sext(instr[6], 30), .ym = sext(instr[1] >> 16, 14),
+      .xl = sext(instr[2], 30), .yl = sext(instr[0], 14),
       .sh = sext(instr[5]), .sm = sext(instr[7]), .sl = sext(instr[3]),
+
       .fill = fill, .fog = fog, .blend = blend,
       .env = env, .prim = prim, .zprim = zprim,
       .cc_mux = cc_mux, .tlut = tlut,
+      .sci = { sci.xh, sci.xl, sci.yh, sci.yl },
       .keys = { keys[0], keys[1], keys[2] },
-      .lft = (instr[0] >> 23) & 0x1,
-      .type = type, .tile = (instr[0] >> 16) & 0x7,
       .modes = { modes[0], modes[1] },
     };
     if (type & 0x4) shade_triangle(cmd);
@@ -635,11 +673,13 @@ namespace RDP {
     std::vector<uint32_t> instr = fetch(pc, 2);
     //if (type & 0x2) printf("%x %x\n", instr[0], instr[1]);
     cmd_t cmd = {
-      .xyh = { zext(instr[1] >> 12, 12) << 14, zext(instr[1], 12) },
-      .xyl = { zext(instr[0] >> 12, 12) << 14, zext(instr[0], 12) },
+      .xh = zext(instr[1] >> 12, 12) << 14, .yh = zext(instr[1], 12),
+      .xl = zext(instr[0] >> 12, 12) << 14, .yl = zext(instr[0], 12),
+
       .fill = fill, .fog = fog, .blend = blend,
       .env = env, .prim = prim, .zprim = zprim,
       .cc_mux = cc_mux, .tlut = tlut,
+      .sci = { sci.xh, sci.xl, sci.yh, sci.yl },
       .keys = { keys[0], keys[1], keys[2] },
       .type = type, .tile = (instr[1] >> 24) & 0x7,
       .modes = { modes[0], modes[1] },
@@ -662,12 +702,12 @@ namespace RDP {
       /*std::vector<uint32_t> instr = fetch(pc, 4);
       printf("[RDP] Command %x %x\n", instr[0], instr[1]);
       pc -= 16;
-      if (instr[0] == 0xe45003c0 && instr[1] == 0x3b8
-        && instr[2] == 0x1dc0 && instr[3] == 0x4000400)
-        R4300::logging_on = true;
-      if (instr[0] == 0xe448002c && instr[1] == 0x8001c
-        && instr[2] == 0x0 && instr[3] == 0x4000400)
-        printf("Ending rectangle hit\n"), exit(0);*/
+      if (instr[0] == 0xce0001d8  && instr[1] == 0x1d301d3
+        && instr[2] == 0x9ec000 && instr[3] == 0x1cccc)
+        R4300::logging_on = RSP::step = true;
+      if (instr[0] == 0xce0001f0 && instr[1] == 0x1f001dc
+        && instr[2] == 0x9a8000 && instr[3] == 0x2afffd)
+        printf("Ending triangle hit\n"), exit(0);*/
       switch (opcode(pc)) {
         case 0x00: pc += 8; break;
         case 0x08: triangle<0x0>(); break;
@@ -703,7 +743,7 @@ namespace RDP {
         case 0x3f: set_image(); break;
         case 0x29: R4300::set_irqs(0x20);
         case 0x26: case 0x27: case 0x28:
-          Vulkan::add_tmem_copy(); pc += 8; break;
+          /*render();*/ Vulkan::add_tmem_copy(); pc += 8; break;
         default: invalid(); break;
       }
       if (pc > pc_end) pc = pc_end;

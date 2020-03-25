@@ -421,7 +421,7 @@ namespace R4300 {
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
-    broke |= watch_w[addr];
+    //broke |= watch_w[addr];
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if (!page) return mmio_write<T>(addr, val);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
@@ -562,6 +562,7 @@ namespace R4300 {
       MAP_ANONYMOUS | MAP_SHARED, 0, 0
     ));
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
     SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
     SDL_RenderClear(renderer);

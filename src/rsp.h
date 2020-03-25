@@ -196,18 +196,18 @@ namespace RSP {
     printf("- ACC: ");
     for (uint8_t i = 0; i < 24; ++i)
       printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 32 * 2]))[23 - i]);
-    printf("\n- VCO: ");
+    printf("\n- VCC: ");
     for (uint8_t i = 0; i < 16; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x86 + 0 * 2]))[15 - i]);
+      printf("%hx ", ((uint16_t*)(&reg_array[0x86 + 1 * 4]))[15 - i]);
     printf("\n- R29: ");
     for (uint8_t i = 0; i < 8; ++i)
       printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 29 * 2]))[7 - i]);
-    printf("\n- R27: ");
+    printf("\n- R31: ");
     for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 27 * 2]))[7 - i]);
-    printf("\n- R17: ");
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 31 * 2]))[7 - i]);
+    printf("\n- R11: ");
     for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 17 * 2]))[7 - i]);
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 11 * 2]))[7 - i]);
     printf("\n- R5: ");
     for (uint8_t i = 0; i < 8; ++i)
       printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 5 * 2]))[7 - i]);
@@ -217,19 +217,24 @@ namespace RSP {
     printf("\n- R2: ");
     for (uint8_t i = 0; i < 8; ++i)
       printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 2 * 2]))[7 - i]);
-    printf("\n- R1: ");
+    printf("\n- R0: ");
     for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 1 * 2]))[7 - i]);
-    printf("\n- $3: %llx $2: %llx $19: %llx $13: %llx\n- de0: ",
-        reg_array[3], reg_array[2], reg_array[19], reg_array[13]);
+      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 0 * 2]))[7 - i]);
+    printf("\n- $14: %llx $13: %llx $8: %llx $2: %llx\n- ce0: ",
+        reg_array[14], reg_array[13], reg_array[8], reg_array[2]);
     for (uint8_t i = 0; i < 32; ++i)
-      printf("%llx ", read<uint8_t>(0xde0 + i));
-    printf("\n- 3e0: ");
+      printf("%llx ", read<uint8_t>(0xce0 + i));
+    printf("\n- 510: ");
     for (uint8_t i = 0; i < 16; ++i)
-      printf("%llx ", read<uint8_t>(0x3e0 + i));
-    printf("\n- 5f8: ");
+      printf("%llx ", read<uint8_t>(0x510 + i));
+    printf("\n- 470: ");
     for (uint8_t i = 0; i < 16; ++i)
-      printf("%llx ", read<uint8_t>(0x5f8 + i));
+      printf("%llx ", read<uint8_t>(0x470 + i));
+    /*for (uint32_t i = 0; i < 0x1000; i += 0x10) {
+      printf("\n- %x: ", i);
+      for (uint8_t j = 0; j < 16; ++j)
+        printf("%llx ", read<uint8_t>(i + j));
+    }*/
     printf("\n---\n");
   }
 
