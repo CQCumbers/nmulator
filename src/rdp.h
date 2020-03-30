@@ -42,6 +42,7 @@ typedef struct RDPTile {
 
 typedef struct GlobalData {
   uint32_t width, size;
+  //uint32_t zlut[0x88];
 } global_t;
 
 namespace RDP {
@@ -317,6 +318,23 @@ namespace Vulkan {
     // map memory so buffers can filled by cpu
     vkMapMemory(device, memory, 0, total_size, 0, reinterpret_cast<void**>(&mapped_mem));
     memset(tiles_ptr(), 0, tiles_size);
+
+    uint32_t *zbuf = reinterpret_cast<uint32_t*>(zbuf_ptr());
+    for (uint32_t i = 0; i < 320 * 240; ++i) zbuf[i] = 0x3ffff0;
+
+    /*zlut_t *zlut = Vulkan::globals_ptr().zlut;
+    for (uint8_t i = 0; i < 0x88; ++i) {
+      uint32_t &shl = zlut[i].shift;
+      uint32_t &exp = zlut[i].exponent;
+      if (i < 0x40) shl = 6, exp = 0;
+      else if (i < 0x60) shl = 5, exp = 1;
+      else if (i < 0x70) shl = 4, exp = 2;
+      else if (i < 0x78) shl = 3, exp = 3;
+      else if (i < 0x7c) shl = 2, exp = 4;
+      else if (i < 0x7e) shl = 1, exp = 5;
+      else if (i < 0x7f) shl = 0, exp = 6;
+      else if (i < 0x80) shl = 0, exp = 7;
+    }*/
   }
 
   /* === Runtime Methods === */
@@ -743,7 +761,7 @@ namespace RDP {
         case 0x3f: set_image(); break;
         case 0x29: R4300::set_irqs(0x20);
         case 0x26: case 0x27: case 0x28:
-          /*render();*/ Vulkan::add_tmem_copy(); pc += 8; break;
+          render(); Vulkan::add_tmem_copy(); pc += 8; break;
         default: invalid(); break;
       }
       if (pc > pc_end) pc = pc_end;

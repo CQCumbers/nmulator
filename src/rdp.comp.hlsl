@@ -36,12 +36,15 @@ struct GlobalData {
 #define M0_COPY     0x00200000
 #define M0_PERSP    0x00080000
 #define M0_TLUT_IA  0x00004000
+#define M1_ZMODE    0x00000c00
 #define M1_ZSRC     0x00000004
 #define T_ZBUF      0x01
 #define T_TEX       0x02
 #define T_SHADE     0x04
 #define T_RECT      0x08
 #define T_LMAJOR    0x10
+#define ZTRANS      0x00000800
+#define ZDECAL      0x00000c00
 
 [[vk::binding(0)]] StructuredBuffer<RDPCommand> cmds;
 [[vk::binding(1)]] StructuredBuffer<PerTileData> tiles;
@@ -218,7 +221,38 @@ uint sample_z(uint2 pos, RDPCommand cmd) {
   return 0x7fff;
 }
 
-/*uint visible(uint2 pos, RDPCommand cmd) {
+bool2 compare_z(inout uint z, uint2 pos, RDPCommand cmd) {
+  if (~cmd.type & T_ZBUF) return bool2(true);
+  // read old z, dz from zbuf
+  uint oz = z >> 4, odz = z & 0xf;
+  bool zmax = (oz == 0x3ffff);
+  // calculate new z from slopes
+  uint nz = (cmd.zprim >> 14) & ~0x3;
+  if (~cmd.modes[1] & M1_ZSRC) {
+    int x = pos.x << 16, dy = pos.y * 4 - cmd.yh;
+    int x1 = cmd.xh + cmd.sh * dy / 4;
+    nz = sadd(cmd.zpos, cmd.zde * dy / 4);
+    nz = uint(sadd(nz, mul16(cmd.zdx, x - x1))) >> 14;
+  }
+  uint ndz = firstbithigh(cmd.zprim & 0xffff);
+  z = ((nz < oz) ? (nz << 4) : z);
+  return bool2(true, nz >= oz);
+
+  // get new dz from prim_z
+  /*uint ndz = firstbithigh(cmd.zprim & 0xffff);
+  uint dz = 0x1 << max(ndz, odz);
+  uint mode = cmd.modes[1] & M1_ZMODE;
+  if (mode == ZTRANS || max_cvg) dz = 0;
+  // compare new z against old z
+  bool zle = nz < oz; //nz - dz <= oz;
+  bool zge = nz + dz >= oz;
+  //if (mode != ZDECAL) zle = zmax || zle;
+  //else zle = zge && zle && !zmax;
+  if (zle) zbuf.Store(idx, (nz << 4) | ndz);
+  return bool2(zle, zge);*/
+}
+
+uint visible(uint2 pos, RDPCommand cmd) {
   // check pixel within y bounds
   int y1 = max(cmd.yh, cmd.sci.yh);
   int y2 = min(cmd.yl, cmd.sci.yl);
@@ -247,9 +281,9 @@ uint sample_z(uint2 pos, RDPCommand cmd) {
   xb = min(xb, int4(cmd.sci.xl)) >> 14;
   int4 x = (pos.x << 2) + int4(0, 1, 0, 1);
   return dot(vy && xa < x && x < xb, int4(1));
-}*/
+}
 
-uint visible(uint2 pos, RDPCommand cmd) {
+/*uint visible(uint2 pos, RDPCommand cmd) {
   // convert to subpixels, check y bounds
   int x = (pos.x << 16) + 0x8000, y = pos.y << 2;
   int y1 = cmd.yh, y2 = cmd.yl;
@@ -263,7 +297,7 @@ uint visible(uint2 pos, RDPCommand cmd) {
   x1 &= 0xffff0000, x2 &= 0xffff0000;
   bool lft = cmd.type & T_LMAJOR;
   return lft ? (x1 <= x && x <= x2 + 0xffff) : (x2 <= x && x <= x1 + 0xffff);
-}
+}*/
 
 /*uint combine(RDPCommand cmd) {
   uint a, b, c, d;
@@ -355,12 +389,8 @@ uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   if (GlobalID.x >= global.width) return;
   uint tile_pos = GlobalID.y * global.width + GlobalID.x;
-
-  uint pixel = pixels.Load(tile_pos * global.size);
+  uint pixel = pixels.Load(tile_pos * global.size), zmem = zbuf.Load(tile_pos * 4);
   if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
-  //int zval = zbuf.Load(tile_pos * global.size);
-  //zval = (tile_pos & 0x1 ? zval >> 16 : zval) & 0x7fff; zval = (zval ^ 0x7fff);
-  int zval = 0x7fff;
 
   PerTileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < 2; ++i) {
@@ -371,29 +401,22 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       bitmask &= ~(0x1 << lsb);
 
       uint coverage = visible(GlobalID.xy, cmd);
-      uint color = sample_color(GlobalID.xy, cmd);
-      int z = sample_z(GlobalID.xy, cmd);
-      if (coverage == 0 || z > zval) continue;
-      pixel = blend(pixel, color, coverage, cmd);
-      if (cmd.type & T_ZBUF) zval = z;
+      bool2 depth = compare_z(zmem, GlobalID.xy, cmd);
+      if (coverage == 0 || !depth.x) continue;
+      //uint color = sample_color(GlobalID.xy, cmd);
+      pixel = zmem >> 4; //blend(pixel, color, coverage, cmd);
     }
   }
   //pixel = read_texel(texes[7], cmds[0], GlobalID.x << 5, GlobalID.y << 5);
   
-  zval = (zval >> 31) | (zval ^ 0x7fff);
-  if (tile_pos & 0x1) {
-    if (global.size == 2) {
-      pixels.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
-      pixels.InterlockedOr(tile_pos * global.size, write_rgba16(pixel) << 16);
-    } else pixels.Store(tile_pos * global.size, pixel);
-    //zbuf.InterlockedAnd(tile_pos * global.size, 0x0000ffff);
-    //zbuf.InterlockedOr(tile_pos * global.size, (zval & 0xffff) << 16);
-  } else {
-    if (global.size == 2) {
-      pixels.InterlockedAnd(tile_pos * global.size, 0xffff0000);
-      pixels.InterlockedOr(tile_pos * global.size, write_rgba16(pixel));
-    } else pixels.Store(tile_pos * global.size, pixel);
-    //zbuf.InterlockedAnd(tile_pos * global.size, 0xffff0000);
-    //zbuf.InterlockedOr(tile_pos * global.size, zval & 0xffff);
-  }
+  if (global.size == 2) {
+    if (tile_pos & 0x1) {
+      pixels.InterlockedAnd(tile_pos * 2, 0x0000ffff);
+      pixels.InterlockedOr(tile_pos * 2, write_rgba16(pixel) << 16);
+    } else {
+      pixels.InterlockedAnd(tile_pos * 2, 0xffff0000);
+      pixels.InterlockedOr(tile_pos * 2, write_rgba16(pixel));
+    }
+  } else pixels.Store(tile_pos * 4, pixel);
+  zbuf.Store(tile_pos * 4, zmem);
 }
