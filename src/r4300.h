@@ -7,6 +7,10 @@
 #include <sys/mman.h>
 #include <signal.h>
 
+namespace Debugger {
+  void update();
+};
+
 namespace R4300 {
   uint8_t *pages[0x100] = {nullptr};
   uint32_t tlb[0x20][4] = {{0x80000000}};
@@ -42,7 +46,9 @@ namespace R4300 {
 
   void set_irqs(uint32_t mask) {
     mi_irqs |= mask;
-    if (mi_irqs & mi_mask) cause |= 0x400;
+    if (mi_irqs & mi_mask) {
+      cause |= 0x400, cause &= ~0xff;
+    }
   }
 
   void unset_irqs(uint32_t mask) {
@@ -341,8 +347,9 @@ namespace R4300 {
       case 0x430000c:
         mi_mask &= ~_pext_u32(val, 0x555);
         mi_mask |= _pext_u32(val, 0xaaa);
-        if (mi_irqs & mi_mask) cause |= 0x400;
-        else cause &= ~0x400; return;
+        if (mi_irqs & mi_mask) {
+          cause |= 0x400, cause &= ~0xff;
+        } else cause &= ~0x400; return;
       // Video Interface
       case 0x4400000: 
         if (val == vi_status) return;
@@ -445,7 +452,7 @@ namespace R4300 {
   bool modified = false; Block *block = &empty;
 
   void timer_fire() {
-    cause |= 0x8000;
+    cause |= 0x8000, cause &= ~0xff;
   }
 
   void timer_update() {
@@ -488,7 +495,11 @@ namespace R4300 {
       bool run = block->valid;
       if (run) {
         pc = block->code();
-        //irqs_update();
+        if (broke) {
+          Debugger::update();
+          blocks.clear();
+          block->next_pc = 0;
+        }
         if (block->next_pc != pc)
           block->next_pc = pc, block->next = &blocks[pc & addr_mask];
         block = block->next;

@@ -33,18 +33,24 @@ struct GlobalData {
   uint width, size;
 };
 
-#define M0_COPY     0x00200000
-#define M0_PERSP    0x00080000
-#define M0_TLUT_IA  0x00004000
-#define M1_ZMODE    0x00000c00
-#define M1_ZSRC     0x00000004
-#define T_ZBUF      0x01
-#define T_TEX       0x02
-#define T_SHADE     0x04
-#define T_RECT      0x08
-#define T_LMAJOR    0x10
-#define ZTRANS      0x00000800
-#define ZDECAL      0x00000c00
+#define M0_COPY      0x00200000
+#define M0_PERSP     0x00080000
+#define M0_TLUT_IA   0x00004000
+#define M1_BLEND     0x00004000
+#define M1_CVG2ALPHA 0x00002000
+#define M1_ALPHA2CVG 0x00001000
+#define M1_ZMODE     0x00000c00
+#define ZTRANS       0x00000800
+#define ZDECAL       0x00000c00
+#define M1_ON_CVG    0x00000080
+#define M1_AA        0x00000008
+#define M1_ZSRC      0x00000004
+#define M1_ALPHA     0x00000001
+#define T_ZBUF       0x01
+#define T_TEX        0x02
+#define T_SHADE      0x04
+#define T_RECT       0x08
+#define T_LMAJOR     0x10
 
 [[vk::binding(0)]] StructuredBuffer<RDPCommand> cmds;
 [[vk::binding(1)]] StructuredBuffer<PerTileData> tiles;
@@ -164,7 +170,7 @@ int mul16(int a, int b) {
    return (a1 * b1 << 16) + a1 * b2 + a2 * b1;
 }
 
-int sample_color(uint2 pos, RDPCommand cmd) {
+int sample_color(uint2 pos, uint dx1, uint dy1, RDPCommand cmd) {
   if (cmd.type & T_TEX) {
     RDPTile tex = texes[(cmd.tmem << 3) | (cmd.tile & 0x7)]; uint s, t, w;
     int x = pos.x << 16, dy = (pos.y << 2) - cmd.yh;
@@ -176,9 +182,10 @@ int sample_color(uint2 pos, RDPCommand cmd) {
       t = cmd.tex[1] + (cmd.tde[1] * dy >> 2) >> 16;
     } else { // triangle
       int x1 = cmd.xh + (cmd.sh * dy >> 2), dx = (x - x1) >> 16;
-      s = cmd.tex[0] + (cmd.tde[0] * dy >> 2) + (cmd.tdx[0] * dx);
-      t = cmd.tex[1] + (cmd.tde[1] * dy >> 2) + (cmd.tdx[1] * dx);
-      w = cmd.tex[2] + (cmd.tde[2] * dy >> 2) + (cmd.tdx[2] * dx);
+      //int4 stwz = cmd.texel + cmd.tde * dy / 4 + cmd.tdx * dx / 4;
+      s = cmd.tex[0] + (cmd.tde[0] * dy / 4) + (cmd.tdx[0] * dx);
+      t = cmd.tex[1] + (cmd.tde[1] * dy / 4) + (cmd.tdx[1] * dx);
+      w = cmd.tex[2] + (cmd.tde[2] * dy / 4) + (cmd.tdx[2] * dx);
       s >>= 16, t >>= 16, w >>= 16;
       if (cmd.modes[0] & M0_PERSP) {
         s = (w ? int(32768.0 * float(s) / float(w)) : 0xffff);
@@ -192,6 +199,7 @@ int sample_color(uint2 pos, RDPCommand cmd) {
     int x = pos.x << 16, y = pos.y << 2;
     int dy = y - cmd.yh; uint color = 0x0;
     int x1 = cmd.xh + (cmd.sh * dy >> 2);
+    //int4 rgba = cmd.shade + cmd.sde * dy / 4 + cmd.tdx * dx / 4;
     // interpolate shading along major edge and line
     for (uint i = 0; i < 4; ++i) {
       uint chan = usadd(cmd.shade[i], cmd.sde[i] * (dy + 1) >> 2);
@@ -211,15 +219,6 @@ int sample_color(uint2 pos, RDPCommand cmd) {
   int z = sadd(cmd.zpos, cmd.zde * dy >> 2);
   return sadd(z, mul16(cmd.zdx, x - x1)) >> 16;
 }*/
-
-/*uint sample_color(uint2 pos, RDPCommand cmd) {
-  if (~cmd.type & T_RECT) return ~0x0;
-  return global.size == 4 ? cmd.fill : read_rgba16(cmd.fill);
-}*/
-
-uint sample_z(uint2 pos, RDPCommand cmd) {
-  return 0x7fff;
-}
 
 bool2 compare_z(inout uint z, uint2 pos, RDPCommand cmd) {
   if (~cmd.type & T_ZBUF) return bool2(true);
@@ -252,20 +251,11 @@ bool2 compare_z(inout uint z, uint2 pos, RDPCommand cmd) {
   return bool2(zle, zge);*/
 }
 
-uint visible(uint2 pos, RDPCommand cmd) {
+uint visible(uint2 pos, RDPCommand cmd, out int dx, out int dy) {
   // check pixel within y bounds
   int y1 = max(cmd.yh, cmd.sci.yh);
   int y2 = min(cmd.yl, cmd.sci.yl);
   if (!(y1 / 4 <= pos.y && pos.y <= y2 / 4)) return 0;
-
-  // compute rectangle x bounds
-  // should be subpixel accurate too?
-  if (cmd.type & T_RECT) {
-    int x1 = max(cmd.xh, cmd.sci.xh) >> 16;
-    int x2 = min(cmd.xl, cmd.sci.xl) >> 16;
-    return x1 <= pos.x && pos.x <= x2;
-  }
-
   // compute edges at each sub-scanline
   int4 y = pos.y * 4 + int4(0, 1, 2, 3);
   int4 x1 = cmd.xh + cmd.sh * (y - cmd.yh) / 4;
@@ -273,31 +263,16 @@ uint visible(uint2 pos, RDPCommand cmd) {
   int4 xl = cmd.xl + cmd.sl * (y - cmd.ym) / 4;
   int4 x2 = y < int4(cmd.ym) ? xm : xl;
   // compute valid sub-scanlines
-  bool lft = cmd.type & T_LMAJOR;
+  bool lft = cmd.type & (T_LMAJOR | T_RECT);
   int4 xa = (lft ? x1 : x2), xb = (lft ? x2 : x1);
   bool4 vy = (int4(y1) <= y && y < int4(y2) && xa < xb);
+  dx = (pos.x << 16) - x1.x, dy = pos.y * 4 - cmd.yh;
   // check x bounds at every other subpixel
   xa = max(xa, int4(cmd.sci.xh)) >> 14;
   xb = min(xb, int4(cmd.sci.xl)) >> 14;
-  int4 x = (pos.x << 2) + int4(0, 1, 0, 1);
+  int4 x = pos.x * 4 + int4(0, 1, 0, 1);
   return dot(vy && xa < x && x < xb, int4(1));
 }
-
-/*uint visible(uint2 pos, RDPCommand cmd) {
-  // convert to subpixels, check y bounds
-  int x = (pos.x << 16) + 0x8000, y = pos.y << 2;
-  int y1 = cmd.yh, y2 = cmd.yl;
-  if (y + 4 <= y1 || y >= y2 + 3) return 0;
-  if (cmd.type & T_RECT) return cmd.xh <= x && x <= cmd.xl;
-  // calculate x bounds from slopes
-  int dy = y + 1 - cmd.yh, x2 = 0;
-  int x1 = cmd.xh + (cmd.sh * dy >> 2);
-  if (y < cmd.ym) x2 = cmd.xm + (cmd.sm * dy >> 2);
-  else x2 = cmd.xl + (cmd.sl * (y - cmd.ym) >> 2);
-  x1 &= 0xffff0000, x2 &= 0xffff0000;
-  bool lft = cmd.type & T_LMAJOR;
-  return lft ? (x1 <= x && x <= x2 + 0xffff) : (x2 <= x && x <= x1 + 0xffff);
-}*/
 
 /*uint combine(RDPCommand cmd) {
   uint a, b, c, d;
@@ -344,45 +319,42 @@ uint visible(uint2 pos, RDPCommand cmd) {
   return output;
 }*/
 
-uint blend(uint pixel, uint color, uint coverage, RDPCommand cmd) {
-  uint a, p, b, m; uint mux = cmd.modes[1] >> 16;
-  uint m1a = (mux >> 14) & 0x3, m1b = (mux >> 10) & 0x3;
-  uint m2a = (mux >> 6) & 0x3, m2b = (mux >> 2) & 0x3;
-  if (cmd.modes[0] & M0_COPY) m1a = 0, m2a = 1, m1b = 0, m2b = 0;
-  // select p 
-  if (m1a == 0) p = color;
-  else if (m1a == 1) p = pixel;
-  else if (m1a == 2) p = cmd.blend;
-  else if (m1a == 3) p = cmd.fog;
-  // select m
-  if (m2a == 0) m = color;
-  else if (m2a == 1) m = pixel;
-  else if (m2a == 2) m = cmd.blend;
-  else if (m2a == 3) m = cmd.fog;
-  // select a
-  if (m1b == 0) a = (color >> 24) & 0xff;
-  else if (m1b == 1) a = (cmd.fog >> 24) & 0xff;
-  else if (m1b == 2) a = (color >> 24) & 0xff; // should be shade, from before CC?
-  else if (m1b == 3) a = 0x0;
-  // select b
-  if (m2b == 0) b = ~a & 0xff;
-  else if (m2b == 1) b = (pixel >> 24) & 0xff;
-  else if (m2b == 2) b = 0xff;
-  else if (m2b == 3) b = 0x00;
-  // blend selected colors
-  a >>= 3, b >>= 3;
-  bool color_on_cvg = (cmd.modes[1] >> 7) & 0x1;
-  bool force_blend = (cmd.modes[1] >> 14) & 0x1;
-  bool overflow = (color >> 24) == 0xff;
-  if (color_on_cvg || (overflow && !force_blend)) b = 0;
-  uint output = 0xff000000;
+uint sel(uint idx, uint4 inputs) {
+  switch (idx & 0x3) {
+    case 0: return inputs.x;
+    case 1: return inputs.y;
+    case 2: return inputs.z;
+    case 3: return inputs.w;
+  }
+}
+
+uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
+  // multiply 3-bit coverage and 5-bit alpha
+  uint mux = cmd.modes[1], alpha = color >> 27, ocvg = pixel >> 27;
+  if (mux & M1_ALPHA2CVG) cvg = (alpha * cvg + 4) >> 5;
+  if (mux & M1_CVG2ALPHA) alpha = cvg << 2;
+  if ((mux & M1_ALPHA) && alpha < (cmd.blend >> 27)) return pixel;
+  // select blender inputs
+  uint p = sel(mux >> 30, uint4(color, pixel, cmd.blend, cmd.fog));
+  uint a = sel(mux >> 26, uint4(alpha, cmd.fog >> 27, alpha, 0x0));
+  uint m = sel(mux >> 22, uint4(color, pixel, cmd.blend, cmd.fog));
+  uint b = sel(mux >> 18, uint4(a ^ 0x1f, pixel >> 27, 0x1f, 0x0)) + 1;
+  // skip inputs based on flags
+  bool copy = cmd.modes[0] & M0_COPY;
+  bool on_cvg = mux & M1_ON_CVG, force = mux & M1_BLEND;
+  bool full = cvg + ocvg > 7, aa = (mux & M1_AA) && far && !full;
+  if (copy || !(force || aa)) a = 1, b = ocvg = 0;
+  else if (on_cvg && !full) a = 0, b = 1;
+  // blend selected inputs
+  uint c1 = clamp(cvg + ocvg, 0, 7), c2 = (cvg + ocvg) & 7;
+  uint output = sel(mux >> 8, uint4(c1, c2, 0x7, ocvg)) << 27;
   for (uint i = 0; i < 3; ++i) {
     uint pc = (p >> (i * 8)) & 0xff;
     uint mc = (m >> (i * 8)) & 0xff;
     uint oc = (a * pc + b * mc) / (a + b);
     output |= min(oc, 0xff) << (i * 8);
   }
-  return output; //(output * coverage + pixel * (8 - coverage)) / 8;
+  return output;
 }
 
 [numthreads(8, 8, 1)]
@@ -400,11 +372,12 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       RDPCommand cmd = cmds[(i << 5) | lsb];
       bitmask &= ~(0x1 << lsb);
 
-      uint coverage = visible(GlobalID.xy, cmd);
-      bool2 depth = compare_z(zmem, GlobalID.xy, cmd);
-      if (coverage == 0 || !depth.x) continue;
-      //uint color = sample_color(GlobalID.xy, cmd);
-      pixel = zmem >> 4; //blend(pixel, color, coverage, cmd);
+      int dx = 0, dy = 0;
+      uint coverage = visible(GlobalID.xy, cmd, dx, dy);
+      //bool2 depth = compare_z(zmem, GlobalID.xy, cmd);
+      if (coverage == 0/* || !depth.x*/) continue;
+      uint color = sample_color(GlobalID.xy, dx, dy, cmd);
+      pixel = blend(pixel, color, coverage, true, cmd);
     }
   }
   //pixel = read_texel(texes[7], cmds[0], GlobalID.x << 5, GlobalID.y << 5);

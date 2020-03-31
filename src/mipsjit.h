@@ -73,7 +73,8 @@ struct MipsJit {
   };
 
   x86::Assembler as;
-  Label end_label;
+  Label end_label, exit_label, exc_label;
+  bool cop1_checked;
   static constexpr uint32_t block_end = 0x04ffffff;
 
   static constexpr bool is_rsp = (device == Device::rsp);
@@ -307,12 +308,12 @@ struct MipsJit {
     if (is_rsp) {
       if (!RSP::moved) { RSP::moved = true; return next_pc; }
       if (!RSP::step) return next_pc;
-      if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
+      if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
       return block_end;
     } else {
       if (!R4300::moved) { R4300::moved = true; return next_pc; }
       if (!R4300::breaks[pc] && !R4300::broke) return next_pc;
-      if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
+      if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
       R4300::broke = true; return block_end;
     }
   }
@@ -321,7 +322,7 @@ struct MipsJit {
     if (is_rsp || R4300::watch_w.empty() || pc == block_end) return;
     as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::broke));
     as.cmp(x86::dword_ptr(x86::rax), 1), as.mov(x86::ecx, pc);
-    as.cmove(x86::edi, x86::ecx), as.je(end_label);
+    as.cmove(x86::edi, x86::ecx), as.je(exit_label);
   }
 
   /* === Instruction Translations === */
@@ -2285,8 +2286,18 @@ struct MipsJit {
     return next_pc;
   }
 
+  void check_cop1(uint32_t pc) {
+    if (is_rsp || pc == block_end) return;
+    Label cont = as.newLabel();
+    as.bsr(x86::eax, x86_spill(12 + dev_cop0)), as.cmp(x86::eax, 29);
+    as.jae(cont), as.or_(x86_spill(13 + dev_cop0), 0x1000002c);
+    as.mov(x86_spill(14 + dev_cop0), pc - 4), as.jmp(exc_label);
+    as.bind(cont), cop1_checked = true;
+  }
+
   uint32_t cop1(uint32_t instr, uint32_t pc) {
     uint32_t next_pc = pc + 4;
+    if (!cop1_checked) check_cop1(pc);
     switch ((instr >> 24) & 0x3) {
       case 0x0: // COP1/0
         switch (rs(instr)) {
@@ -2412,7 +2423,9 @@ struct MipsJit {
     x86_load_all();
 
     uint32_t cycles = 0, pc = (is_rsp ? RSP::pc : R4300::pc);
-    end_label = as.newLabel(); uint32_t hpage = block_end;
+    end_label = as.newLabel(), exit_label = as.newLabel();
+    cop1_checked = false, exc_label = as.newLabel();
+    uint32_t hpage = block_end;
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = is_rsp ? RSP::fetch(pc) : R4300::fetch(pc);
       uint32_t pg = pc & hpage_mask;
@@ -2489,13 +2502,13 @@ struct MipsJit {
       as.and_(x86::eax, 0xff00); as.jz(cont_label);
       // set interrupt pc, status
       as.mov(x86_spill(14 + dev_cop0), x86::edi);
-      as.mov(x86::edi, 0x80000180);
+      as.bind(exc_label), as.mov(x86::edi, 0x80000180);
       as.or_(x86_spill(12 + dev_cop0), 0x2);
       as.bind(cont_label);
     }
 
     // check next_pc matches and block valid
-    Label exit_label = as.newLabel(), jump_label = as.newLabel();
+    Label jump_label = as.newLabel();
     constexpr uint8_t next = 8, npc = 16, ncycles = 20, valid = 24, hash = 28;
     as.mov(x86::rax, reinterpret_cast<uint64_t>(R4300::block));
     as.cmp(x86::edi, x86::dword_ptr(x86::rax, npc)); as.jne(exit_label);
@@ -2529,8 +2542,8 @@ struct MipsJit {
     as.mov(x86::qword_ptr(x86::rax), x86::rsi);
     as.mov(x86::rdx, x86::qword_ptr(x86::rsi));
     as.add(x86::rdx, 67); as.jmp(x86::rdx); // skip prologue
-    as.bind(exit_label);
 
+    as.bind(exit_label);
     x86_store_all(); as.pop(x86::rbp);
     as.mov(x86::eax, x86::edi); as.ret();
     return cycles;

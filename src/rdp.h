@@ -535,6 +535,7 @@ namespace RDP {
     tex_nibs = 0x1 << ((instr[0] >> 19) & 0x3);
     tex_width = (instr[0] & 0x3ff) + 1;
     tex_addr = instr[1] & 0x3ffffff;
+    printf("Set Texture Image: %x, width: %d\n", tex_addr, tex_width);
   }
 
   void set_tile() {
@@ -559,10 +560,12 @@ namespace RDP {
     th >>= 2, tl >>= 2, sh >>= 2, sl >>= 2;
     tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
+    printf("[RDP] Load Tile %d, %d, %d, %d to tmem %x\n", sl, tl, sh, th, tex.addr);
 
     uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
     uint32_t width = (sh - sl + 1) * tex_nibs / 2;
     uint32_t ram = tex_addr + offset;
+    printf("First RAM address %x: %x\n", ram, *(uint32_t*)(R4300::pages[0] + ram));
     for (uint32_t i = 0; i <= th - tl; ++i) {
       if (tex_nibs == 8) {
         for (uint32_t i = 0; i < width; i += 4) {
@@ -677,7 +680,7 @@ namespace RDP {
   template <bool flip>
   void tex_rectangle(cmd_t &cmd) {
     std::vector<uint32_t> instr = fetch(pc, 2);
-    //printf("%x %x\n", instr[0], instr[1]);
+    printf("%x %x\n", instr[0], instr[1]);
     cmd.tex[0] = (flip ? instr[0] & 0xffff : instr[0] >> 16) << 6;
     cmd.tex[1] = (flip ? instr[0] >> 16 : instr[0] & 0xffff << 6);
     cmd.tde[0] = (instr[1] & 0xffff) << 11, cmd.tdx[0] = (instr[1] >> 16) << 11;
@@ -687,10 +690,12 @@ namespace RDP {
 
   template <uint8_t type>
   void rectangle() {
-    //printf("[RDP] Rectangle of type %x\n", type);
+    printf("[RDP] Rectangle of type %x\n", type);
+    printf("TMEM 0: %x\n", *(uint32_t*)Vulkan::tmem_ptr());
     std::vector<uint32_t> instr = fetch(pc, 2);
-    //if (type & 0x2) printf("%x %x\n", instr[0], instr[1]);
+    if (type & 0x2) printf("%x %x\n", instr[0], instr[1]);
     cmd_t cmd = {
+      .type = type, .tile = (instr[1] >> 24) & 0x7,
       .xh = zext(instr[1] >> 12, 12) << 14, .yh = zext(instr[1], 12),
       .xl = zext(instr[0] >> 12, 12) << 14, .yl = zext(instr[0], 12),
 
@@ -699,7 +704,6 @@ namespace RDP {
       .cc_mux = cc_mux, .tlut = tlut,
       .sci = { sci.xh, sci.xl, sci.yh, sci.yl },
       .keys = { keys[0], keys[1], keys[2] },
-      .type = type, .tile = (instr[1] >> 24) & 0x7,
       .modes = { modes[0], modes[1] },
     };
     if (type == 0xa) tex_rectangle<false>(cmd);
@@ -761,7 +765,7 @@ namespace RDP {
         case 0x3f: set_image(); break;
         case 0x29: R4300::set_irqs(0x20);
         case 0x26: case 0x27: case 0x28:
-          render(); Vulkan::add_tmem_copy(); pc += 8; break;
+          /*render();*/ Vulkan::add_tmem_copy(); pc += 8; break;
         default: invalid(); break;
       }
       if (pc > pc_end) pc = pc_end;
