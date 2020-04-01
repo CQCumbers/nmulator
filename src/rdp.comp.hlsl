@@ -80,26 +80,25 @@ uint write_rgba16(uint input) {
 uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
   s >>= 5, t >>= 5; // convert 16.16 texture coords to texels
   uint ms = s & (1 << tex.mask[0]), mt = t & (1 << tex.mask[1]);
-  /*if (tex.shift[0] <= 10) { s >>= tex.shift[0]; } else { s <<= (16 - tex.shift[0]); }
-  if (tex.shift[1] <= 10) { t >>= tex.shift[1]; } else { t <<= (16 - tex.shift[1]); }*/
+  //if (tex.shift[0] <= 10) { s >>= tex.shift[0]; } else { s <<= (16 - tex.shift[0]); }
+  //if (tex.shift[1] <= 10) { t >>= tex.shift[1]; } else { t <<= (16 - tex.shift[1]); }
   if (tex.mask[0]) { s &= ((1 << tex.mask[0]) - 1); if (ms) s = ((1 << tex.mask[0]) - 1) - s; }
   if (tex.mask[1]) { t &= ((1 << tex.mask[1]) - 1); if (mt) t = ((1 << tex.mask[1]) - 1) - t; }
   
-  tex.addr = (tex.addr & 0xfff) | (cmd.tmem << 12);
+  tex.addr = (tex.addr & 0xfff) + (cmd.tmem << 12);
+  cmd.tlut = (cmd.tlut & 0xfff) + (cmd.tmem << 12);
   if (tex.format == 0 && tex.size == 2) {        // 16 bit RGBA
-    //if (s * 2 >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s * 2;
     uint texel = tmem.Load(tex_pos);
     return read_rgba16(s & 0x1 ? texel >> 16 : texel & 0xffff);
   } else if (tex.format == 0 && tex.size == 3) { // 32 bit RGBA
-    if (s * 2 >= tex.width) return 0;
-    uint tex_pos = min(tex.addr + t * tex.width + s * 2, 0x7ff);
+    uint tex_pos = tex.addr + t * tex.width + s * 2;
+    tex_pos = (tex.addr & ~0x7ff) | (tex_pos & 0x7ff);
     uint texel1 = tmem.Load(tex_pos + 0x800), texel2 = tmem.Load(tex_pos);
     texel1 = s & 0x1 ? texel1 & ~0xffff : texel1 << 16;
     texel2 = s & 0x1 ? texel2 >> 16 : texel2 & 0xffff;
     return texel1 | texel2;
   } else if (tex.format == 2 && tex.size == 1) { // 8 bit CI
-    if (s >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s;
     uint idx = (tmem.Load(tex_pos) >> ((s & 0x3) * 8)) & 0xff;
     uint texel = tmem.Load(cmd.tlut + idx * 2);
@@ -109,7 +108,6 @@ uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
       return (a << 24) | (i << 16) | (i << 8) | i;
     } else return read_rgba16(texel);
   } else if (tex.format == 2 && tex.size == 0) { // 4 bit CI
-    if (s / 2 >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s / 2;
     uint idx = tmem.Load(tex_pos) >> ((s & 0x6) * 4);
     idx = (s & 0x1 ? idx : idx >> 4) & 0xf;
@@ -120,31 +118,26 @@ uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
       return (a << 24) | (i << 16) | (i << 8) | i;
     } else return read_rgba16(texel);
   } else if (tex.format == 3 && tex.size == 2) { // 16 bit IA
-    if (s * 2 >= tex.width) return 0;
     uint texel = tmem.Load(tex.addr + t * tex.width + s * 2);
     texel = s & 0x1 ? texel >> 16 : texel & 0xffff;
     uint i = texel & 0xff, a = texel >> 8;
     return (a << 24) | (i << 16) | (i << 8) | i;
   } else if (tex.format == 3 && tex.size == 1) { // 8 bit IA
-    if (s >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s;
     uint texel = tmem.Load(tex_pos) >> ((s & 0x3) * 8);
     uint i = texel & 0xf0, a = (texel << 4) & 0xf0;
     return (a << 24) | (i << 16) | (i << 8) | i;
   } else if (tex.format == 3 && tex.size == 0) { // 4 bit IA
-    if (s / 2 >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s / 2;
     uint texel = tmem.Load(tex_pos) >> ((s & 0x6) * 4);
     texel = (s & 0x1 ? texel : texel >> 4) & 0xf;
     uint i = (texel & 0xe) << 4, a = (texel & 0x1) * 0xff;
     return (a << 24) | (i << 16) | (i << 8) | i;
   } else if (tex.format == 4 && tex.size == 1) { // 8 bit I
-    if (s >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s;
     uint i = (tmem.Load(tex_pos) >> ((s & 0x3) * 8)) & 0xff;
     return (i << 24) | (i << 16) | (i << 8) | i;
   } else if (tex.format == 4 && tex.size == 0) { // 4 bit I
-    if (s / 2 >= tex.width) return 0;
     uint tex_pos = tex.addr + t * tex.width + s / 2;
     uint texel = tmem.Load(tex_pos) >> ((s & 0x6) * 4);
     uint i = (s & 0x1 ? texel << 4 : texel) & 0xf0;
@@ -172,14 +165,14 @@ int mul16(int a, int b) {
 
 int sample_color(uint2 pos, uint dx1, uint dy1, RDPCommand cmd) {
   if (cmd.type & T_TEX) {
-    RDPTile tex = texes[(cmd.tmem << 3) | (cmd.tile & 0x7)]; uint s, t, w;
+    RDPTile tex = texes[cmd.tmem * 8 + (cmd.tile & 0x7)]; uint s, t, w;
     int x = pos.x << 16, dy = (pos.y << 2) - cmd.yh;
     if (cmd.modes[0] & M0_COPY) {
       s = cmd.tex[0] + ((x - cmd.xh) << 5) >> 16;
-      t = cmd.tex[1] + (cmd.tde[1] * dy >> 2) >> 16;
+      t = cmd.tex[1] + (cmd.tde[0] * dy >> 2) >> 16;
     } else if (cmd.type & T_RECT) {
-      s = cmd.tex[0] + mul16(cmd.tde[0], x - cmd.xh) >> 16;
-      t = cmd.tex[1] + (cmd.tde[1] * dy >> 2) >> 16;
+      s = cmd.tex[0] + mul16(cmd.tdx[0], x - cmd.xh) >> 16;
+      t = cmd.tex[1] + (cmd.tde[0] * dy >> 2) >> 16;
     } else { // triangle
       int x1 = cmd.xh + (cmd.sh * dy >> 2), dx = (x - x1) >> 16;
       //int4 stwz = cmd.texel + cmd.tde * dy / 4 + cmd.tdx * dx / 4;

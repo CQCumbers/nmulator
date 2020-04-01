@@ -57,9 +57,9 @@ namespace Vulkan {
   /* === Descriptor Memory Access === */
 
   uint8_t *mapped_mem;
-  const uint32_t group_size = 8, max_cmds = 2048, max_copies = 64;
+  const uint32_t group_size = 8, max_cmds = 2048, max_copies = 512;
   uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
-  uint32_t n_cmds = 0, n_tmems = 4;
+  uint32_t n_cmds = 0, n_tmems = 0;
 
   const VkDeviceSize cmds_size = max_cmds * sizeof(cmd_t);
   cmd_t *cmds_ptr() { return (cmd_t*)(mapped_mem); }
@@ -71,8 +71,8 @@ namespace Vulkan {
   VkBuffer tiles = VK_NULL_HANDLE;
 
   const VkDeviceSize texes_offset = tiles_offset + tiles_size;
-  const VkDeviceSize texes_size = ((max_copies + 1) * sizeof(tex_t)) << 3;
-  tex_t *texes_ptr() { return (tex_t*)(mapped_mem + texes_offset) + (n_tmems << 3); }
+  const VkDeviceSize texes_size = (max_copies + 1) * sizeof(tex_t) * 8;
+  tex_t *texes_ptr() { return (tex_t*)(mapped_mem + texes_offset) + n_tmems * 8; }
   VkBuffer texes = VK_NULL_HANDLE;
 
   const VkDeviceSize globals_offset = texes_offset + texes_size;
@@ -347,7 +347,7 @@ namespace Vulkan {
       RDP::render(), n_tmems = 0;
     }
     memcpy(tmem_ptr(), last_tmem, 0x1000);
-    memcpy(texes_ptr(), last_texes, (sizeof(tex_t) << 3));
+    memcpy(texes_ptr(), last_texes, sizeof(tex_t) * 8);
   }
 
   void run_commands() {
@@ -691,8 +691,8 @@ namespace RDP {
     printf("%x %x\n", instr[0], instr[1]);
     cmd.tex[0] = (flip ? instr[0] & 0xffff : instr[0] >> 16) << 6;
     cmd.tex[1] = (flip ? instr[0] >> 16 : instr[0] & 0xffff << 6);
-    cmd.tde[0] = (instr[1] & 0xffff) << 11, cmd.tdx[0] = (instr[1] >> 16) << 11;
-    cmd.tde[1] = (instr[1] & 0xffff) << 11, cmd.tdx[1] = (instr[1] >> 16) << 11;
+    cmd.tde[0] = (instr[1] & 0xffff) << 11;
+    cmd.tdx[0] = (instr[1] >> 16) << 11;
     cmd.tmem = Vulkan::n_tmems;
   }
 
