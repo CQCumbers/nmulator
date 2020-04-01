@@ -8,7 +8,7 @@
 #include "rdp.spv.array"
 
 typedef struct PerTileData {
-  uint32_t cmd_idxs[2];
+  uint32_t cmd_idxs[64];
 } tile_t;
 
 typedef struct Bounds {
@@ -57,7 +57,7 @@ namespace Vulkan {
   /* === Descriptor Memory Access === */
 
   uint8_t *mapped_mem;
-  const uint32_t group_size = 8, max_cmds = 64, max_copies = 64;
+  const uint32_t group_size = 8, max_cmds = 2048, max_copies = 64;
   uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0, n_tmems = 4;
 
@@ -340,10 +340,12 @@ namespace Vulkan {
   /* === Runtime Methods === */
 
   void add_tmem_copy() {
-    //RDP::render(); return;
     uint8_t *last_tmem = tmem_ptr();
     tex_t *last_texes = texes_ptr();
-    if (++n_tmems >= max_copies) RDP::render(), n_tmems = 0;
+    if (++n_tmems >= max_copies) {
+      printf("[RDP] max_copies reached\n");
+      RDP::render(), n_tmems = 0;
+    }
     memcpy(tmem_ptr(), last_tmem, 0x1000);
     memcpy(texes_ptr(), last_texes, (sizeof(tex_t) << 3));
   }
@@ -380,7 +382,10 @@ namespace Vulkan {
       }
     }
     cmds_ptr()[n_cmds++] = cmd;
-    if (n_cmds >= max_cmds) RDP::render();
+    if (n_cmds >= max_cmds) {
+      printf("[RDP] max_cmds exceeded\n");
+      RDP::render();
+    }
   }
 
   void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
@@ -554,6 +559,7 @@ namespace RDP {
   }
 
   void load_tile() {
+    Vulkan::add_tmem_copy();
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 12) & 0xfff, th = instr[1] & 0xfff;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
@@ -578,6 +584,7 @@ namespace RDP {
   }
 
   void load_block() {
+    Vulkan::add_tmem_copy();
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 12) & 0xfff/*, dxt = instr[1] & 0xfff*/;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
@@ -590,6 +597,7 @@ namespace RDP {
   }
 
   void load_tlut() {
+    Vulkan::add_tmem_copy();
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 14) & 0xff;
     uint32_t sl = (instr[0] >> 14) & 0xff;
@@ -674,7 +682,7 @@ namespace RDP {
     if (type & 0x4) shade_triangle(cmd);
     if (type & 0x2) tex_triangle(cmd);
     if (type & 0x1) zbuf_triangle(cmd);
-    Vulkan::add_rdp_cmd(cmd);
+    if (pc <= pc_end) Vulkan::add_rdp_cmd(cmd);
   }
 
   template <bool flip>
@@ -692,6 +700,7 @@ namespace RDP {
   void rectangle() {
     printf("[RDP] Rectangle of type %x\n", type);
     printf("TMEM 0: %x\n", *(uint32_t*)Vulkan::tmem_ptr());
+
     std::vector<uint32_t> instr = fetch(pc, 2);
     if (type & 0x2) printf("%x %x\n", instr[0], instr[1]);
     cmd_t cmd = {
@@ -708,7 +717,7 @@ namespace RDP {
     };
     if (type == 0xa) tex_rectangle<false>(cmd);
     if (type == 0xb) tex_rectangle<true>(cmd);
-    Vulkan::add_rdp_cmd(cmd);
+    if (pc <= pc_end) Vulkan::add_rdp_cmd(cmd);
   }
 
   void invalid() {
@@ -717,15 +726,20 @@ namespace RDP {
     //exit(1);
   }
 
+  uint64_t off = 0;
+
   void update() {
+    if (pc >= pc_end) return;
+    pc -= off, off = 0;
     // interpret config instructions 
     uint32_t cycles = 0;
     while (still_top(cycles)) {
-      /*std::vector<uint32_t> instr = fetch(pc, 4);
+      uint64_t start = pc;
+      std::vector<uint32_t> instr = fetch(pc, 4);
       printf("[RDP] Command %x %x\n", instr[0], instr[1]);
       pc -= 16;
-      if (instr[0] == 0xce0001d8  && instr[1] == 0x1d301d3
-        && instr[2] == 0x9ec000 && instr[3] == 0x1cccc)
+      /*if (instr[0] == 0xe43c02dc && instr[1] == 0x1442cc
+          && instr[2] == 0xe7000000 && instr[3] == 0x0)
         R4300::logging_on = RSP::step = true;
       if (instr[0] == 0xce0001f0 && instr[1] == 0x1f001dc
         && instr[2] == 0x9a8000 && instr[3] == 0x2afffd)
@@ -763,12 +777,11 @@ namespace RDP {
         case 0x3d: set_texture(); break;
         case 0x3e: set_zbuf(); break;
         case 0x3f: set_image(); break;
-        case 0x29: R4300::set_irqs(0x20);
-        case 0x26: case 0x27: case 0x28:
-          /*render();*/ Vulkan::add_tmem_copy(); pc += 8; break;
+        case 0x29: R4300::set_irqs(0x20); render();
+        case 0x26: case 0x27: case 0x28: pc += 8; break;
         default: invalid(); break;
       }
-      if (pc > pc_end) pc = pc_end;
+      if (pc > pc_end) pc = pc_end, off = pc_end - start;
       if (pc == pc_end) { status |= 0x80; return; }
       cycles = 1;
     }

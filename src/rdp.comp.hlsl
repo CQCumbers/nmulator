@@ -1,5 +1,5 @@
 struct PerTileData {
-  uint cmd_idxs[2];
+  uint cmd_idxs[64];
 };
 
 struct Bounds {
@@ -365,7 +365,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
 
   PerTileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
-  for (uint i = 0; i < 2; ++i) {
+  for (uint i = 0; i < 64; ++i) {
     uint bitmask = WaveActiveBitOr(tile.cmd_idxs[i]);
     while (bitmask != 0) {
       uint lsb = firstbitlow(bitmask);
