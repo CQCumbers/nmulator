@@ -395,6 +395,10 @@ namespace Vulkan {
     run_commands(); n_cmds = 0; memset(tiles_ptr(), 0, tiles_size);
     memcpy(pixels, pixels_ptr(), len);
     //if (zbuf) memcpy(zbuf, zbuf_ptr(), len);
+    
+    // periodically clear zbuffer
+    uint32_t *zbuf2 = reinterpret_cast<uint32_t*>(zbuf_ptr());
+    for (uint32_t i = 0; i < 320 * 240; ++i) zbuf2[i] = 0x3ffff0;
   }
 }
 

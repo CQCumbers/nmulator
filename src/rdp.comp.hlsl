@@ -43,6 +43,8 @@ struct GlobalData {
 #define ZTRANS       0x00000800
 #define ZDECAL       0x00000c00
 #define M1_ON_CVG    0x00000080
+#define M1_ZWRITE    0x00000020
+#define M1_ZCMP      0x00000010
 #define M1_AA        0x00000008
 #define M1_ZSRC      0x00000004
 #define M1_ALPHA     0x00000001
@@ -163,7 +165,7 @@ int mul16(int a, int b) {
    return (a1 * b1 << 16) + a1 * b2 + a2 * b1;
 }
 
-int sample_color(uint2 pos, uint dx1, uint dy1, RDPCommand cmd) {
+int sample_color(uint2 pos, int dx1, int dy1, RDPCommand cmd) {
   if (cmd.type & T_TEX) {
     RDPTile tex = texes[cmd.tmem * 8 + (cmd.tile & 0x7)]; uint s, t, w;
     int x = pos.x << 16, dy = (pos.y << 2) - cmd.yh;
@@ -204,46 +206,6 @@ int sample_color(uint2 pos, uint dx1, uint dy1, RDPCommand cmd) {
   return global.size == 4 ? cmd.fill : read_rgba16(cmd.fill);
 }
 
-/*uint sample_z(uint2 pos, RDPCommand cmd) {
-  if (~cmd.type & T_ZBUF) return 0x7fff;
-  if (cmd.modes[1] & M1_ZSRC) return cmd.zprim >> 16;
-  int x = pos.x << 16, dy = (pos.y << 2) - cmd.xyh[1];
-  int x1 = cmd.xyh[0] + (cmd.sh * dy >> 2);
-  int z = sadd(cmd.zpos, cmd.zde * dy >> 2);
-  return sadd(z, mul16(cmd.zdx, x - x1)) >> 16;
-}*/
-
-bool2 compare_z(inout uint z, uint2 pos, RDPCommand cmd) {
-  if (~cmd.type & T_ZBUF) return bool2(true);
-  // read old z, dz from zbuf
-  uint oz = z >> 4, odz = z & 0xf;
-  bool zmax = (oz == 0x3ffff);
-  // calculate new z from slopes
-  uint nz = (cmd.zprim >> 14) & ~0x3;
-  if (~cmd.modes[1] & M1_ZSRC) {
-    int x = pos.x << 16, dy = pos.y * 4 - cmd.yh;
-    int x1 = cmd.xh + cmd.sh * dy / 4;
-    nz = sadd(cmd.zpos, cmd.zde * dy / 4);
-    nz = uint(sadd(nz, mul16(cmd.zdx, x - x1))) >> 14;
-  }
-  uint ndz = firstbithigh(cmd.zprim & 0xffff);
-  z = ((nz < oz) ? (nz << 4) : z);
-  return bool2(true, nz >= oz);
-
-  // get new dz from prim_z
-  /*uint ndz = firstbithigh(cmd.zprim & 0xffff);
-  uint dz = 0x1 << max(ndz, odz);
-  uint mode = cmd.modes[1] & M1_ZMODE;
-  if (mode == ZTRANS || max_cvg) dz = 0;
-  // compare new z against old z
-  bool zle = nz < oz; //nz - dz <= oz;
-  bool zge = nz + dz >= oz;
-  //if (mode != ZDECAL) zle = zmax || zle;
-  //else zle = zge && zle && !zmax;
-  if (zle) zbuf.Store(idx, (nz << 4) | ndz);
-  return bool2(zle, zge);*/
-}
-
 uint visible(uint2 pos, RDPCommand cmd, out int dx, out int dy) {
   // check pixel within y bounds
   int y1 = max(cmd.yh, cmd.sci.yh);
@@ -265,6 +227,34 @@ uint visible(uint2 pos, RDPCommand cmd, out int dx, out int dy) {
   xb = min(xb, int4(cmd.sci.xl)) >> 14;
   int4 x = pos.x * 4 + int4(0, 1, 0, 1);
   return dot(vy && xa < x && x < xb, int4(1));
+}
+
+bool2 compare_z(inout uint zmem, uint cvg, int dx, int dy, RDPCommand cmd) {
+  // read old z, dz from zbuf
+  bool skip = (~cmd.type & T_ZBUF) || (~cmd.modes[1] & M1_ZCMP);
+  if (cvg == 0 || skip) return bool2(true);
+  int oz = zmem >> 4, odz = zmem & 0xf;
+  bool zmax = (oz == 0x3ffff);
+  // calculate new z from slopes
+  uint nz = (cmd.zprim >> 14) & 0x3fffc;
+  if (~cmd.modes[1] & M1_ZSRC) {
+    nz = sadd(cmd.zpos, cmd.zde * dy / 4);
+    nz = sadd(nz, mul16(cmd.zdx, dx)) >> 14;
+  }
+  // get new dz from prim_z
+  uint ndz = firstbithigh(max(cmd.zprim & 0xffff, 1));
+  uint dz = 0x1 << max(ndz, odz);
+  uint mode = cmd.modes[1] & M1_ZMODE;
+  if (mode == ZTRANS || cvg > 7) dz = 0;
+  // compare new z with old z
+  bool zle = int((nz - dz) << 14) <= int(oz << 14);
+  bool zge = int((nz + dz) << 14) >= int(oz << 14);
+  if (mode != ZDECAL) zle = zmax || zle;
+  else zle = zge && zle && !zmax;
+  // write new z/dz if closer
+  bool write = cmd.modes[1] & M1_ZWRITE;
+  if (zle && write) zmem = (nz << 4) | ndz;
+  return bool2(zle, zge);
 }
 
 /*uint combine(RDPCommand cmd) {
@@ -365,15 +355,14 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       RDPCommand cmd = cmds[(i << 5) | lsb];
       bitmask &= ~(0x1 << lsb);
 
-      int dx = 0, dy = 0;
-      uint coverage = visible(GlobalID.xy, cmd, dx, dy);
-      //bool2 depth = compare_z(zmem, GlobalID.xy, cmd);
-      if (coverage == 0/* || !depth.x*/) continue;
+      int dx, dy;
+      uint cvg = visible(GlobalID.xy, cmd, dx, dy);
+      bool2 depth = compare_z(zmem, cvg, dx, dy, cmd);
+      if (cvg == 0 || !depth.x) continue;
       uint color = sample_color(GlobalID.xy, dx, dy, cmd);
-      pixel = blend(pixel, color, coverage, true, cmd);
+      pixel = blend(pixel, color, cvg, true, cmd);
     }
   }
-  //pixel = read_texel(texes[7], cmds[0], GlobalID.x << 5, GlobalID.y << 5);
   
   if (global.size == 2) {
     if (tile_pos & 0x1) {
