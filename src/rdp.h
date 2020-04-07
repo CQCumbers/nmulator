@@ -7,18 +7,31 @@
 #include "scheduler.h"
 #include "shader.spv"
 
-typedef struct PerTileData {
-  uint32_t cmd_idxs[64];
-} tile_t;
-
-typedef struct Bounds {
-  int32_t xh, xl, yh, yl;
-} bounds_t;
+/* === Shader Structs === */
 
 // all coeffs are 16.16 fixed point
 // except yh/yl/ym, which is 12.2
-typedef struct RDPCommand {
-  uint32_t type, tile;
+
+struct TileData {
+  uint32_t cmd_idxs[64];
+};
+
+struct GlobalData {
+  uint32_t width, size;
+  uint32_t n_cmds, pad;
+};
+
+struct RDPState {
+  int32_t sxh, sxl, syh, syl;
+  uint32_t modes[2], mux[2];
+  uint32_t tlut, tmem, texes;
+  uint32_t fill, fog, blend;
+  uint32_t env, prim, zprim;
+  uint32_t keys[3];
+};
+
+struct RDPCommand {
+  uint32_t type, tile, pad;
   int32_t xh, xm, xl;
   int32_t yh, ym, yl;
   int32_t sh, sm, sl;
@@ -26,24 +39,16 @@ typedef struct RDPCommand {
   int32_t shade[4], sde[4], sdx[4];
   int32_t tex[3], tde[3], tdx[3];
   int32_t zpos, zde, zdx;
+  RDPState state;
+};
 
-  uint32_t fill, fog, blend;
-  uint32_t env, prim, zprim;
-  uint32_t cc_mux, tlut, tmem;
-  uint32_t keys[3], modes[2];
-  bounds_t sci;
-} cmd_t;
-
-typedef struct RDPTile {
+struct RDPTex {
   uint32_t format, size;
   uint32_t width, addr, pal;
   uint32_t mask[2], shift[2];
-} tex_t;
+};
 
-typedef struct GlobalData {
-  uint32_t width, size;
-  //uint32_t zlut[0x88];
-} global_t;
+/* === Vulkan Setup === */
 
 namespace RDP {
   void render();
@@ -61,23 +66,23 @@ namespace Vulkan {
   uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0, n_tmems = 0;
 
-  const VkDeviceSize cmds_size = max_cmds * sizeof(cmd_t);
-  cmd_t *cmds_ptr() { return (cmd_t*)(mapped_mem); }
+  const VkDeviceSize cmds_size = max_cmds * sizeof(RDPCommand);
+  RDPCommand *cmds_ptr() { return (RDPCommand*)(mapped_mem); }
   VkBuffer cmds = VK_NULL_HANDLE;
 
   const VkDeviceSize tiles_offset = cmds_size;
-  const VkDeviceSize tiles_size = gwidth * gheight * sizeof(tile_t);
-  tile_t *tiles_ptr() { return (tile_t*)(mapped_mem + tiles_offset); }
+  const VkDeviceSize tiles_size = gwidth * gheight * sizeof(TileData);
+  TileData *tiles_ptr() { return (TileData*)(mapped_mem + tiles_offset); }
   VkBuffer tiles = VK_NULL_HANDLE;
 
   const VkDeviceSize texes_offset = tiles_offset + tiles_size;
-  const VkDeviceSize texes_size = (max_copies + 1) * sizeof(tex_t) * 8;
-  tex_t *texes_ptr() { return (tex_t*)(mapped_mem + texes_offset) + n_tmems * 8; }
+  const VkDeviceSize texes_size = (max_copies + 1) * sizeof(RDPTex) * 8;
+  RDPTex *texes_ptr() { return (RDPTex*)(mapped_mem + texes_offset) + n_tmems * 8; }
   VkBuffer texes = VK_NULL_HANDLE;
 
   const VkDeviceSize globals_offset = texes_offset + texes_size;
-  const VkDeviceSize globals_size = sizeof(global_t);
-  global_t *globals_ptr() { return (global_t*)(mapped_mem + globals_offset); }
+  const VkDeviceSize globals_size = sizeof(GlobalData);
+  GlobalData *globals_ptr() { return (GlobalData*)(mapped_mem + globals_offset); }
   VkBuffer globals = VK_NULL_HANDLE;
 
   const VkDeviceSize tmem_offset = globals_offset + globals_size;
@@ -338,15 +343,16 @@ namespace Vulkan {
 
   /* === Runtime Methods === */
 
-  void add_tmem_copy() {
+  void add_tmem_copy(RDPState &state) {
     uint8_t *last_tmem = tmem_ptr();
-    tex_t *last_texes = texes_ptr();
+    RDPTex *last_texes = texes_ptr();
     if (++n_tmems >= max_copies) {
       printf("[RDP] max_copies reached\n");
       RDP::render(), n_tmems = 0;
     }
     memcpy(tmem_ptr(), last_tmem, 0x1000);
-    memcpy(texes_ptr(), last_texes, sizeof(tex_t) * 8);
+    memcpy(texes_ptr(), last_texes, sizeof(RDPTex) * 8);
+    state.tmem = n_tmems;
   }
 
   void run_commands() {
@@ -360,24 +366,13 @@ namespace Vulkan {
     vkQueueWaitIdle(queue);
   }
 
-  void add_rdp_cmd(cmd_t cmd) {
+  void add_rdp_cmd(RDPCommand cmd) {
     uint32_t yh = (cmd.yh < 0 ? 0 : cmd.yh / (group_size << 2));
     uint32_t yl = (cmd.yl < 0 ? 0 : cmd.yl / (group_size << 2));
-
-    /*uint32_t xh = cmd.xyh[0] + (cmd.sh * (cmd.xyl[1] - cmd.xyh[1]) >> 2);
-    xh = (xh < 0 ? 0 : xh / (group_size << 16));
-    uint32_t xl = (cmd.xyl[0] < 0 ? 0 : cmd.xyl[0] / (group_size << 16));
-    uint32_t x1 = (cmd.lft ? xl : xh), x2 = (cmd.lft ? xh : xl);
-    if (cmd.type & 0x8) {
-      x1 = cmd.xyh[0] >> 2, x2 = cmd.xyl[0] >> 2;
-    }*/
-    uint32_t x1 = 0, x2 = gwidth + 1;
-
     for (uint32_t i = yh; i <= yl && i < gheight; ++i) {
-      for (uint32_t j = x1; j <= x2 && j < gwidth; ++j) {
-        tile_t *tile = tiles_ptr() + i * gwidth + j;
+      for (uint32_t j = 0; j < gwidth; ++j) {
+        TileData *tile = tiles_ptr() + i * gwidth + j;
         tile->cmd_idxs[n_cmds >> 5] |= 0x1 << (n_cmds & 0x1f);
-        //printf("cmd_idxs: %x\n", tile->cmd_idxs[0]);
       }
     }
     cmds_ptr()[n_cmds++] = cmd;
@@ -389,17 +384,18 @@ namespace Vulkan {
 
   void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
     if (!pixels || n_cmds == 0) return;
+    globals_ptr()->n_cmds = n_cmds;
     memcpy(pixels_ptr(), pixels, len);
-    //if (zbuf) memcpy(zbuf_ptr(), zbuf, len);
     run_commands(); n_cmds = 0; memset(tiles_ptr(), 0, tiles_size);
     memcpy(pixels, pixels_ptr(), len);
-    //if (zbuf) memcpy(zbuf, zbuf_ptr(), len);
     
     // periodically clear zbuffer
     uint32_t *zbuf2 = reinterpret_cast<uint32_t*>(zbuf_ptr());
     for (uint32_t i = 0; i < 320 * 240; ++i) zbuf2[i] = 0x3ffff0;
   }
 }
+
+/* === RDP Interface === */
 
 namespace RSP {
   extern uint64_t reg_array[0x100];
@@ -421,17 +417,14 @@ namespace RDP {
   uint64_t *rsp_cop0 = RSP::reg_array + RSP::dev_cop0;
   uint64_t &pc_start = rsp_cop0[8], &pc_end = rsp_cop0[9];
   uint64_t &pc = rsp_cop0[10], &status = rsp_cop0[11];
+  uint64_t offset;
 
-  uint32_t img_size = 0x0, img_width = 0, height = 240;
-  uint8_t *img_addr = nullptr, *zbuf_addr = nullptr;
-  uint32_t tex_nibs = 0x0, tex_width = 0, tex_addr = 0x0;
-  //bool tile_dirty[8] = {false};
+  uint32_t img_size, img_width, height;
+  uint8_t *img_addr, *zbuf_addr;
+  uint32_t tex_nibs, tex_width, tex_addr;
+  RDPState state;
 
-  uint32_t fill = 0x0, fog = 0x0, blend = 0x0;
-  uint32_t env = 0x0, prim = 0x0, zprim = 0x0;
-  uint32_t cc_mux = 0x0, tlut = 0x0;
-  uint32_t keys[3] = {0}, modes[2] = {0};
-  bounds_t sci;
+  /* === Helper Functions === */
 
   inline int32_t sext(uint32_t val, uint32_t bits=32) {
     if (bits >= 32) return val;
@@ -468,60 +461,56 @@ namespace RDP {
   /* === Instruction Translations === */
 
   void set_image() {
-    //render();
     std::vector<uint32_t> instr = fetch(pc, 2);
     img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
     img_width = (instr[0] & 0x3ff) + 1;
     img_addr = R4300::pages[0] + (instr[1] & 0x3ffffff);
 
-    global_t *globals = Vulkan::globals_ptr();
+    GlobalData *globals = Vulkan::globals_ptr();
     globals->width = img_width, globals->size = img_size;
     Vulkan::gwidth = img_width / Vulkan::group_size;
   }
 
   void set_scissor() {
     std::vector<uint32_t> instr = fetch(pc, 2);
-    sci.xh = zext(instr[0] >> 12, 12) << 14, sci.yh = zext(instr[0], 12);
-    sci.xl = zext(instr[1] >> 12, 12) << 14, sci.yl = sext(instr[1], 12);
-    height = (sci.yl >> 2) - (sci.yh >> 2);
-    //uint32_t yh = instr[0] & 0xfff, yl = instr[1] & 0xfff;
-    //height = (yl >> 2) - (yh >> 2);
+    state.sxh = zext(instr[0] >> 12, 12) << 14, state.syh = zext(instr[0], 12);
+    state.sxl = zext(instr[1] >> 12, 12) << 14, state.syl = sext(instr[1], 12);
+    height = (state.syl >> 2) - (state.syh >> 2);
     Vulkan::gheight = height / Vulkan::group_size;
   }
 
   void set_other_modes() {
     std::vector<uint32_t> instr = fetch(pc, 2);
-    modes[0] = instr[0], modes[1] = instr[1];
+    memcpy(state.modes, instr.data(), 8);
   }
 
   void set_fill() {
-    fill = __builtin_bswap32(fetch(pc, 2)[1]);
+    state.fill = __builtin_bswap32(fetch(pc, 2)[1]);
   }
 
   void set_fog() {
-    fog = __builtin_bswap32(fetch(pc, 2)[1]);
+    state.fog = __builtin_bswap32(fetch(pc, 2)[1]);
   }
 
   void set_blend() {
-    blend = __builtin_bswap32(fetch(pc, 2)[1]);
+    state.blend = __builtin_bswap32(fetch(pc, 2)[1]);
   }
 
   void set_combine() {
     std::vector<uint32_t> instr = fetch(pc, 2);
-    cc_mux = ((instr[0] >> 31) & 0x7fff) << 16;
-    cc_mux |= (instr[1] >> 9) & 0x1ff;
+    memcpy(state.mux, instr.data(), 8);
   }
 
   void set_env() {
-    env = __builtin_bswap32(fetch(pc, 2)[1]);
+    state.env = __builtin_bswap32(fetch(pc, 2)[1]);
   }
 
   void set_prim() {
-    prim = __builtin_bswap32(fetch(pc, 2)[1]);
+    state.prim = __builtin_bswap32(fetch(pc, 2)[1]);
   }
 
   void set_zprim() {
-    zprim = fetch(pc, 2)[1];
+    state.zprim = fetch(pc, 2)[1];
   }
 
   void set_zbuf() {
@@ -529,13 +518,13 @@ namespace RDP {
   }
 
   void set_key_r() {
-    keys[0] = __builtin_bswap32(fetch(pc, 2)[1]);
+    state.keys[0] = __builtin_bswap32(fetch(pc, 2)[1]);
   }
 
   void set_key_gb() {
     std::vector<uint32_t> instr = fetch(pc, 2);
-    keys[2] = (instr[1] & 0xffff) | ((instr[0] & 0xfff) << 16);
-    keys[1] = (instr[1] >> 16) | ((instr[0] & 0xfff000) >> 4);
+    state.keys[2] = (instr[1] & 0xffff) | ((instr[0] & 0xfff) << 16);
+    state.keys[1] = (instr[1] >> 16) | ((instr[0] & 0xfff000) >> 4);
   }
 
   void set_texture() {
@@ -547,11 +536,9 @@ namespace RDP {
   }
 
   void set_tile() {
-    Vulkan::add_tmem_copy();
+    Vulkan::add_tmem_copy(state);
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint8_t tex_idx = (instr[1] >> 24) & 0x7;
-    //if (tile_dirty[tex_idx]) render();
-    //else tile_dirty[tex_idx] = true;
     Vulkan::texes_ptr()[tex_idx] = {
       .format = (instr[0] >> 21) & 0x7, .size = (instr[0] >> 19) & 0x3,
       .width = ((instr[0] >> 9) & 0xff) << 3,
@@ -562,12 +549,12 @@ namespace RDP {
   }
 
   void load_tile() {
-    Vulkan::add_tmem_copy();
+    Vulkan::add_tmem_copy(state);
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 12) & 0xfff, th = instr[1] & 0xfff;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
     th >>= 2, tl >>= 2, sh >>= 2, sl >>= 2;
-    tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+    RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
     printf("[RDP] Load Tile %d, %d, %d, %d to tmem %x\n", sl, tl, sh, th, tex.addr);
 
@@ -587,11 +574,11 @@ namespace RDP {
   }
 
   void load_block() {
-    Vulkan::add_tmem_copy();
+    Vulkan::add_tmem_copy(state);
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 12) & 0xfff/*, dxt = instr[1] & 0xfff*/;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
-    tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+    RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
 
     uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
@@ -600,22 +587,20 @@ namespace RDP {
   }
 
   void load_tlut() {
-    Vulkan::add_tmem_copy();
+    Vulkan::add_tmem_copy(state);
     std::vector<uint32_t> instr = fetch(pc, 2);
     uint32_t sh = (instr[1] >> 14) & 0xff;
     uint32_t sl = (instr[0] >> 14) & 0xff;
-    tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
-    uint8_t *mem = Vulkan::tmem_ptr() + (tlut = tex.addr);
+    RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+    uint8_t *mem = Vulkan::tmem_ptr() + (state.tlut = tex.addr);
 
     uint32_t ram = tex_addr + sl * tex_nibs / 2;
     uint32_t width = (sh - sl + 1) * tex_nibs / 2;
     memcpy(mem, R4300::pages[0] + ram, width);
   }
 
-  void shade_triangle(cmd_t &cmd) {
+  void shade_triangle(RDPCommand &cmd) {
     std::vector<uint32_t> instr = fetch(pc, 16);
-    for (uint8_t i = 0; i < 16; i += 2)
-      printf("%x %x\n", instr[i], instr[i + 1]);
     cmd.shade[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
     cmd.shade[1] = (instr[0] << 16) | (instr[4] & 0xffff);
     cmd.shade[2] = (instr[1] & 0xffff0000) | (instr[5] >> 16);
@@ -630,10 +615,8 @@ namespace RDP {
     cmd.sdx[3] = (instr[3] << 16) | (instr[7] & 0xffff);
   }
 
-  void tex_triangle(cmd_t &cmd) {
+  void tex_triangle(RDPCommand &cmd) {
     std::vector<uint32_t> instr = fetch(pc, 16);
-    for (uint8_t i = 0; i < 16; i += 2)
-      printf("%x %x\n", instr[i], instr[i + 1]);
     cmd.tex[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
     cmd.tex[1] = (instr[0] << 16) | (instr[4] & 0xffff);
     cmd.tex[2] = (instr[1] & 0xffff0000) | (instr[5] >> 16);
@@ -643,10 +626,9 @@ namespace RDP {
     cmd.tdx[0] = (instr[2] & 0xffff0000) | (instr[6] >> 16);
     cmd.tdx[1] = (instr[2] << 16) | (instr[6] & 0xffff);
     cmd.tdx[2] = (instr[3] & 0xffff0000) | (instr[7] >> 16);
-    cmd.tmem = Vulkan::n_tmems;
   }
 
-  void zbuf_triangle(cmd_t &cmd) {
+  void zbuf_triangle(RDPCommand &cmd) {
     std::vector<uint32_t> instr = fetch(pc, 4);
     for (uint8_t i = 0; i < 4; i += 2)
       printf("%x %x\n", instr[i], instr[i + 1]);
@@ -658,30 +640,15 @@ namespace RDP {
   void triangle() {
     printf("[RDP] Triangle of type %x\n", type);
     std::vector<uint32_t> instr = fetch(pc, 8);
-    for (uint8_t i = 0; i < 8; i += 2)
-      printf("%x %x\n", instr[i], instr[i + 1]);
-
-    /*if (R4300::logging_on)
-      printf("Ending triangle hit\n"), exit(0);
-    if (instr[0] == 0xce0001d8  && instr[1] == 0x1d301d3
-      && instr[2] == 0x9ec000 && instr[3] == 0x1cccc)
-      R4300::logging_on = RSP::step = true;*/
-
     uint32_t t = type | ((instr[0] >> 19) & 0x10);
-    cmd_t cmd = {
+    RDPCommand cmd = {
       .type = t, .tile = (instr[0] >> 16) & 0x7,
       .xh = sext(instr[4], 30), .yh = sext(instr[1], 14),
       .xm = sext(instr[6], 30), .ym = sext(instr[1] >> 16, 14),
       .xl = sext(instr[2], 30), .yl = sext(instr[0], 14),
       .sh = sext(instr[5]), .sm = sext(instr[7]), .sl = sext(instr[3]),
-
-      .fill = fill, .fog = fog, .blend = blend,
-      .env = env, .prim = prim, .zprim = zprim,
-      .cc_mux = cc_mux, .tlut = tlut,
-      .sci = { sci.xh, sci.xl, sci.yh, sci.yl },
-      .keys = { keys[0], keys[1], keys[2] },
-      .modes = { modes[0], modes[1] },
     };
+    cmd.state = state;
     if (type & 0x4) shade_triangle(cmd);
     if (type & 0x2) tex_triangle(cmd);
     if (type & 0x1) zbuf_triangle(cmd);
@@ -689,35 +656,24 @@ namespace RDP {
   }
 
   template <bool flip>
-  void tex_rectangle(cmd_t &cmd) {
+  void tex_rectangle(RDPCommand &cmd) {
     std::vector<uint32_t> instr = fetch(pc, 2);
-    printf("%x %x\n", instr[0], instr[1]);
     cmd.tex[0] = (flip ? instr[0] & 0xffff : instr[0] >> 16) << 6;
     cmd.tex[1] = (flip ? instr[0] >> 16 : instr[0] & 0xffff << 6);
     cmd.tde[0] = (instr[1] & 0xffff) << 11;
     cmd.tdx[0] = (instr[1] >> 16) << 11;
-    cmd.tmem = Vulkan::n_tmems;
   }
 
   template <uint8_t type>
   void rectangle() {
     printf("[RDP] Rectangle of type %x\n", type);
-    printf("TMEM 0: %x\n", *(uint32_t*)Vulkan::tmem_ptr());
-
     std::vector<uint32_t> instr = fetch(pc, 2);
-    if (type & 0x2) printf("%x %x\n", instr[0], instr[1]);
-    cmd_t cmd = {
+    RDPCommand cmd = {
       .type = type, .tile = (instr[1] >> 24) & 0x7,
       .xh = zext(instr[1] >> 12, 12) << 14, .yh = zext(instr[1], 12),
       .xl = zext(instr[0] >> 12, 12) << 14, .yl = zext(instr[0], 12),
-
-      .fill = fill, .fog = fog, .blend = blend,
-      .env = env, .prim = prim, .zprim = zprim,
-      .cc_mux = cc_mux, .tlut = tlut,
-      .sci = { sci.xh, sci.xl, sci.yh, sci.yl },
-      .keys = { keys[0], keys[1], keys[2] },
-      .modes = { modes[0], modes[1] },
     };
+    cmd.state = state;
     if (type == 0xa) tex_rectangle<false>(cmd);
     if (type == 0xb) tex_rectangle<true>(cmd);
     if (pc <= pc_end) Vulkan::add_rdp_cmd(cmd);
@@ -729,24 +685,13 @@ namespace RDP {
     //exit(1);
   }
 
-  uint64_t off = 0;
-
   void update() {
     if (pc >= pc_end) return;
-    pc -= off, off = 0;
+    pc -= offset, offset = 0;
     // interpret config instructions 
     uint32_t cycles = 0;
     while (still_top(cycles)) {
       uint64_t start = pc;
-      std::vector<uint32_t> instr = fetch(pc, 4);
-      printf("[RDP] Command %x %x\n", instr[0], instr[1]);
-      pc -= 16;
-      /*if (instr[0] == 0xe43c02dc && instr[1] == 0x1442cc
-          && instr[2] == 0xe7000000 && instr[3] == 0x0)
-        R4300::logging_on = RSP::step = true;
-      if (instr[0] == 0xce0001f0 && instr[1] == 0x1f001dc
-        && instr[2] == 0x9a8000 && instr[3] == 0x2afffd)
-        printf("Ending triangle hit\n"), exit(0);*/
       switch (opcode(pc)) {
         case 0x00: pc += 8; break;
         case 0x08: triangle<0x0>(); break;
@@ -784,7 +729,7 @@ namespace RDP {
         case 0x26: case 0x27: case 0x28: pc += 8; break;
         default: invalid(); break;
       }
-      if (pc > pc_end) pc = pc_end, off = pc_end - start;
+      if (pc > pc_end) pc = pc_end, offset = pc_end - start;
       if (pc == pc_end) { status |= 0x80; return; }
       cycles = 1;
     }
