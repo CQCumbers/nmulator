@@ -5,7 +5,7 @@
 #include <vector>
 #include <cstring>
 #include "scheduler.h"
-#include "rdp.spv.array"
+#include "shader.spv"
 
 typedef struct PerTileData {
   uint32_t cmd_idxs[64];
@@ -132,12 +132,12 @@ namespace Vulkan {
   void init_pipeline(const uint32_t *code, uint32_t code_size,
       VkDescriptorSetLayout *desc_layout, VkPipelineLayout *layout, VkPipeline *pipeline) {
     // load shader code into module
-    const VkShaderModuleCreateInfo shader_info = {
+    const VkShaderModuleCreateInfo module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
       .codeSize = code_size, .pCode = code
     };
-    VkShaderModule shader = VK_NULL_HANDLE;
-    vkCreateShaderModule(device, &shader_info, 0, &shader);
+    VkShaderModule module_ = VK_NULL_HANDLE;
+    vkCreateShaderModule(device, &module_info, 0, &module_);
     // describe needed descriptor set layout for shader
     const VkDescriptorSetLayoutBinding bindings[] = {
       {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
@@ -162,7 +162,7 @@ namespace Vulkan {
     const VkPipelineShaderStageCreateInfo stage_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
       .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = shader, .pName = "main"
+      .module = module_, .pName = "main"
     };
     const VkComputePipelineCreateInfo pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -309,8 +309,7 @@ namespace Vulkan {
     VkDeviceMemory memory = VK_NULL_HANDLE;
 
     // use structured bindings instead of output params?
-    const uint32_t *code = reinterpret_cast<const uint32_t*>(rdp_spv);
-    init_pipeline(code, rdp_spv_len, &desc_layout, &layout, &pipeline);
+    init_pipeline(shader, sizeof(shader), &desc_layout, &layout, &pipeline);
     init_buffers(gpu, &memory);
     init_descriptors(desc_layout, &descriptors);
     record_commands(layout, pipeline, descriptors);

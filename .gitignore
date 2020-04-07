@@ -10,6 +10,7 @@ nmulator
 *.pch
 *.dylib
 *.so
+*.spv
 
 # for personal usage
 .DS_Store
