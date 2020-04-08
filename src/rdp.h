@@ -2,6 +2,7 @@
 #define RDP_H
 
 #include <vulkan/vulkan.h>
+#include <array>
 #include <vector>
 #include <cstring>
 #include "scheduler.h"
@@ -452,8 +453,9 @@ namespace RDP {
     return (out >> 24) & 0x3f;
   }
 
-  std::vector<uint32_t> fetch(uint64_t &addr, uint8_t len) {
-    std::vector<uint32_t> out(len);
+  template <uint8_t len>
+  std::array<uint32_t, len> fetch(uint64_t &addr) {
+    std::array<uint32_t, len> out;
     for (uint8_t i = 0; i < len; ++i, addr += 4) {
       if (status & 0x1) out[i] = RSP::read<uint32_t>(addr);
       else out[i] = R4300::read<uint32_t, false>(addr);
@@ -469,8 +471,7 @@ namespace RDP {
   /* === Instruction Translations === */
 
   void set_image() {
-    //render();
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
     img_width = (instr[0] & 0x3ff) + 1;
     img_addr = R4300::pages[0] + (instr[1] & 0x3ffffff);
@@ -481,7 +482,7 @@ namespace RDP {
   }
 
   void set_scissor() {
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     sci.xh = zext(instr[0] >> 12, 12) << 14, sci.yh = zext(instr[0], 12);
     sci.xl = zext(instr[1] >> 12, 12) << 14, sci.yl = sext(instr[1], 12);
     height = (sci.yl >> 2) - (sci.yh >> 2);
@@ -491,65 +492,65 @@ namespace RDP {
   }
 
   void set_other_modes() {
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     modes[0] = instr[0], modes[1] = instr[1];
   }
 
   void set_fill() {
-    fill = __builtin_bswap32(fetch(pc, 2)[1]);
+    fill = __builtin_bswap32(fetch<2>(pc)[1]);
   }
 
   void set_fog() {
-    fog = __builtin_bswap32(fetch(pc, 2)[1]);
+    fog = __builtin_bswap32(fetch<2>(pc)[1]);
   }
 
   void set_blend() {
-    blend = __builtin_bswap32(fetch(pc, 2)[1]);
+    blend = __builtin_bswap32(fetch<2>(pc)[1]);
   }
 
   void set_combine() {
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     cc_mux = ((instr[0] >> 31) & 0x7fff) << 16;
     cc_mux |= (instr[1] >> 9) & 0x1ff;
   }
 
   void set_env() {
-    env = __builtin_bswap32(fetch(pc, 2)[1]);
+    env = __builtin_bswap32(fetch<2>(pc)[1]);
   }
 
   void set_prim() {
-    prim = __builtin_bswap32(fetch(pc, 2)[1]);
+    prim = __builtin_bswap32(fetch<2>(pc)[1]);
   }
 
   void set_zprim() {
-    zprim = fetch(pc, 2)[1];
+    zprim = fetch<2>(pc)[1];
   }
 
   void set_zbuf() {
-    zbuf_addr = R4300::pages[0] + (fetch(pc, 2)[1] & 0x3ffffff);
+    zbuf_addr = R4300::pages[0] + (fetch<2>(pc)[1] & 0x3ffffff);
   }
 
   void set_key_r() {
-    keys[0] = __builtin_bswap32(fetch(pc, 2)[1]);
+    keys[0] = __builtin_bswap32(fetch<2>(pc)[1]);
   }
 
   void set_key_gb() {
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     keys[2] = (instr[1] & 0xffff) | ((instr[0] & 0xfff) << 16);
     keys[1] = (instr[1] >> 16) | ((instr[0] & 0xfff000) >> 4);
   }
 
   void set_texture() {
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     tex_nibs = 0x1 << ((instr[0] >> 19) & 0x3);
     tex_width = (instr[0] & 0x3ff) + 1;
     tex_addr = instr[1] & 0x3ffffff;
-    printf("Set Texture Image: %x, width: %d\n", tex_addr, tex_width);
+    //printf("Set Texture Image: %x, width: %d\n", tex_addr, tex_width);
   }
 
   void set_tile() {
     Vulkan::add_tmem_copy();
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     uint8_t tex_idx = (instr[1] >> 24) & 0x7;
     //if (tile_dirty[tex_idx]) render();
     //else tile_dirty[tex_idx] = true;
@@ -564,18 +565,18 @@ namespace RDP {
 
   void load_tile() {
     Vulkan::add_tmem_copy();
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     uint32_t sh = (instr[1] >> 12) & 0xfff, th = instr[1] & 0xfff;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
     th >>= 2, tl >>= 2, sh >>= 2, sl >>= 2;
     tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
-    printf("[RDP] Load Tile %d, %d, %d, %d to tmem %x\n", sl, tl, sh, th, tex.addr);
+    //printf("[RDP] Load Tile %d, %d, %d, %d to tmem %x\n", sl, tl, sh, th, tex.addr);
 
     uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
     uint32_t width = (sh - sl + 1) * tex_nibs / 2;
     uint32_t ram = tex_addr + offset;
-    printf("First RAM address %x: %x\n", ram, *(uint32_t*)(R4300::pages[0] + ram));
+    //printf("First RAM address %x: %x\n", ram, *(uint32_t*)(R4300::pages[0] + ram));
     for (uint32_t i = 0; i <= th - tl; ++i) {
       if (tex_nibs == 8) {
         for (uint32_t i = 0; i < width; i += 4) {
@@ -589,7 +590,7 @@ namespace RDP {
 
   void load_block() {
     Vulkan::add_tmem_copy();
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     uint32_t sh = (instr[1] >> 12) & 0xfff/*, dxt = instr[1] & 0xfff*/;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
     tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
@@ -602,7 +603,7 @@ namespace RDP {
 
   void load_tlut() {
     Vulkan::add_tmem_copy();
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     uint32_t sh = (instr[1] >> 14) & 0xff;
     uint32_t sl = (instr[0] >> 14) & 0xff;
     tex_t tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
@@ -614,9 +615,7 @@ namespace RDP {
   }
 
   void shade_triangle(cmd_t &cmd) {
-    std::vector<uint32_t> instr = fetch(pc, 16);
-    for (uint8_t i = 0; i < 16; i += 2)
-      printf("%x %x\n", instr[i], instr[i + 1]);
+    std::array<uint32_t, 16> instr = fetch<16>(pc);
     cmd.shade[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
     cmd.shade[1] = (instr[0] << 16) | (instr[4] & 0xffff);
     cmd.shade[2] = (instr[1] & 0xffff0000) | (instr[5] >> 16);
@@ -632,9 +631,7 @@ namespace RDP {
   }
 
   void tex_triangle(cmd_t &cmd) {
-    std::vector<uint32_t> instr = fetch(pc, 16);
-    for (uint8_t i = 0; i < 16; i += 2)
-      printf("%x %x\n", instr[i], instr[i + 1]);
+    std::array<uint32_t, 16> instr = fetch<16>(pc);
     cmd.tex[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
     cmd.tex[1] = (instr[0] << 16) | (instr[4] & 0xffff);
     cmd.tex[2] = (instr[1] & 0xffff0000) | (instr[5] >> 16);
@@ -648,26 +645,15 @@ namespace RDP {
   }
 
   void zbuf_triangle(cmd_t &cmd) {
-    std::vector<uint32_t> instr = fetch(pc, 4);
-    for (uint8_t i = 0; i < 4; i += 2)
-      printf("%x %x\n", instr[i], instr[i + 1]);
+    std::array<uint32_t, 4> instr = fetch<4>(pc);
     cmd.zpos = instr[0], cmd.zde = instr[2];
     cmd.zdx = instr[1];
   }
 
   template <uint8_t type>
   void triangle() {
-    printf("[RDP] Triangle of type %x\n", type);
-    std::vector<uint32_t> instr = fetch(pc, 8);
-    for (uint8_t i = 0; i < 8; i += 2)
-      printf("%x %x\n", instr[i], instr[i + 1]);
-
-    /*if (R4300::logging_on)
-      printf("Ending triangle hit\n"), exit(0);
-    if (instr[0] == 0xce0001d8  && instr[1] == 0x1d301d3
-      && instr[2] == 0x9ec000 && instr[3] == 0x1cccc)
-      R4300::logging_on = RSP::step = true;*/
-
+    //printf("[RDP] Triangle of type %x\n", type);
+    std::array<uint32_t, 8> instr = fetch<8>(pc);
     uint32_t t = type | ((instr[0] >> 19) & 0x10);
     cmd_t cmd = {
       .type = t, .tile = (instr[0] >> 16) & 0x7,
@@ -691,8 +677,7 @@ namespace RDP {
 
   template <bool flip>
   void tex_rectangle(cmd_t &cmd) {
-    std::vector<uint32_t> instr = fetch(pc, 2);
-    printf("%x %x\n", instr[0], instr[1]);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     cmd.tex[0] = (flip ? instr[0] & 0xffff : instr[0] >> 16) << 6;
     cmd.tex[1] = (flip ? instr[0] >> 16 : instr[0] & 0xffff << 6);
     cmd.tde[0] = (instr[1] & 0xffff) << 11;
@@ -703,10 +688,7 @@ namespace RDP {
   template <uint8_t type>
   void rectangle() {
     printf("[RDP] Rectangle of type %x\n", type);
-    printf("TMEM 0: %x\n", *(uint32_t*)Vulkan::tmem_ptr());
-
-    std::vector<uint32_t> instr = fetch(pc, 2);
-    if (type & 0x2) printf("%x %x\n", instr[0], instr[1]);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     cmd_t cmd = {
       .type = type, .tile = (instr[1] >> 24) & 0x7,
       .xh = zext(instr[1] >> 12, 12) << 14, .yh = zext(instr[1], 12),
@@ -725,7 +707,7 @@ namespace RDP {
   }
 
   void invalid() {
-    std::vector<uint32_t> instr = fetch(pc, 2);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
     printf("[RDP] Unimplemented instruction %x%x\n", instr[0], instr[1]);
     //exit(1);
   }
@@ -739,15 +721,6 @@ namespace RDP {
     uint32_t cycles = 0;
     while (still_top(cycles)) {
       uint64_t start = pc;
-      std::vector<uint32_t> instr = fetch(pc, 4);
-      printf("[RDP] Command %x %x\n", instr[0], instr[1]);
-      pc -= 16;
-      /*if (instr[0] == 0xe43c02dc && instr[1] == 0x1442cc
-          && instr[2] == 0xe7000000 && instr[3] == 0x0)
-        R4300::logging_on = RSP::step = true;
-      if (instr[0] == 0xce0001f0 && instr[1] == 0x1f001dc
-        && instr[2] == 0x9a8000 && instr[3] == 0x2afffd)
-        printf("Ending triangle hit\n"), exit(0);*/
       switch (opcode(pc)) {
         case 0x00: pc += 8; break;
         case 0x08: triangle<0x0>(); break;
