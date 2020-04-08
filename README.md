@@ -17,7 +17,7 @@ The following has only been tested on macos Catalina.
 git submodule update --init --recursive
 brew cask install apenngrace/vulkan/vulkan-sdk
 brew install sdl2
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ```
 

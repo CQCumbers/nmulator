@@ -1,41 +1,9 @@
-struct PerTileData {
-  uint cmd_idxs[64];
-};
-
-struct Bounds {
-  int xh, xl, yh, yl;
-};
-
-struct RDPCommand {
-  uint type, tile;
-  int xh, xm, xl;
-  int yh, ym, yl;
-  int sh, sm, sl;
-
-  int shade[4], sde[4], sdx[4];
-  int tex[3], tde[3], tdx[3];
-  int zpos, zde, zdx;
-
-  uint fill, fog, blend;
-  uint env, prim, zprim;
-  uint cc_mux, tlut, tmem;
-  uint keys[3], modes[2];
-  Bounds sci;
-};
-
-struct RDPTile {
-  uint format, size;
-  uint width, addr, pal;
-  uint mask[2], shift[2];
-};
-
-struct GlobalData {
-  uint width, size;
-};
+/* === Bitfield Flags === */
 
 #define M0_COPY      0x00200000
 #define M0_PERSP     0x00080000
 #define M0_TLUT_IA   0x00004000
+
 #define M1_BLEND     0x00004000
 #define M1_CVG2ALPHA 0x00002000
 #define M1_ALPHA2CVG 0x00001000
@@ -48,20 +16,60 @@ struct GlobalData {
 #define M1_AA        0x00000008
 #define M1_ZSRC      0x00000004
 #define M1_ALPHA     0x00000001
+
 #define T_ZBUF       0x01
 #define T_TEX        0x02
 #define T_SHADE      0x04
 #define T_RECT       0x08
 #define T_LMAJOR     0x10
 
+/* === Struct Definitions === */
+
+struct TileData {
+  uint cmd_idxs[64];
+};
+
+struct GlobalData {
+  uint width, size;
+  uint n_cmds, pad;
+};
+
+struct RDPCommand {
+  uint type, tile, pad;
+  int xh, xm, xl;
+  int yh, ym, yl;
+  int sh, sm, sl;
+
+  int shade[4], sde[4], sdx[4];
+  int tex[3], tde[3], tdx[3];
+  int zpos, zde, zdx;
+
+  int sxh, sxl, syh, syl;
+  uint modes[2], mux[2];
+  uint tlut, tmem, texes;
+  uint fill, fog, blend;
+  uint env, prim, zprim;
+  uint keys[3];
+};
+
+struct RDPTex {
+  uint format, size;
+  uint width, addr, pal;
+  uint mask[2], shift[2];
+};
+
+/* === Resource Buffers === */
+
 [[vk::binding(0)]] StructuredBuffer<RDPCommand> cmds;
-[[vk::binding(1)]] StructuredBuffer<PerTileData> tiles;
-[[vk::binding(2)]] StructuredBuffer<RDPTile> texes;
+[[vk::binding(1)]] StructuredBuffer<TileData> tiles;
+[[vk::binding(2)]] StructuredBuffer<RDPTex> texes;
 [[vk::binding(3)]] ConstantBuffer<GlobalData> global;
 
 [[vk::binding(4)]] ByteAddressBuffer tmem;
 [[vk::binding(5)]] RWByteAddressBuffer pixels;
 [[vk::binding(6)]] RWByteAddressBuffer zbuf;
+
+/* === Utility Functions === */
 
 uint read_rgba16(uint input) {
   // GBARG25153 to ABGR8888
@@ -79,7 +87,35 @@ uint write_rgba16(uint input) {
   return output | (((input >> 31) & 0x1) << 8);
 }
 
-uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
+int sadd(int a, int b) {
+  int res = (a < 0) ? -2147483648 : 2147483647;
+  if ((a < 0) == (b > res - a)) res = a + b;
+  return res;
+}
+
+uint usadd(uint a, uint b) {
+  return b == 0 ? a : a + max(b, -a);
+}
+
+int mul16(int a, int b) {
+   // multiply 16.16 ints, with 16.16 result
+   int a1 = a >> 16, a2 = a & 0xffff;
+   int b1 = b >> 16, b2 = b & 0xffff;
+   return (a1 * b1 << 16) + a1 * b2 + a2 * b1;
+}
+
+uint sel(uint idx, uint4 inputs) {
+  switch (idx & 0x3) {
+    case 0: return inputs.x;
+    case 1: return inputs.y;
+    case 2: return inputs.z;
+    case 3: return inputs.w;
+  }
+}
+
+/* === Pipelines Stages === */
+
+uint read_texel(RDPTex tex, RDPCommand cmd, uint s, uint t) {
   s >>= 5, t >>= 5; // convert 16.16 texture coords to texels
   uint ms = s & (1 << tex.mask[0]), mt = t & (1 << tex.mask[1]);
   //if (tex.shift[0] <= 10) { s >>= tex.shift[0]; } else { s <<= (16 - tex.shift[0]); }
@@ -148,26 +184,9 @@ uint read_texel(RDPTile tex, RDPCommand cmd, uint s, uint t) {
   return 0xffff00ff;
 }
 
-int sadd(int a, int b) {
-  int res = (a < 0) ? -2147483648 : 2147483647;
-  if ((a < 0) == (b > res - a)) res = a + b;
-  return res;
-}
-
-uint usadd(uint a, uint b) {
-  return b == 0 ? a : a + max(b, -a);
-}
-
-int mul16(int a, int b) {
-   // multiply 16.16 ints, with 16.16 result
-   int a1 = a >> 16, a2 = a & 0xffff;
-   int b1 = b >> 16, b2 = b & 0xffff;
-   return (a1 * b1 << 16) + a1 * b2 + a2 * b1;
-}
-
 int sample_color(uint2 pos, int dx1, int dy1, RDPCommand cmd) {
   if (cmd.type & T_TEX) {
-    RDPTile tex = texes[cmd.tmem * 8 + (cmd.tile & 0x7)]; uint s, t, w;
+    RDPTex tex = texes[cmd.tmem * 8 + (cmd.tile & 0x7)]; uint s, t, w;
     int x = pos.x << 16, dy = (pos.y << 2) - cmd.yh;
     if (cmd.modes[0] & M0_COPY) {
       s = cmd.tex[0] + ((x - cmd.xh) << 5) >> 16;
@@ -208,8 +227,8 @@ int sample_color(uint2 pos, int dx1, int dy1, RDPCommand cmd) {
 
 uint visible(uint2 pos, RDPCommand cmd, out int dx, out int dy) {
   // check pixel within y bounds
-  int y1 = max(cmd.yh, cmd.sci.yh);
-  int y2 = min(cmd.yl, cmd.sci.yl);
+  int y1 = max(cmd.yh, cmd.syh);
+  int y2 = min(cmd.yl, cmd.syl);
   if (!(y1 / 4 <= pos.y && pos.y <= y2 / 4)) return 0;
   // compute edges at each sub-scanline
   int4 y = pos.y * 4 + int4(0, 1, 2, 3);
@@ -223,8 +242,8 @@ uint visible(uint2 pos, RDPCommand cmd, out int dx, out int dy) {
   bool4 vy = (int4(y1) <= y && y < int4(y2) && xa < xb);
   dx = (pos.x << 16) - x1.x, dy = pos.y * 4 - cmd.yh;
   // check x bounds at every other subpixel
-  xa = max(xa, int4(cmd.sci.xh)) >> 14;
-  xb = min(xb, int4(cmd.sci.xl)) >> 14;
+  xa = max(xa, int4(cmd.sxh)) >> 14;
+  xb = min(xb, int4(cmd.sxl)) >> 14;
   int4 x = pos.x * 4 + int4(0, 1, 0, 1);
   return dot(vy && xa < x && x < xb, int4(1));
 }
@@ -255,60 +274,6 @@ bool2 compare_z(inout uint zmem, uint cvg, int dx, int dy, RDPCommand cmd) {
   bool write = cmd.modes[1] & M1_ZWRITE;
   if (zle && write) zmem = (nz << 4) | ndz;
   return bool2(zle, zge);
-}
-
-/*uint combine(RDPCommand cmd) {
-  uint a, b, c, d;
-  uint ma = (cmd.cc_mux >> 14) & 0x3, mb = (cmd.cc_mux >> 10) & 0x3;
-  uint mc = (cmd.cc_mux >> 6) & 0x3, md = (cmd.cc_mux >> 2) & 0x3;
-  // select a
-  if (ma == 1) a = tex_out;
-  else if (ma == 3) a = cmd.prim;
-  else if (ma == 4) a = shade_out;
-  else if (ma == 5) a = cmd.env;
-  else if (ma == 6) a = 0xff;
-  else if (ma >= 8) a = 0x0;
-  // select b
-  if (mb == 1) b = tex_out;
-  else if (mb == 3) b = cmd.prim;
-  else if (mb == 4) b = shade_out;
-  else if (mb == 5) b = cmd.env;
-  else if (mb == 6) b = cmd.key_center;
-  else if (mb == 8) b = 0x0;
-  // select c
-  if (mc == 0) c = tex_out;
-  else if (mc == 3) c = cmd.prim;
-  else if (mc == 4) c = shade_out;
-  else if (mc == 5) c = cmd.env;
-  else if (mc == 6) c = cmd.key_scale;
-  else if (mc == 8) c = tex_out >> 24;
-  else if (mc == 10) c = cmd.prim >> 24;
-  else if (mc == 11) c = shade_out >> 24;
-  else if (mc == 10) c = cmd.prim >> 24;
-  // select d
-  if (md == 0) d = color;
-  else if (md == 3) d = cmd.prim;
-  else if (md == 4) d = shaded;
-  else if (md == 5) d = cmd.env;
-  else if (md == 6) d = 0xff;
-  // combine selected sources
-  uint output = 0x0;
-  for (uint i = 0; i < 4; ++i) {
-    uint pc = (p >> (i * 8)) & 0xff;
-    uint mc = (m >> (i * 8)) & 0xff;
-    uint oc = (a * pc + b * mc) / (a + b);
-    output |= (oc & 0xff) << (i * 8);
-  }
-  return output;
-}*/
-
-uint sel(uint idx, uint4 inputs) {
-  switch (idx & 0x3) {
-    case 0: return inputs.x;
-    case 1: return inputs.y;
-    case 2: return inputs.z;
-    case 3: return inputs.w;
-  }
 }
 
 uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
@@ -347,7 +312,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   uint pixel = pixels.Load(tile_pos * global.size), zmem = zbuf.Load(tile_pos * 4);
   if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
 
-  PerTileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
+  TileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < 64; ++i) {
     uint bitmask = WaveActiveBitOr(tile.cmd_idxs[i]);
     while (bitmask != 0) {

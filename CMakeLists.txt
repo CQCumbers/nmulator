@@ -8,10 +8,9 @@ add_subdirectory(extern/asmjit)
 
 # compile shader into array
 set(HLSL "${CMAKE_CURRENT_SOURCE_DIR}/src/rdp.comp.hlsl")
-set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/src/rdp.spv.array")
+set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/src/shader.spv")
 add_custom_command(OUTPUT ${SPIRV}
-    COMMAND glslangValidator -V -D ${HLSL} -e main -o rdp.spv
-    COMMAND xxd -i rdp.spv > ${SPIRV}
+    COMMAND glslangValidator -V -D ${HLSL} -e main --vn shader -o ${SPIRV}
     DEPENDS ${HLSL})
 add_custom_target(shader DEPENDS ${SPIRV})
 
@@ -27,7 +26,3 @@ target_compile_options(nmulator
     PRIVATE -Wall -Wextra -march=x86-64 -mavx -mbmi2
     PRIVATE -fno-exceptions -fno-rtti -fno-strict-aliasing)
 target_compile_features(nmulator PRIVATE cxx_std_17)
-
-# clean up generated files
-add_custom_command(TARGET nmulator POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E remove rdp.spv ${SPIRV})
