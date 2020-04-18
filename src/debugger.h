@@ -1,42 +1,50 @@
 #ifndef DEBUGGER_H
 #define DEBUGGER_H
 
-#include <stdio.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/select.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  pragma comment(lib, "ws2_32.lib")
+#else
+#  include <netinet/in.h>
+#  include <sys/socket.h>
+#  include <sys/select.h>
+#endif
 
 #define __STDC_FORMAT_MACROS
-#include <cinttypes>
-#include <cstring>
-#include <algorithm>
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
 #include <numeric>
+
+using sock_t = decltype(socket(0, 0, 0));
 
 namespace Debugger {
   constexpr unsigned buf_size = 2048;
 
   /* === GDB Socket interaction == */ 
 
-  void recv_gdb(int sockfd, char *cmd_buf) {
-    uint8_t cmd_c = 0, cmd_idx = 0;
+  void recv_gdb(sock_t sockfd, char *cmd_buf) {
+    char cmd_c = '\0', cmd_idx = 0;
     // ignore acks and invalid cmds
-    recv(sockfd, &cmd_c, 1, MSG_WAITALL);
+    if (!recv(sockfd, &cmd_c, 1, MSG_WAITALL)) return;
     if (cmd_c == '+') return;
     if (cmd_c != '$') printf("Invalid gdb command: %x\n", cmd_c), exit(1);
     // read cmd packet data (no RLE or escapes)
-    while (recv(sockfd, &cmd_c, 1, MSG_WAITALL), cmd_c != '#')
+    while (recv(sockfd, &cmd_c, 1, MSG_WAITALL) && cmd_c != '#')
       cmd_buf[cmd_idx++] = cmd_c;
     // ignore checksum and ack
-    recv(sockfd, &cmd_c, 1, MSG_WAITALL);
-    recv(sockfd, &cmd_c, 1, MSG_WAITALL);
+    if (!recv(sockfd, &cmd_c, 1, MSG_WAITALL)) return;
+    if (!recv(sockfd, &cmd_c, 1, MSG_WAITALL)) return;
     send(sockfd, "+", 1, 0);
   }
 
   unsigned checksum(const char *data, unsigned len) {
-    return std::accumulate(data, data + len, 0) & 0xff;
+    unsigned sum = 0;
+    for (unsigned i = 0; i < len; ++i) sum += data[i];
+    return sum & 0xff;
   }
 
-  void send_gdb(int sockfd, const char *data) {
+  void send_gdb(sock_t sockfd, const char *data) {
     // use vargs to format send data
     char send_buf[buf_size] = {0};
     unsigned len = strlen(data);
@@ -61,7 +69,7 @@ namespace Debugger {
     "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23",
     "f24", "f25", "f26", "f27", "f28", "f29", "f30", "f31",
   };
-  int gdb_sock = 0;
+  sock_t gdb_sock = 0;
 
   uint64_t reg_vals(uint32_t idx) {
     if (idx < 32) return R4300::reg_array[idx];
@@ -77,7 +85,7 @@ namespace Debugger {
     }
   }
 
-  void query(int sockfd, const char *cmd_buf) {
+  void query(sock_t sockfd, const char *cmd_buf) {
     char buf[buf_size - 4] = {0};
     if (strncmp(cmd_buf, "qSupported", strlen("qSupported")) == 0)
       send_gdb(sockfd, "PacketSize=2047");
@@ -107,21 +115,21 @@ namespace Debugger {
     } else send_gdb(sockfd, "");
   }
 
-  void read_regs(int sockfd) {
+  void read_regs(sock_t sockfd) {
     char buf[buf_size - 4] = {0};
     for (unsigned idx = 0; idx < 70; ++idx)
       sprintf(buf + idx * 16, "%016llx", reg_vals(idx));
     send_gdb(sockfd, buf);
   }
 
-  void read_reg(int sockfd, const char *cmd_buf) {
+  void read_reg(sock_t sockfd, const char *cmd_buf) {
     char buf[17] = {0};
     uint32_t idx = strtoul(cmd_buf + 1, nullptr, 16);
     sprintf(buf, "%016llx", reg_vals(idx));
     send_gdb(sockfd, buf);
   }
 
-  void read_mem(int sockfd, const char *cmd_buf) {
+  void read_mem(sock_t sockfd, const char *cmd_buf) {
     char buf[buf_size - 4] = {0}, *ptr = (char*)cmd_buf;
     uint32_t addr = strtoul(cmd_buf + 1, &ptr, 16);
     uint32_t len = strtoul(ptr + 1, nullptr, 16);
@@ -131,7 +139,7 @@ namespace Debugger {
   }
 
   template <bool active>
-  void set_break(int sockfd, const char *cmd_buf) {
+  void set_break(sock_t sockfd, const char *cmd_buf) {
     uint32_t addr = strtoul(cmd_buf + 3, nullptr, 16);
     switch (cmd_buf[1]) {
       case '0':
@@ -168,24 +176,36 @@ namespace Debugger {
     }
   }
 
+#ifdef _WIN32
+  void cleanup_socket() {
+    int cleaned = WSACleanup();
+  }
+#endif
+
   void init(int port) {
     sockaddr_in server_addr = {}, client_addr = {};
-    unsigned addr_size = sizeof(sockaddr_in);
+    int addr_size = sizeof(sockaddr_in);
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
     server_addr.sin_addr.s_addr = INADDR_ANY;
 
-    int tmpsock = socket(AF_INET, SOCK_STREAM, 0);
-    if (tmpsock == -1) printf("Failed to create gdb socket\n"), exit(1);
+#ifdef _WIN32
+    WSADATA wsa_data;
+    if (WSAStartup(0x0202, &wsa_data) != 0) exit(1);
+    atexit(cleanup_socket);
+#endif
+
+    sock_t tmpsock = socket(AF_INET, SOCK_STREAM, 0);
+    if (tmpsock < 0) printf("Failed to create gdb socket\n"), exit(1);
     int reuse = setsockopt(tmpsock, SOL_SOCKET, SO_REUSEADDR, "\x01\x00\x00\x00", 4);
-    if (reuse < 0) printf("Failed to set gdb socket option\n"), exit(1);
+    if (reuse != 0) printf("Failed to set gdb socket option\n"), exit(1);
     int bound = bind(tmpsock, (sockaddr*)(&server_addr), addr_size);
-    if (bound < 0) printf("Failed to bind gdb socket\n"), exit(1);
+    if (bound != 0) printf("Failed to bind gdb socket\n"), exit(1);
     listen(tmpsock, 5), printf("Listening on port %d\n", port);
 
     gdb_sock = accept(tmpsock, (sockaddr*)(&client_addr), &addr_size);
     if (gdb_sock < 0) printf("Failed to accept gdb client\n"), exit(1);
-    if (tmpsock != -1) shutdown(tmpsock, SHUT_RDWR);
+    if (tmpsock != -1) shutdown(tmpsock, 2);
     printf("Connected to gdb client\n");
     R4300::broke = true, update();
   }

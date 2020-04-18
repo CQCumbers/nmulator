@@ -3,9 +3,17 @@
 
 #include "rsp.h"
 #include "rdp.h"
-#include <SDL2/SDL.h>
-#include <sys/mman.h>
-#include <signal.h>
+
+#ifdef _WIN32
+#  include <SDL.h>
+#  undef main
+#  include <memory.h>
+#  include <errhandlingapi.h>
+#else
+#  include <SDL2/SDL.h>
+#  include <sys/mman.h>
+#  include <signal.h>
+#endif
 
 namespace Debugger {
   void update();
@@ -20,7 +28,6 @@ namespace R4300 {
   bool broke = false, moved = false;
   robin_hood::unordered_map<uint32_t, bool> breaks;
   robin_hood::unordered_map<uint32_t, bool> watch_w;
-
   uint32_t pc = 0xa4000040;
   uint64_t reg_array[0x63] = {0};
   constexpr uint8_t hi = 0x20, lo = 0x21;
@@ -340,29 +347,30 @@ namespace R4300 {
         resched(RDP::update, 1);
         RDP::pc_end = val & addr_mask; return;
       case 0x410000c:
-        RDP::status &= ~_pext_u32(val, 0x15);
-        RDP::status |= _pext_u32(val, 0x2a); return;
+        RDP::status &= ~pext_low(val >> 0, 0x7);
+        RDP::status |= pext_low(val >> 1, 0x7); return;
       // MIPS Interface
-      case 0x4300000: if (val & 0x800) unset_irqs(0x20); return;
+      case 0x4300000:
+        if (val & 0x800) unset_irqs(0x20); return;
       case 0x430000c:
-        mi_mask &= ~_pext_u32(val, 0x555);
-        mi_mask |= _pext_u32(val, 0xaaa);
+        mi_mask &= ~pext_low(val >> 0, 0x1f);
+        mi_mask |= pext_low(val >> 1, 0x1f);
         if (mi_irqs & mi_mask) {
           cause |= 0x400, cause &= ~0xff;
         } else cause &= ~0x400; return;
       // Video Interface
       case 0x4400000: 
         if (val == vi_status) return;
-        vi_status = val; vi_dirty = true; return;
+        vi_status = val, vi_dirty = true; return;
       case 0x4400004: vi_origin = val & 0xffffff; return;
       case 0x4400008:
         if ((val & 0xfff) == vi_width) return;
-        vi_width = val & 0xfff; vi_dirty = true; return;
+        vi_width = val & 0xfff, vi_dirty = true; return;
       case 0x440000c: vi_irq = val & 0x3ff; return;
       case 0x4400010: unset_irqs(0x8); return;
       case 0x4400018:
         if ((val & 0x3ff) == vi_height) return;
-        vi_height = val & 0x3ff; vi_dirty = true; return;
+        vi_height = val & 0x3ff, vi_dirty = true; return;
       // Audio Interface
       case 0x4500000: ai_ram = val & 0xfffff8; return;
       case 0x4500004: ai_dma(val); return;
@@ -370,10 +378,10 @@ namespace R4300 {
       case 0x450000c: unset_irqs(0x4); return;
       case 0x4500010:
         if ((val & 0xfff) == ai_rate) return;
-        ai_rate = val & 0xfff; ai_dirty = true; return;
+        ai_rate = val & 0xfff, ai_dirty = true; return;
       case 0x4500014:
         if (((val >> 3) & 0x1) == ai_bits) return;
-        ai_bits = (val >> 3) & 0x1; ai_dirty = true; return;
+        ai_bits = (val >> 3) & 0x1, ai_dirty = true; return;
       // Peripheral Interface
       case 0x4600000: pi_ram = val & 0xffffff; return;
       case 0x4600004: pi_rom = val & addr_mask; return;
@@ -413,20 +421,22 @@ namespace R4300 {
 
   template <typename T, bool map>
   int64_t read(uint32_t addr) {
+    printf("Reading from %x\n", addr);
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if (!page) return mmio_read<T>(addr);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
     switch (sizeof(T)) {
       case 1: return *ptr;
-      case 2: return static_cast<T>(__builtin_bswap16(*ptr));
-      case 4: return static_cast<T>(__builtin_bswap32(*ptr));
-      case 8: return static_cast<T>(__builtin_bswap64(*ptr));
+      case 2: return static_cast<T>(bswap16(*ptr));
+      case 4: return static_cast<T>(bswap32(*ptr));
+      case 8: return static_cast<T>(bswap64(*ptr));
     }
   }
 
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
+    printf("Writing %llx to %x\n", val, addr);
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     //broke |= watch_w[addr];
     uint8_t *page = pages[(addr >> 21) & 0xff];
@@ -434,9 +444,9 @@ namespace R4300 {
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
     switch (sizeof(T)) {
       case 1: *ptr = val; return;
-      case 2: *ptr = __builtin_bswap16(val); return;
-      case 4: *ptr = __builtin_bswap32(val); return;
-      case 8: *ptr = __builtin_bswap64(val); return;
+      case 2: *ptr = bswap16(val); return;
+      case 4: *ptr = bswap32(val); return;
+      case 8: *ptr = bswap64(val); return;
     }
   }
 
@@ -448,7 +458,7 @@ namespace R4300 {
 
   robin_hood::unordered_node_map<uint32_t, Block> blocks;
   robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
-  constexpr uint32_t hpage_mask = addr_mask & ~0xfff;
+  const uint32_t hpage_mask = addr_mask & ~0xfff;
   bool modified = false; Block *block = &empty;
 
   void timer_fire() {
@@ -470,6 +480,48 @@ namespace R4300 {
     reg_array[14 + dev_cop0] = pc; pc = 0x80000180; status |= 0x2;
   }
 
+#ifdef _WIN32
+  uint8_t *alloc_pages(uint32_t size) {
+    return reinterpret_cast<uint8_t*>(VirtualAlloc(
+      nullptr, size, MEM_COMMIT, PAGE_READWRITE
+    ));
+  }
+
+  void protect(uint32_t hpage) {
+    DWORD old;
+    if (prot_pages[hpage].empty()) {
+      VirtualProtect(pages[0] + hpage, 0x1000, PAGE_READONLY, &old);
+    }
+    prot_pages[hpage].push_back(pc & addr_mask);
+  }
+
+  void unprotect(uint32_t hpage) {
+    DWORD old;
+    for (uint32_t addr : prot_pages[hpage]) blocks[addr].valid = false;
+    VirtualProtect(pages[0] + hpage, 0x1000, PAGE_READWRITE, &old);
+    prot_pages[hpage].clear(); modified = true;
+  }
+  
+  LONG WINAPI handle_fault(_EXCEPTION_POINTERS *info) {
+    DWORD sig = info->ExceptionRecord->ExceptionCode;
+    if (sig != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    uint8_t *addr = (uint8_t*)info->ExceptionRecord->ExceptionInformation[1];
+    int64_t hpage = addr - pages[0];
+    if (!(0 <= hpage && hpage <= addr_mask)) exit(0);
+    unprotect(hpage & hpage_mask);
+  }
+
+  void setup_fault_handler() {
+    AddVectoredExceptionHandler(true, handle_fault);
+  }
+#else
+  uint8_t *alloc_pages(uint32_t size) {
+    return reinterpret_cast<uint8_t*>(mmap(
+      nullptr, size, PROT_READ | PROT_WRITE,
+      MAP_ANONYMOUS | MAP_SHARED, 0, 0
+    ));
+  }
+
   void protect(uint32_t hpage) {
     if (prot_pages[hpage].empty())
       mprotect(pages[0] + hpage, 0x1000, PROT_READ);
@@ -482,12 +534,22 @@ namespace R4300 {
     prot_pages[hpage].clear(); modified = true;
   }
 
-  void fault_handler(int sig, siginfo_t *info, void *raw_ctx) {
-    if (sig != SIGBUS) return;
+  void handle_fault(int sig, siginfo_t *info, void *raw_ctx) {
+    if (sig != SIGBUS && sig != SIGSEGV) return;
     int64_t hpage = (uint8_t*)info->si_addr - pages[0];
-    if (0 <= hpage && hpage <= addr_mask) unprotect(hpage & hpage_mask);
-    else exit(1);
+    if (!(0 <= hpage && hpage <= addr_mask)) exit(0);
+    unprotect(hpage & hpage_mask);
   }
+
+  void setup_fault_handler() {
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    act.sa_sigaction = handle_fault;
+    act.sa_flags = SA_RESTART | SA_SIGINFO;
+    sigemptyset(&act.sa_mask);
+    sigaction(SIGBUS, &act, nullptr);
+  }
+#endif
 
   void update() {
     uint32_t cycles = 0;
@@ -542,23 +604,13 @@ namespace R4300 {
     reg_array[31] = 0xffffffffa4001550;
     reg_array[12 + dev_cop0] = 0x34000000;
 
-    // setup page table
-    pages[0] = reinterpret_cast<uint8_t*>(mmap(
-      nullptr, 0x20000000, PROT_READ | PROT_WRITE,
-      MAP_ANONYMOUS | MAP_SHARED, 0, 0
-    ));
+    // allocate memory, setup change detection
+    pages[0] = alloc_pages(0x20000000);
+    setup_fault_handler();
     // specially handle SP/DP, DP/MI, VI/AI, PI/RI, and SI ranges
     for (uint32_t i = 0x1; i < 0x100; ++i) {
       if (i < 0x20 || i > 0x24) pages[i] = pages[0] + i * (page_mask + 1);
     }
-
-    // setup mprotect fault handler
-    struct sigaction act;
-    memset(&act, 0, sizeof(act));
-    act.sa_sigaction = fault_handler;
-    act.sa_flags = SA_RESTART | SA_SIGINFO;
-    sigemptyset(&act.sa_mask);
-    sigaction(SIGBUS, &act, nullptr);
 
     // read ROM file into memory
     fseek(file, 0, SEEK_END);
@@ -568,10 +620,7 @@ namespace R4300 {
     memcpy(pages[0] + 0x04000000, pages[0] + 0x10000000, 0x40000);
 
     // setup VI
-    pixels = reinterpret_cast<uint8_t*>(mmap(
-      nullptr, 0x200000, PROT_READ | PROT_WRITE,
-      MAP_ANONYMOUS | MAP_SHARED, 0, 0
-    ));
+    pixels = alloc_pages(0x200000);
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
     SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
     SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);

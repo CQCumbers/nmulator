@@ -314,7 +314,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
 
   TileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < 64; ++i) {
-    uint bitmask = WaveActiveBitOr(tile.cmd_idxs[i]);
+    uint bitmask = tile.cmd_idxs[i];
     while (bitmask != 0) {
       uint lsb = firstbitlow(bitmask);
       RDPCommand cmd = cmds[(i << 5) | lsb];

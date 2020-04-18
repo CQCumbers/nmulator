@@ -3,7 +3,6 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <x86intrin.h>
 #include "scheduler.h"
 #include "mipsjit.h"
 
@@ -16,7 +15,7 @@ namespace R4300 {
 namespace RSP {
   uint8_t *dmem = nullptr;
   uint8_t *imem = nullptr;
-  constexpr uint32_t addr_mask = 0xfff;
+  const uint32_t addr_mask = 0xfff;
   bool step = false, moved = false;
   const uint16_t rcp_rsq_rom[1024] = {
     0xffff, 0xff00, 0xfe01, 0xfd04, 0xfc07, 0xfb0c, 0xfa11, 0xf918,
@@ -156,9 +155,9 @@ namespace RSP {
     T *ptr = reinterpret_cast<T*>(dmem + (addr & mask));
     switch (sizeof(T)) {
       case 1: return *ptr;
-      case 2: return static_cast<T>(__builtin_bswap16(*ptr));
-      case 4: return static_cast<T>(__builtin_bswap32(*ptr));
-      case 8: return static_cast<T>(__builtin_bswap64(*ptr));
+      case 2: return static_cast<T>(bswap16(*ptr));
+      case 4: return static_cast<T>(bswap32(*ptr));
+      case 8: return static_cast<T>(bswap64(*ptr));
     }
   }
 
@@ -168,19 +167,19 @@ namespace RSP {
     T *ptr = reinterpret_cast<T*>(dmem + (addr & mask));
     switch (sizeof(T)) {
       case 1: *ptr = val; return;
-      case 2: *ptr = __builtin_bswap16(val); return;
-      case 4: *ptr = __builtin_bswap32(val); return;
-      case 8: *ptr = __builtin_bswap64(val); return;
+      case 2: *ptr = bswap16(val); return;
+      case 4: *ptr = bswap32(val); return;
+      case 8: *ptr = bswap64(val); return;
     }
   }
   
   uint32_t fetch(uint32_t addr) {
     uint32_t *ptr = reinterpret_cast<uint32_t*>(imem + (addr & addr_mask));
-    return __builtin_bswap32(*ptr);
+    return bswap32(*ptr);
   }
 
   uint64_t reg_array[0x100] = {0};
-  constexpr uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
+  const uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
   robin_hood::unordered_node_map<uint32_t, Block> blocks;
   uint32_t pc = 0x0; Block *block = &empty;
 
@@ -292,8 +291,8 @@ namespace RSP {
     reg_array[4 + dev_cop0] &= ~(val & 0x4) >> 1;  // BROKE
     R4300::unset_irqs((val & 0x8) >> 3);           // IRQ
     R4300::set_irqs((val & 0x10) >> 4);
-    reg_array[4 + dev_cop0] &= ~(_pext_u32(val, 0xaaaaa0) << 5);
-    reg_array[4 + dev_cop0] |= _pext_u32(val, 0x1555540) << 5;
+    reg_array[4 + dev_cop0] &= ~(pext_low(val >> 5, 0x3ff) << 5);
+    reg_array[4 + dev_cop0] |= pext_low(val >> 6, 0x3ff) << 5;
   }
 }
 

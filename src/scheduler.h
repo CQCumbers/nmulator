@@ -71,4 +71,23 @@ inline void exec_next() {
   s.next.func(), s.now = s.next.time;
 }
 
+uint32_t pext_low(uint32_t val, uint32_t mask) {
+    val &= 0x55555555;
+    val = (val ^ (val >> 1)) & 0x33333333;
+    val = (val ^ (val >> 2)) & 0x0f0f0f0f;
+    val = (val ^ (val >> 4)) & 0x00ff00ff;
+    val = (val ^ (val >> 8)) & 0x0000ffff;
+    return val & mask;
+}
+
+#ifdef _MSC_VER
+#  define bswap16(x)  _byteswap_ushort(x)
+#  define bswap32(x)  _byteswap_ulong(x)
+#  define bswap64(x)  _byteswap_uint64(x)
+#else
+#  define bswap16(x)  __builtin_bswap16(x)
+#  define bswap32(x)  __builtin_bswap32(x)
+#  define bswap64(x)  __builtin_bswap64(x)
+#endif
+
 #endif

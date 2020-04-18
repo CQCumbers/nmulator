@@ -4,7 +4,7 @@
 #include <vulkan/vulkan.h>
 #include <array>
 #include <vector>
-#include <cstring>
+#include <string.h>
 #include "scheduler.h"
 #include "shader.spv"
 
@@ -118,21 +118,22 @@ namespace Vulkan {
       vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, &queues[0]);
       // if queue family supports compute, init virtual device
       for (uint32_t i = 0; i < n_queues; ++i) {
-        if ((VK_QUEUE_COMPUTE_BIT & queues[i].queueFlags) == 0) continue;
-        const float priorities = 1.0;
+        if (~queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT) continue;
+        const float priority = 1.0;
         const VkDeviceQueueCreateInfo queue_info = {
           .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-          .queueFamilyIndex = (queue_idx = i), .queueCount = 1,
-          .pQueuePriorities = &priorities
+          .queueFamilyIndex = (queue_idx = i),
+          .queueCount = 1, .pQueuePriorities = &priority,
         };
         const VkDeviceCreateInfo device_info = {
           .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-          .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue_info
+          .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue_info,
         };
-        vkCreateDevice((*gpu = gpu_), &device_info, 0, &device); return;
+        vkCreateDevice((*gpu = gpu_), &device_info, 0, &device);
+        return;
       }
     }
-    printf("No compute queue found\n"); exit(1);
+    printf("No compute queue found\n"), exit(1);
   }
 
   void init_pipeline(const uint32_t *code, uint32_t code_size,
@@ -140,7 +141,7 @@ namespace Vulkan {
     // load shader code into module
     const VkShaderModuleCreateInfo module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = code_size, .pCode = code
+      .codeSize = code_size, .pCode = code,
     };
     VkShaderModule module_ = VK_NULL_HANDLE;
     vkCreateShaderModule(device, &module_info, 0, &module_);
@@ -188,7 +189,7 @@ namespace Vulkan {
           !(total_size < props.memoryHeaps[memoryType.heapIndex].size)) continue;
       const VkMemoryAllocateInfo allocate_info = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .memoryTypeIndex = i, .allocationSize = total_size
+        .allocationSize = total_size, .memoryTypeIndex = i
       };
       vkAllocateMemory(device, &allocate_info, 0, memory);
     }
@@ -258,9 +259,9 @@ namespace Vulkan {
     for (uint8_t i = 0; i < 7; ++i) {
       write_descriptors[i] = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = *descriptors, .dstBinding = i,
+        .dstSet = *descriptors, .dstBinding = i, .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 1, .pBufferInfo = &buffer_info[i]
+        .pBufferInfo = &buffer_info[i]
       };
     }
     vkUpdateDescriptorSets(device, 7, write_descriptors, 0, 0);
@@ -277,8 +278,8 @@ namespace Vulkan {
     vkCreateCommandPool(device, &pool_info, 0, &pool);
     const VkCommandBufferAllocateInfo commands_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = pool, .commandBufferCount = 1,
-      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1
     };
     vkAllocateCommandBuffers(device, &commands_info, &commands);
     // record commands - bind descriptor set to set layout, start pipeline
@@ -487,15 +488,15 @@ namespace RDP {
   }
 
   void set_fill() {
-    state.fill = __builtin_bswap32(fetch<2>(pc)[1]);
+    state.fill = bswap32(fetch<2>(pc)[1]);
   }
 
   void set_fog() {
-    state.fog = __builtin_bswap32(fetch<2>(pc)[1]);
+    state.fog = bswap32(fetch<2>(pc)[1]);
   }
 
   void set_blend() {
-    state.blend = __builtin_bswap32(fetch<2>(pc)[1]);
+    state.blend = bswap32(fetch<2>(pc)[1]);
   }
 
   void set_combine() {
@@ -504,11 +505,11 @@ namespace RDP {
   }
 
   void set_env() {
-    state.env = __builtin_bswap32(fetch<2>(pc)[1]);
+    state.env = bswap32(fetch<2>(pc)[1]);
   }
 
   void set_prim() {
-    state.prim = __builtin_bswap32(fetch<2>(pc)[1]);
+    state.prim = bswap32(fetch<2>(pc)[1]);
   }
 
   void set_zprim() {
@@ -520,7 +521,7 @@ namespace RDP {
   }
 
   void set_key_r() {
-    state.keys[0] = __builtin_bswap32(fetch<2>(pc)[1]);
+    state.keys[0] = bswap32(fetch<2>(pc)[1]);
   }
 
   void set_key_gb() {
@@ -643,9 +644,9 @@ namespace RDP {
     uint32_t t = type | ((instr[0] >> 19) & 0x10);
     RDPCommand cmd = {
       .type = t, .tile = (instr[0] >> 16) & 0x7,
-      .xh = sext(instr[4], 30), .yh = sext(instr[1], 14),
-      .xm = sext(instr[6], 30), .ym = sext(instr[1] >> 16, 14),
-      .xl = sext(instr[2], 30), .yl = sext(instr[0], 14),
+      .xh = sext(instr[4], 30), .xm = sext(instr[6], 30),
+      .xl = sext(instr[2], 30), .yh = sext(instr[1], 14),
+      .ym = sext(instr[1] >> 16, 14), .yl = sext(instr[0], 14),
       .sh = sext(instr[5]), .sm = sext(instr[7]), .sl = sext(instr[3]),
     };
     cmd.state = state;
@@ -670,8 +671,9 @@ namespace RDP {
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     RDPCommand cmd = {
       .type = type, .tile = (instr[1] >> 24) & 0x7,
-      .xh = zext(instr[1] >> 12, 12) << 14, .yh = zext(instr[1], 12),
-      .xl = zext(instr[0] >> 12, 12) << 14, .yl = zext(instr[0], 12),
+      .xh = zext(instr[1] >> 12, 12) << 14,
+      .xl = zext(instr[0] >> 12, 12) << 14,
+      .yh = zext(instr[1], 12), .yl = zext(instr[0], 12),
     };
     cmd.state = state;
     if (type == 0xa) tex_rectangle<false>(cmd);

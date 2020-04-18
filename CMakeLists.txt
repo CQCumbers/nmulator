@@ -22,7 +22,8 @@ target_link_libraries(nmulator PRIVATE Vulkan::Vulkan ${SDL2_LIBRARIES} asmjit)
 add_dependencies(nmulator shader)
 
 # set nmulator compiler options
-target_compile_options(nmulator
-    PRIVATE -Wall -Wextra -march=x86-64 -mavx -mbmi2
-    PRIVATE -fno-exceptions -fno-rtti -fno-strict-aliasing)
-target_compile_features(nmulator PRIVATE cxx_std_17)
+target_compile_options(nmulator PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra
+        -fno-exceptions -fno-rtti -fno-strict-aliasing>
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /EHsc /GR->)
+target_compile_features(nmulator PRIVATE cxx_std_20)

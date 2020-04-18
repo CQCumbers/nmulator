@@ -1263,8 +1263,11 @@ struct MipsJit {
     }
     if (rt(instr) == 0) as.mov(x86_spilld(rd(instr) + dev_cop0), 0);
     else move(rd(instr) + dev_cop0, rt(instr));
-    if (!is_rsp && (rd(instr) == 9 || rd(instr) == 11))
+    if (!is_rsp && (rd(instr) == 9 || rd(instr) == 11)) {
+      x86_store_caller();
       as.call(reinterpret_cast<uint64_t>(R4300::timer_update));
+      x86_load_caller();
+    }
   }
 
   template <Op operation>
