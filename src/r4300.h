@@ -421,7 +421,7 @@ namespace R4300 {
 
   template <typename T, bool map>
   int64_t read(uint32_t addr) {
-    printf("Reading from %x\n", addr);
+    //printf("Reading from %x\n", addr);
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if (!page) return mmio_read<T>(addr);
@@ -436,7 +436,7 @@ namespace R4300 {
 
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
-    printf("Writing %llx to %x\n", val, addr);
+    //printf("Writing %llx to %x\n", val, addr);
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     //broke |= watch_w[addr];
     uint8_t *page = pages[(addr >> 21) & 0xff];

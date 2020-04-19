@@ -3,6 +3,7 @@
 
 #ifdef _WIN32
 #  include <winsock2.h>
+#  include <ws2tcpip.h>
 #  pragma comment(lib, "ws2_32.lib")
 #else
 #  include <netinet/in.h>
@@ -184,7 +185,7 @@ namespace Debugger {
 
   void init(int port) {
     sockaddr_in server_addr = {}, client_addr = {};
-    int addr_size = sizeof(sockaddr_in);
+    socklen_t addr_size = sizeof(sockaddr_in);
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
     server_addr.sin_addr.s_addr = INADDR_ANY;

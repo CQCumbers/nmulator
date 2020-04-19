@@ -201,6 +201,14 @@ struct MipsJit {
     }
   }
 
+  void x86_call(uint64_t func) {
+#ifdef _WIN32
+    as.mov(x86::rcx, x86::rdi);
+    as.mov(x86::rdx, x86::rsi);
+#endif
+    as.call(func);
+  }
+
   /* === Helper Pseudo-instructions === */
 
   void move(uint8_t dst, uint8_t src) {
@@ -338,8 +346,8 @@ struct MipsJit {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
-    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
+    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::read<T>));
+    else x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     x86_load_caller(); as.pop(x86::edi);
     if (rtx) as.mov(x86::gpq(rtx), x86::rax);
     else as.mov(x86_spilld(rt(instr)), x86::rax);
@@ -357,8 +365,8 @@ struct MipsJit {
     }
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
     else as.mov(x86::rsi, x86_spilld(rt(instr)));
-    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
+    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::write<T>));
+    else x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
     x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
@@ -381,8 +389,8 @@ struct MipsJit {
     as.shl(x86::ecx, 3); as.shl(x86::rax, x86::cl);
     // read unaligned data from memory
     as.push(x86::rax);
-    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
+    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::read<T>));
+    else x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     as.pop(x86::rcx);
     // apply mask depending on direction
     if (right) {
@@ -419,8 +427,8 @@ struct MipsJit {
     as.shl(x86::ecx, 3); as.shl(x86::rax, x86::cl);
     // read previous data from memory
     as.push(x86::edi); as.push(x86::rax);
-    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
+    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::read<T>));
+    else x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     as.pop(x86::rcx); as.pop(x86::edi);
     // apply mask depending on direction
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
@@ -432,8 +440,8 @@ struct MipsJit {
     as.and_(x86::rsi, x86::rcx); as.not_(x86::rcx);
     as.and_(x86::rax, x86::rcx); as.or_(x86::rsi, x86::rax);
     // write masked data to memory
-    if (is_rsp) as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
-    else as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
+    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::write<T>));
+    else x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
     x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
@@ -1256,18 +1264,15 @@ struct MipsJit {
       uint32_t rtx = x86_reg(rt(instr));
       if (rtx) as.mov(x86::esi, x86::gpd(rtx));
       else as.mov(x86::esi, x86_spill(rt(instr)));
-      as.call(reinterpret_cast<uint64_t>(R4300::mmio_write<uint32_t>));
+      x86_call(reinterpret_cast<uint64_t>(R4300::write<uint32_t, false>));
       x86_load_caller(); as.pop(x86::edi); return;
     } else if (rd(instr) == 11) {
       as.and_(x86_spill(13 + dev_cop0), ~0x8000);
     }
     if (rt(instr) == 0) as.mov(x86_spilld(rd(instr) + dev_cop0), 0);
     else move(rd(instr) + dev_cop0, rt(instr));
-    if (!is_rsp && (rd(instr) == 9 || rd(instr) == 11)) {
-      x86_store_caller();
-      as.call(reinterpret_cast<uint64_t>(R4300::timer_update));
-      x86_load_caller();
-    }
+    if (!is_rsp && (rd(instr) == 9 || rd(instr) == 11))
+      x86_call(reinterpret_cast<uint64_t>(R4300::timer_update));
   }
 
   template <Op operation>
@@ -1461,7 +1466,7 @@ struct MipsJit {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
-    as.call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
+    x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     x86_load_caller(); as.pop(x86::edi);
     bool fr = R4300::reg_array[12 + dev_cop0] & 0x4000000;
     if (sizeof(T) < 8 && !fr) {
@@ -1495,7 +1500,7 @@ struct MipsJit {
       if (rtx) as.movsd(x86_spilld(rt(instr) + dev_cop1), x86::xmm(rtx));
       as.mov(x86::rsi, x86_spilld(rt(instr) + dev_cop1));
     }
-    as.call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
+    x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
     x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
@@ -1561,19 +1566,6 @@ struct MipsJit {
 
   template <Mul type, bool accumulate, bool sat_sgn = true>
   void vmudn(uint32_t instr) {
-    /*as.mov(x86::rax, (uint64_t)0x18400000ffa4ffa6);
-    as.pinsrq(x86::xmm15, x86::rax, 1);
-    as.mov(x86::rax, (uint64_t)0x00006a0900000000);
-    as.pinsrq(x86::xmm15, x86::rax, 0);
-    as.mov(x86::rax, (uint64_t)0x00000000ffffffff);
-    as.pinsrq(x86::xmm14, x86::rax, 1);
-    as.mov(x86::rax, (uint64_t)0x0000000200000000);
-    as.pinsrq(x86::xmm14, x86::rax, 0);
-    as.mov(x86::rax, (uint64_t)0x00000000ffffffff);
-    as.pinsrq(x86::xmm13, x86::rax, 1);
-    as.mov(x86::rax, (uint64_t)0x0000000000000000);
-    as.pinsrq(x86::xmm13, x86::rax, 0);*/
-
     printf("COP2 Multiply of $%d and $%d to $%d\n", rt(instr), rd(instr), sa(instr));
     // add rounding value
     if (type == Mul::frac && !accumulate) {
@@ -1975,7 +1967,7 @@ struct MipsJit {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
     }
-    as.call(reinterpret_cast<uint64_t>(RSP::read<T>));
+    x86_call(reinterpret_cast<uint64_t>(RSP::read<T>));
     x86_load_caller(); as.pop(x86::edi);
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
@@ -2010,7 +2002,7 @@ struct MipsJit {
       case 4: as.pextrd(x86::rsi, result, 0x3 - (sa(instr) >> 3)); break;
       case 8: as.pextrq(x86::rsi, result, 0x1 - (sa(instr) >> 4)); break;
     }
-    as.call(reinterpret_cast<uint64_t>(RSP::write<T>));
+    x86_call(reinterpret_cast<uint64_t>(RSP::write<T>));
     x86_load_caller(); as.pop(x86::edi);
   }
 
@@ -2028,12 +2020,12 @@ struct MipsJit {
     }
     // load possibly unaligned data from memory
     if (right) as.sub(x86::edi, 0x8);
-    as.push(x86::edi); as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+    as.push(x86::edi); x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
     as.pop(x86::edi); as.mov(x86::ecx, x86::edi); as.and_(x86::ecx, 0xf);
     Label after = as.newLabel(); as.cmp(x86::ecx, 0x8); as.jae(after);
     as.push(x86::ecx); as.mov(x86_spilld(rt(instr) * 2 + !right + dev_cop2), x86::rax);
     right ? as.sub(x86::edi, 0x8) : as.add(x86::edi, 0x8);
-    as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+    x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
     as.pop(x86::ecx); as.bind(after); as.shl(x86::ecx, 3);
     // compute mask for loaded data
     as.xor_(x86::rdx, x86::rdx); as.not_(x86::rdx); as.shl(x86::rdx, x86::cl);
@@ -2065,11 +2057,10 @@ struct MipsJit {
     Label after = as.newLabel(); as.cmp(x86::ecx, 0x8); as.jae(after);
     // write unmasked half of register, if applicable
     as.mov(x86::rsi, x86_spilld(rt(instr) * 2 + !right + dev_cop2));
-    as.push(x86::edi); as.call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
+    as.push(x86::edi); x86_call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
     as.pop(x86::edi);
-    right ? as.sub(x86::edi, 0x8) : as.add(x86::edi, 0x8);
-    as.bind(after);
-    as.push(x86::edi); as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+    right ? as.sub(x86::edi, 0x8) : as.add(x86::edi, 0x8); as.bind(after);
+    as.push(x86::edi); x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
     // compute mask for half of register
     as.pop(x86::edi); as.pop(x86::ecx); as.shl(x86::ecx, 3);
     as.xor_(x86::rdx, x86::rdx); as.not_(x86::rdx); as.shl(x86::rdx, x86::cl);
@@ -2080,7 +2071,7 @@ struct MipsJit {
     // apply mask to loaded data
     as.sub(x86::rbp, x86::rcx); as.and_(x86::rsi, x86::rdx); as.not_(x86::rdx);
     as.and_(x86::rax, x86::rdx); as.or_(x86::rsi, x86::rax);
-    as.call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
+    x86_call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
     x86_load_caller(); as.pop(x86::edi);
   }
 
@@ -2098,11 +2089,11 @@ struct MipsJit {
       as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
     }
     if (!packed) as.push(x86::edi);
-    as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+    x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
     as.pinsrq(x86::xmm1, x86::rax, (packed ? 0 : 1));
     if (!packed) {
       as.pop(x86::edi), as.add(x86::edi, 8);
-      as.call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
+      x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
       as.pinsrq(x86::xmm1, x86::rax, 0);
     }
     x86_load_caller(); as.pop(x86::edi);
@@ -2141,13 +2132,13 @@ struct MipsJit {
     as.psrlw(x86::xmm0, 8 - (type != LWC2::lpv));
     as.packuswb(x86::xmm0, x86::xmm1);
     as.pextrq(x86::rsi, x86::xmm0, sa(instr) != 0);
-    if (packed) as.call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
+    if (packed) x86_call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
     else {
       uint8_t stride = (type == LWC2::lfv ? 4 : 2);
       as.add(x86::edi, 16 - stride);
       for (uint8_t i = 0; i < 16; i += stride) {
         as.push(x86::edi), as.push(x86::rsi);
-        as.call(reinterpret_cast<uint64_t>(RSP::write<uint8_t>));
+        x86_call(reinterpret_cast<uint64_t>(RSP::write<uint8_t>));
         as.pop(x86::rsi), as.pop(x86::edi);
         as.sub(x86::edi, stride), as.shr(x86::rsi, 8);
       }
