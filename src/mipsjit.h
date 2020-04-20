@@ -205,8 +205,12 @@ struct MipsJit {
 #ifdef _WIN32
     as.mov(x86::rcx, x86::rdi);
     as.mov(x86::rdx, x86::rsi);
-#endif
+    as.sub(x86::rsp, 32);
     as.call(func);
+    as.add(x86::rsp, 32);
+#else
+    as.call(func);
+#endif
   }
 
   /* === Helper Pseudo-instructions === */
@@ -1271,8 +1275,11 @@ struct MipsJit {
     }
     if (rt(instr) == 0) as.mov(x86_spilld(rd(instr) + dev_cop0), 0);
     else move(rd(instr) + dev_cop0, rt(instr));
-    if (!is_rsp && (rd(instr) == 9 || rd(instr) == 11))
+    if (!is_rsp && (rd(instr) == 9 || rd(instr) == 11)) {
+      as.push(x86::edi), x86_store_caller();
       x86_call(reinterpret_cast<uint64_t>(R4300::timer_update));
+      x86_load_caller(), as.pop(x86::edi);
+    }
   }
 
   template <Op operation>
@@ -1924,12 +1931,12 @@ struct MipsJit {
 
   void cfc2(uint32_t instr) {
     if (rt(instr) == 0) return;
+    as.mov(x86::rax, (uint64_t)0x01030507090b0d0f); as.movq(x86::xmm1, x86::rax);
     as.movdqa(x86::xmm0, x86_spillq((rd(instr) & 0x3) * 4 + dev_cop2c));
-    as.pmovmskb(x86::eax, x86::xmm0); as.shl(x86::eax, 16);
+    as.pshufb(x86::xmm0, x86::xmm1); as.pmovmskb(x86::ecx, x86::xmm0);
     as.movdqa(x86::xmm0, x86_spillq((rd(instr) & 0x3) * 4 + 2 + dev_cop2c));
-    as.pmovmskb(x86::ecx, x86::xmm0); as.or_(x86::eax, x86::ecx);
-    as.mov(x86::edx, 0xaaaaaaaa); as.pext(x86::edx, x86::eax, x86::edx);
-    for (uint8_t i = 0; i < 16; ++i) as.rcr(x86::dx, 1), as.rcl(x86::ax, 1);
+    as.pshufb(x86::xmm0, x86::xmm1); as.pmovmskb(x86::eax, x86::xmm0);
+    as.and_(x86::ecx, 0xff); as.shl(x86::eax, 8); as.or_(x86::eax, x86::ecx);
     uint8_t rtx = x86_reg(rt(instr));
     if (rtx) as.movsx(x86::gpq(rtx), x86::ax);
     else {

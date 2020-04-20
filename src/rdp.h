@@ -200,7 +200,7 @@ namespace Vulkan {
     vkGetPhysicalDeviceMemoryProperties(gpu, &props);
     for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
       const VkMemoryType memory_type = props.memoryTypes[i];
-      if (memory_type.propertyFlags & flags != flags) continue;
+      if ((memory_type.propertyFlags & flags) != flags) continue;
       allocate_info.memoryTypeIndex = i;
       vkAllocateMemory(device, &allocate_info, 0, memory);
     }
