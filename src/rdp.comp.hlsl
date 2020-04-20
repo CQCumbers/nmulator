@@ -63,7 +63,7 @@ struct RDPTex {
 [[vk::binding(0)]] StructuredBuffer<RDPCommand> cmds;
 [[vk::binding(1)]] StructuredBuffer<TileData> tiles;
 [[vk::binding(2)]] StructuredBuffer<RDPTex> texes;
-[[vk::binding(3)]] ConstantBuffer<GlobalData> global;
+[[vk::binding(3)]] StructuredBuffer<GlobalData> globals;
 
 [[vk::binding(4)]] ByteAddressBuffer tmem;
 [[vk::binding(5)]] RWByteAddressBuffer pixels;
@@ -222,7 +222,7 @@ int sample_color(uint2 pos, int dx1, int dy1, RDPCommand cmd) {
     }
     return color;
   }
-  return global.size == 4 ? cmd.fill : read_rgba16(cmd.fill);
+  return globals[0].size == 4 ? cmd.fill : read_rgba16(cmd.fill);
 }
 
 uint visible(uint2 pos, RDPCommand cmd, out int dx, out int dy) {
@@ -307,6 +307,7 @@ uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
 
 [numthreads(8, 8, 1)]
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
+  GlobalData global = globals[0];
   if (GlobalID.x >= global.width) return;
   uint tile_pos = GlobalID.y * global.width + GlobalID.x;
   uint pixel = pixels.Load(tile_pos * global.size), zmem = zbuf.Load(tile_pos * 4);

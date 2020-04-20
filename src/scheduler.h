@@ -71,7 +71,7 @@ inline void exec_next() {
   s.next.func(), s.now = s.next.time;
 }
 
-uint32_t pext_low(uint32_t val, uint32_t mask) {
+inline uint32_t pext_low(uint32_t val, uint32_t mask) {
     val &= 0x55555555;
     val = (val ^ (val >> 1)) & 0x33333333;
     val = (val ^ (val >> 2)) & 0x0f0f0f0f;

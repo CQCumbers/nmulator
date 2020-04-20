@@ -60,47 +60,47 @@ namespace Vulkan {
   uint32_t queue_idx = 0;
   VkCommandBuffer commands = VK_NULL_HANDLE;
 
+  constexpr VkDeviceSize align(VkDeviceSize offset) {
+    return (offset + 0x1f) & ~0x1f;
+  }
+
   /* === Descriptor Memory Access === */
 
-  uint8_t *mapped_mem;
+  uint8_t *mapped_mem = nullptr;
   const uint32_t group_size = 8, max_cmds = 2048, max_copies = 512;
   uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0, n_tmems = 0;
 
+  const VkDeviceSize cmds_offset = 0;
   const VkDeviceSize cmds_size = max_cmds * sizeof(RDPCommand);
   RDPCommand *cmds_ptr() { return (RDPCommand*)(mapped_mem); }
-  VkBuffer cmds = VK_NULL_HANDLE;
 
-  const VkDeviceSize tiles_offset = cmds_size;
+  const VkDeviceSize tiles_offset = align(cmds_offset + cmds_size);
   const VkDeviceSize tiles_size = gwidth * gheight * sizeof(TileData);
   TileData *tiles_ptr() { return (TileData*)(mapped_mem + tiles_offset); }
-  VkBuffer tiles = VK_NULL_HANDLE;
 
-  const VkDeviceSize texes_offset = tiles_offset + tiles_size;
+  const VkDeviceSize texes_offset = align(tiles_offset + tiles_size);
   const VkDeviceSize texes_size = (max_copies + 1) * sizeof(RDPTex) * 8;
   RDPTex *texes_ptr() { return (RDPTex*)(mapped_mem + texes_offset) + n_tmems * 8; }
-  VkBuffer texes = VK_NULL_HANDLE;
 
-  const VkDeviceSize globals_offset = texes_offset + texes_size;
+  const VkDeviceSize globals_offset = align(texes_offset + texes_size);
   const VkDeviceSize globals_size = sizeof(GlobalData);
   GlobalData *globals_ptr() { return (GlobalData*)(mapped_mem + globals_offset); }
-  VkBuffer globals = VK_NULL_HANDLE;
 
-  const VkDeviceSize tmem_offset = globals_offset + globals_size;
+  const VkDeviceSize tmem_offset = align(globals_offset + globals_size);
   const VkDeviceSize tmem_size = (max_copies + 1) << 12;
   uint8_t *tmem_ptr() { return mapped_mem + tmem_offset + (n_tmems << 12); }
-  VkBuffer tmem = VK_NULL_HANDLE;
 
-  const VkDeviceSize pixels_offset = tmem_offset + tmem_size;
+  const VkDeviceSize pixels_offset = align(tmem_offset + tmem_size);
   const VkDeviceSize pixels_size = 320 * 240 * sizeof(uint32_t);
   uint8_t *pixels_ptr() { return mapped_mem + pixels_offset; }
-  VkBuffer pixels = VK_NULL_HANDLE;
 
-  const VkDeviceSize zbuf_offset = pixels_offset + pixels_size;
+  const VkDeviceSize zbuf_offset = align(pixels_offset + pixels_size);
   const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint32_t);
   uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
-  VkBuffer zbuf = VK_NULL_HANDLE;
+
   const VkDeviceSize total_size = zbuf_offset + zbuf_size;
+  VkBuffer buffer = VK_NULL_HANDLE;
 
   /* === Vulkan Initialization == */
 
@@ -178,55 +178,33 @@ namespace Vulkan {
     vkCreateComputePipelines(device, 0, 1, &pipeline_info, 0, pipeline);
   }
 
-  void init_buffers(const VkPhysicalDevice &gpu, VkDeviceMemory *memory) {
-    VkPhysicalDeviceMemoryProperties props;
-    vkGetPhysicalDeviceMemoryProperties(gpu, &props);
-    // find host visible, coherent memory of at least 'size' bytes
-    for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
-      const VkMemoryType memoryType = props.memoryTypes[i];
-      if (!(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT & memoryType.propertyFlags) ||
-          !(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT & memoryType.propertyFlags) ||
-          !(total_size < props.memoryHeaps[memoryType.heapIndex].size)) continue;
-      const VkMemoryAllocateInfo allocate_info = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = total_size, .memoryTypeIndex = i
-      };
-      vkAllocateMemory(device, &allocate_info, 0, memory);
-    }
-    // exit if memory not allocated
-    // create cmds buffer from allocated device memory
+  void init_buffer(const VkPhysicalDevice &gpu, VkDeviceMemory *memory) {
+    // create shared buffer to hold descriptors
     VkBufferCreateInfo buffer_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = cmds_size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+      .size = total_size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
       .queueFamilyIndexCount = 1, .pQueueFamilyIndices = &queue_idx
     };
-    vkCreateBuffer(device, &buffer_info, 0, &cmds);
-    vkBindBufferMemory(device, cmds, *memory, 0);
-    // create tiles buffer
-    buffer_info.size = tiles_size;
-    vkCreateBuffer(device, &buffer_info, 0, &tiles);
-    vkBindBufferMemory(device, tiles, *memory, tiles_offset);
-    // create texes buffer
-    buffer_info.size = texes_size;
-    vkCreateBuffer(device, &buffer_info, 0, &texes);
-    vkBindBufferMemory(device, texes, *memory, texes_offset);
-    // create globals buffer
-    buffer_info.size = globals_size;
-    vkCreateBuffer(device, &buffer_info, 0, &globals);
-    vkBindBufferMemory(device, globals, *memory, globals_offset);
-    // create tmem buffer
-    buffer_info.size = tmem_size;
-    vkCreateBuffer(device, &buffer_info, 0, &tmem);
-    vkBindBufferMemory(device, tmem, *memory, tmem_offset);
-    // create pixels buffer
-    buffer_info.size = pixels_size;
-    vkCreateBuffer(device, &buffer_info, 0, &pixels);
-    vkBindBufferMemory(device, pixels, *memory, pixels_offset);
-    // create zbuf buffer
-    buffer_info.size = zbuf_size;
-    vkCreateBuffer(device, &buffer_info, 0, &zbuf);
-    vkBindBufferMemory(device, zbuf, *memory, zbuf_offset);
+    vkCreateBuffer(device, &buffer_info, 0, &buffer);
+    // get memory requirements for buffer
+    VkMemoryRequirements requirements;
+    vkGetBufferMemoryRequirements(device, buffer, &requirements);
+    VkMemoryAllocateInfo allocate_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = requirements.size
+    };
+    // find host visible, coherent memory meeting requirements
+    const VkMemoryPropertyFlags flags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    VkPhysicalDeviceMemoryProperties props;
+    vkGetPhysicalDeviceMemoryProperties(gpu, &props);
+    for (uint32_t i = 0; i < props.memoryTypeCount; ++i) {
+      const VkMemoryType memory_type = props.memoryTypes[i];
+      if (memory_type.propertyFlags & flags != flags) continue;
+      allocate_info.memoryTypeIndex = i;
+      vkAllocateMemory(device, &allocate_info, 0, memory);
+    }
+    vkBindBufferMemory(device, buffer, *memory, 0);
   }
 
   void init_descriptors(const VkDescriptorSetLayout &layout, VkDescriptorSet *descriptors) {
@@ -247,19 +225,20 @@ namespace Vulkan {
     vkAllocateDescriptorSets(device, &descriptors_info, descriptors);
     // bind buffers to descriptor set
     const VkDescriptorBufferInfo buffer_info[] = {
-      { .buffer = cmds, .offset = 0, .range = VK_WHOLE_SIZE },
-      { .buffer = tiles, .offset = 0, .range = VK_WHOLE_SIZE },
-      { .buffer = texes, .offset = 0, .range = VK_WHOLE_SIZE },
-      { .buffer = globals, .offset = 0, .range = VK_WHOLE_SIZE },
-      { .buffer = tmem, .offset = 0, .range = VK_WHOLE_SIZE },
-      { .buffer = pixels, .offset = 0, .range = VK_WHOLE_SIZE },
-      { .buffer = zbuf, .offset = 0, .range = VK_WHOLE_SIZE }
+      { .buffer = buffer, .offset = cmds_offset, .range = cmds_size },
+      { .buffer = buffer, .offset = tiles_offset, .range = tiles_size },
+      { .buffer = buffer, .offset = texes_offset, .range = texes_size },
+      { .buffer = buffer, .offset = globals_offset, .range = globals_size },
+      { .buffer = buffer, .offset = tmem_offset, .range = tmem_size },
+      { .buffer = buffer, .offset = pixels_offset, .range = pixels_size },
+      { .buffer = buffer, .offset = zbuf_offset, .range = zbuf_size }
     };
     VkWriteDescriptorSet write_descriptors[7];
     for (uint8_t i = 0; i < 7; ++i) {
       write_descriptors[i] = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = *descriptors, .dstBinding = i, .descriptorCount = 1,
+        .dstSet = *descriptors, .dstBinding = i,
+        .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pBufferInfo = &buffer_info[i]
       };
@@ -302,9 +281,11 @@ namespace Vulkan {
       .pApplicationName = "nmulator RDP",
       .apiVersion = VK_API_VERSION_1_0
     };
+    const char *layer = "VK_LAYER_KHRONOS_validation";
     const VkInstanceCreateInfo instance_info = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
       .pApplicationInfo = &app_info,
+      .enabledLayerCount = 1, .ppEnabledLayerNames = &layer,
     };
     vkCreateInstance(&instance_info, 0, &instance);
     init_device(instance, &gpu);
@@ -317,7 +298,7 @@ namespace Vulkan {
 
     // use structured bindings instead of output params?
     init_pipeline(shader, sizeof(shader), &desc_layout, &layout, &pipeline);
-    init_buffers(gpu, &memory);
+    init_buffer(gpu, &memory);
     init_descriptors(desc_layout, &descriptors);
     record_commands(layout, pipeline, descriptors);
     

@@ -353,8 +353,8 @@ namespace R4300 {
       case 0x4300000:
         if (val & 0x800) unset_irqs(0x20); return;
       case 0x430000c:
-        mi_mask &= ~pext_low(val >> 0, 0x1f);
-        mi_mask |= pext_low(val >> 1, 0x1f);
+        mi_mask &= ~pext_low(val >> 0, 0x3f);
+        mi_mask |= pext_low(val >> 1, 0x3f);
         if (mi_irqs & mi_mask) {
           cause |= 0x400, cause &= ~0xff;
         } else cause &= ~0x400; return;
@@ -507,8 +507,8 @@ namespace R4300 {
     if (sig != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
     uint8_t *addr = (uint8_t*)info->ExceptionRecord->ExceptionInformation[1];
     int64_t hpage = addr - pages[0];
-    if (!(0 <= hpage && hpage <= addr_mask)) exit(0);
-    unprotect(hpage & hpage_mask);
+    if (!(0 <= hpage && hpage <= addr_mask)) exit(1);
+    unprotect(hpage & hpage_mask); return EXCEPTION_CONTINUE_EXECUTION;
   }
 
   void setup_fault_handler() {
@@ -537,7 +537,7 @@ namespace R4300 {
   void handle_fault(int sig, siginfo_t *info, void *raw_ctx) {
     if (sig != SIGBUS && sig != SIGSEGV) return;
     int64_t hpage = (uint8_t*)info->si_addr - pages[0];
-    if (!(0 <= hpage && hpage <= addr_mask)) exit(0);
+    if (!(0 <= hpage && hpage <= addr_mask)) exit(1);
     unprotect(hpage & hpage_mask);
   }
 
