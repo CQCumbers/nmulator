@@ -20,6 +20,7 @@ brew install sdl2
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build
 ```
+On Windows, after downloading SDL2 add `SDL2Config.cmake` to the extracted directory. Then, add `-DSDL2_DIR=...` to first cmake command above and `--config RelWithDebInfo` to the second. After compiling, drag SDL2.dll and asmjit.dll into the same folder as `nmulator.exe`.
 
 ## Resources
 - [Documentation](https://ultra64.ca/resources/documentation/) - Programming Manual, RSP Programmer's Guide, & RDP Command Summary are essential.
