@@ -2,6 +2,8 @@
 #include "debugger.h"
 
 int main(int argc, char* argv[]) {
+  //Vulkan::run_buffer();
+
   // initialize system components
   if (argc != 2 && argc != 3) printf("error: must provide file\n"), exit(1);
   FILE *file = fopen(argv[1], "r");

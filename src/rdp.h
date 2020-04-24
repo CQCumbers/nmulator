@@ -9,6 +9,16 @@
 #include "scheduler.h"
 #include "shader.spv"
 
+#include <SDL2/SDL.h>
+#include <sys/mman.h>
+
+static uint8_t *alloc_pages(uint32_t size) {
+  return reinterpret_cast<uint8_t*>(mmap(
+    nullptr, size, PROT_READ | PROT_WRITE,
+    MAP_ANONYMOUS | MAP_SHARED, 0, 0
+  ));
+}
+
 /* === Shader Structs === */
 
 // all coeffs are 16.16 fixed point
@@ -23,6 +33,7 @@ struct GlobalData {
   uint32_t n_cmds, pad;
 };
 
+#pragma pack(push, 1)
 struct RDPState {
   int32_t sxh, sxl, syh, syl;
   uint32_t modes[2], mux[2];
@@ -39,10 +50,16 @@ struct RDPCommand {
   int32_t sh, sm, sl;
 
   int32_t shade[4], sde[4], sdx[4];
-  int32_t tex[3], tde[3], tdx[3];
-  int32_t zpos, zde, zdx;
+  //int32_t tex[4], tde[4], tdx[4];
+  int32_t tex[3];
+  int32_t zpos;
+  int32_t tde[3];
+  int32_t zde;
+  int32_t tdx[3];
+  int32_t zdx;
   RDPState state;
 };
+#pragma pack(pop)
 
 struct RDPTex {
   uint32_t format, size;
@@ -374,6 +391,42 @@ namespace Vulkan {
     fclose(file), dump_next = false;
   }
 
+  void run_buffer() {
+    init();
+    FILE *file = fopen("dump.bin", "r");
+    if (!file) printf("error: can't open file\n"), exit(1);
+    fread(mapped_mem, 1, total_size, file);
+    fclose(file);
+    
+    printf("size of RDPCommand: %lu\n", offsetof(RDPCommand, zpos));
+
+    SDL_Window *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
+    SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+    SDL_RenderClear(renderer);
+
+    SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA5551,
+        SDL_TEXTUREACCESS_STREAMING, 320, 240);
+
+    run_commands();
+    uint16_t *pixels = (uint16_t*)pixels_ptr();
+    uint16_t *out = (uint16_t*)alloc_pages(320 * 240 * 2);
+    for (uint32_t i = 0; i < 320 * 240; ++i)
+      out[i] = bswap16(pixels[i]);
+    SDL_UpdateTexture(texture, nullptr, out, 320 * 2);
+
+    SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+    SDL_RenderPresent(renderer);
+    while (true) {
+      for (SDL_Event e; SDL_PollEvent(&e);) {
+        if (e.type == SDL_QUIT) exit(0);
+      }
+    }
+  }
+
   void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
     if (!pixels || n_cmds == 0) return;
     if (dump_next) dump_buffer();
@@ -620,6 +673,7 @@ namespace RDP {
     cmd.tdx[0] = (instr[2] & 0xffff0000) | (instr[6] >> 16);
     cmd.tdx[1] = (instr[2] << 16) | (instr[6] & 0xffff);
     cmd.tdx[2] = (instr[3] & 0xffff0000) | (instr[7] >> 16);
+    if (state.modes[0] & 0x200000) cmd.tdx[0] = 0x200000;
   }
 
   void zbuf_triangle(RDPCommand &cmd) {
@@ -650,10 +704,12 @@ namespace RDP {
   template <bool flip>
   void tex_rectangle(RDPCommand &cmd) {
     std::array<uint32_t, 2> instr = fetch<2>(pc);
-    cmd.tex[0] = (flip ? instr[0] & 0xffff : instr[0] >> 16) << 6;
-    cmd.tex[1] = (flip ? instr[0] >> 16 : instr[0] & 0xffff << 6);
-    cmd.tde[0] = (instr[1] & 0xffff) << 11;
-    cmd.tdx[0] = (instr[1] >> 16) << 11;
+    (flip ? cmd.tex[1] : cmd.tex[0]) = (instr[0] >> 16) << 6;
+    (flip ? cmd.tex[0] : cmd.tex[1]) = (instr[0] & 0xffff) << 6;
+    (flip ? cmd.tdx[0] : cmd.tde[1]) = (instr[1] & 0xffff) << 11;
+    (flip ? cmd.tde[1] : cmd.tdx[0]) = (instr[1] >> 16) << 11;
+    if (state.modes[0] & 0x200000) cmd.tdx[0] = 0x200000;
+    cmd.tde[0] = 0, cmd.tdx[1] = 0;
   }
 
   template <uint8_t type>
