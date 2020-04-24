@@ -229,6 +229,8 @@ namespace R4300 {
         case SDLK_DOWN: stick_y = 0; break;         // Stick Down
         case SDLK_LEFT: stick_x = 0; break;         // Stick Left
         case SDLK_RIGHT: stick_x = 0; break;        // Stick Right
+        case SDLK_q: Vulkan::dump_next = true; break;
+        case SDLK_w: broke = true; break;
       }
     }
   }
@@ -412,8 +414,12 @@ namespace R4300 {
     // assumes all global, valid, and dirty
     for (uint8_t i = 0; i < 32; ++i) {
       uint32_t mask = ~(tlb[i][0] | 0x1fff);
-      if ((addr & mask) == (tlb[i][1] & mask))
-        return ((tlb[i][2] << 6) & mask) | (addr & ~mask);
+      if ((addr & mask) == (tlb[i][1] & mask)) {
+        mask = (mask >> 1) | 0x80000000;
+        bool odd = (addr & -mask) != 0;
+        uint32_t page = tlb[i][2 + odd] << 6;
+        return (page & mask) | (addr & ~mask);
+      }
     }
     printf("TLB miss for addr: %x\n", addr);
     return addr;

@@ -1217,23 +1217,24 @@ struct MipsJit {
   void tlbr() {
     constexpr uint8_t entry_reg[4] = {5, 10, 2, 3};
     as.mov(x86::rsi, reinterpret_cast<uint64_t>(&R4300::tlb));
-    as.mov(x86::eax, 0x3f), as.and_(x86::eax, x86_spill(dev_cop0));
-    as.sal(x86::eax, 4), as.add(x86::rsi, x86::eax);
+    as.mov(x86::eax, x86_spill(dev_cop0));
+    as.shl(x86::eax, 4), as.add(x86::rsi, x86::eax);
     for (uint8_t i = 0; i < 4; ++i) {
-      as.mov(x86::eax, x86::dword_ptr(x86::rsi, i << 2));
+      as.mov(x86::eax, x86::dword_ptr(x86::rsi, i * 4));
       as.mov(x86_spill(entry_reg[i] + dev_cop0), x86::eax);
     }
   }
 
   template <bool rand>
   void tlbwi() {
+    // mask, entryhi, entrylo0, entrylo1
     constexpr uint8_t entry_reg[4] = {5, 10, 2, 3};
     as.mov(x86::rsi, reinterpret_cast<uint64_t>(&R4300::tlb));
-    as.mov(x86::eax, 0x3f), as.and_(x86::eax, x86_spill(rand + dev_cop0));
-    as.sal(x86::eax, 4), as.add(x86::rsi, x86::eax);
+    as.mov(x86::eax, x86_spill(rand + dev_cop0));
+    as.shl(x86::eax, 4), as.add(x86::rsi, x86::rax);
     for (uint8_t i = 0; i < 4; ++i) {
       as.mov(x86::eax, x86_spill(entry_reg[i] + dev_cop0));
-      as.mov(x86::dword_ptr(x86::rsi, i << 2), x86::eax);
+      as.mov(x86::dword_ptr(x86::rsi, i * 4), x86::eax);
     }
   }
 
@@ -2431,7 +2432,7 @@ struct MipsJit {
       uint32_t instr = is_rsp ? RSP::fetch(pc) : R4300::fetch(pc);
       uint32_t pg = pc & hpage_mask;
       if (!is_rsp && pg != hpage) R4300::protect(hpage = pg);
-      if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
+      //if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
       pc = check_breaks(pc, next_pc), next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;

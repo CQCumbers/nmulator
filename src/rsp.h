@@ -269,9 +269,8 @@ namespace RSP {
   }
 
   void set_status(uint32_t val) {
-    printf("Writing %x to RSP_STATUS, RSP PC: %x\n", val, pc);
     if (halted() && (val & 0x1)) {
-      printf("Scheduling RSP\n");
+      //printf("Scheduling RSP\n");
       uint32_t hash = fetch(pc);
       block = &blocks[pc & addr_mask];
       if (!block->valid || block->hash != hash) {

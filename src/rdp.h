@@ -5,6 +5,7 @@
 #include <array>
 #include <vector>
 #include <string.h>
+#include <stdio.h>
 #include "scheduler.h"
 #include "shader.spv"
 
@@ -70,6 +71,7 @@ namespace Vulkan {
   const uint32_t group_size = 8, max_cmds = 2048, max_copies = 512;
   uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0, n_tmems = 0;
+  bool dump_next = false;
 
   const VkDeviceSize cmds_offset = 0;
   const VkDeviceSize cmds_size = max_cmds * sizeof(RDPCommand);
@@ -365,8 +367,16 @@ namespace Vulkan {
     }
   }
 
+  void dump_buffer() {
+    FILE *file = fopen("dump.bin", "w");
+    if (!file) printf("error: can't open file\n"), exit(1);
+    fwrite(mapped_mem, 1, total_size, file);
+    fclose(file), dump_next = false;
+  }
+
   void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
     if (!pixels || n_cmds == 0) return;
+    if (dump_next) dump_buffer();
     globals_ptr()->n_cmds = n_cmds;
     memcpy(pixels_ptr(), pixels, len);
     run_commands(); n_cmds = 0; memset(tiles_ptr(), 0, tiles_size);
