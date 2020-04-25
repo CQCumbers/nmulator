@@ -24,6 +24,7 @@ static uint8_t *alloc_pages(uint32_t size) {
 // all coeffs are 16.16 fixed point
 // except yh/yl/ym, which is 12.2
 
+#pragma pack(push, 1)
 struct TileData {
   uint32_t cmd_idxs[64];
 };
@@ -33,7 +34,6 @@ struct GlobalData {
   uint32_t n_cmds, pad;
 };
 
-#pragma pack(push, 1)
 struct RDPState {
   int32_t sxh, sxl, syh, syl;
   uint32_t modes[2], mux[2];
@@ -50,22 +50,17 @@ struct RDPCommand {
   int32_t sh, sm, sl;
 
   int32_t shade[4], sde[4], sdx[4];
-  //int32_t tex[4], tde[4], tdx[4];
-  int32_t tex[3];
-  int32_t zpos;
-  int32_t tde[3];
-  int32_t zde;
-  int32_t tdx[3];
-  int32_t zdx;
+  int32_t tex[4], tde[4], tdx[4];
   RDPState state;
 };
-#pragma pack(pop)
 
 struct RDPTex {
   uint32_t format, size;
-  uint32_t width, addr, pal;
-  uint32_t mask[2], shift[2];
+  uint32_t width, addr;
+  int32_t sth[2], stl[2], shift[2];
+  uint32_t pal, pad;
 };
+#pragma pack(pop)
 
 /* === Vulkan Setup === */
 
@@ -398,8 +393,6 @@ namespace Vulkan {
     fread(mapped_mem, 1, total_size, file);
     fclose(file);
     
-    printf("size of RDPCommand: %lu\n", offsetof(RDPCommand, zpos));
-
     SDL_Window *window = nullptr;
     SDL_Renderer *renderer = nullptr;
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
@@ -579,68 +572,74 @@ namespace RDP {
     tex_nibs = 0x1 << ((instr[0] >> 19) & 0x3);
     tex_width = (instr[0] & 0x3ff) + 1;
     tex_addr = instr[1] & 0x3ffffff;
-    //printf("Set Texture Image: %x, width: %d\n", tex_addr, tex_width);
   }
 
   void set_tile() {
     Vulkan::add_tmem_copy(state);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     uint8_t tex_idx = (instr[1] >> 24) & 0x7;
-    Vulkan::texes_ptr()[tex_idx] = {
-      .format = (instr[0] >> 21) & 0x7, .size = (instr[0] >> 19) & 0x3,
-      .width = ((instr[0] >> 9) & 0xff) << 3,
-      .addr = (instr[0] & 0x1ff) << 3, .pal = (instr[1] >> 20) & 0xf,
-      .mask = { (instr[1] >> 4) & 0xf, (instr[1] >> 14) & 0xf },
-      .shift = { instr[1] & 0xf, (instr[1] >> 10) & 0xf }
-    };
+    RDPTex &tex = Vulkan::texes_ptr()[tex_idx];
+    tex.format = (instr[0] >> 21) & 0x7, tex.size = (instr[0] >> 19) & 0x3;
+    tex.width = ((instr[0] >> 9) & 0xff) << 3;
+    tex.addr = (instr[0] & 0x1ff) << 3, tex.pal = (instr[1] >> 20) & 0xf;
+    tex.shift[0] = instr[1] & 0x3ff, tex.shift[1] = (instr[1] >> 10) & 0x3ff;
+  }
+
+  void set_tile_size() {
+    Vulkan::add_tmem_copy(state);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
+    uint8_t tex_idx = (instr[1] >> 24) & 0x7;
+    RDPTex &tex = Vulkan::texes_ptr()[tex_idx];
+    tex.sth[0] = (instr[1] >> 12) & 0xfff, tex.sth[1] = instr[1] & 0xfff;
+    tex.stl[0] = (instr[0] >> 12) & 0xfff, tex.stl[1] = instr[0] & 0xfff;
   }
 
   void load_tile() {
+    // Set RDP tile size
     Vulkan::add_tmem_copy(state);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
-    uint32_t sh = (instr[1] >> 12) & 0xfff, th = instr[1] & 0xfff;
-    uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
-    th >>= 2, tl >>= 2, sh >>= 2, sl >>= 2;
-    RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+    uint8_t tex_idx = (instr[1] >> 24) & 0x7;
+    RDPTex &tex = Vulkan::texes_ptr()[tex_idx];
+    tex.sth[0] = (instr[1] >> 12) & 0xfff, tex.sth[1] = instr[1] & 0xfff;
+    tex.stl[0] = (instr[0] >> 12) & 0xfff, tex.stl[1] = instr[0] & 0xfff;
+    // Copy from texture image to tmem
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
-    //printf("[RDP] Load Tile %d, %d, %d, %d to tmem %x\n", sl, tl, sh, th, tex.addr);
-
-    uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
-    uint32_t width = (sh - sl + 1) * tex_nibs / 2;
-    uint32_t ram = tex_addr + offset;
-    //printf("First RAM address %x: %x\n", ram, *(uint32_t*)(R4300::pages[0] + ram));
-    for (uint32_t i = 0; i <= th - tl; ++i) {
+    uint32_t ram = tex.stl[1] / 4 * tex_width + tex.stl[0] / 4;
+    uint32_t len = tex.sth[0] / 4 - tex.stl[0] / 4 + 1;
+    ram = tex_addr + ram * tex_nibs / 2, len = len * tex_nibs / 2;
+    for (int32_t i = 0; i <= (tex.sth[1] - tex.stl[1]) / 4; ++i) {
       if (tex_nibs == 8) {
-        for (uint32_t i = 0; i < width; i += 4) {
+        for (uint32_t i = 0; i < len; i += 4) {
           memcpy(mem + i / 2, R4300::pages[0] + ram + i, 2);
           memcpy(mem + 0x800 + i / 2, R4300::pages[0] + ram + i + 2, 2);
         }
-      } else memcpy(mem, R4300::pages[0] + ram, width);
+      } else memcpy(mem, R4300::pages[0] + ram, len);
       mem += tex.width, ram += tex_width * tex_nibs / 2;
     }
   }
 
   void load_block() {
+    // Set copy parameters
     Vulkan::add_tmem_copy(state);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     uint32_t sh = (instr[1] >> 12) & 0xfff/*, dxt = instr[1] & 0xfff*/;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
     RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+    // Copy from texture image to tmem
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
-
     uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
     uint32_t width = (sh - sl + 1) * tex_nibs / 2;
     memcpy(mem, R4300::pages[0] + tex_addr + offset, width);
   }
 
   void load_tlut() {
+    // Set copy parameters
     Vulkan::add_tmem_copy(state);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
-    uint32_t sh = (instr[1] >> 14) & 0xff;
-    uint32_t sl = (instr[0] >> 14) & 0xff;
+    uint32_t sh = (instr[1] >> 14) & 0xff, sl = (instr[0] >> 14) & 0xff;
     RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+    // Copy from texture image to tmem
     uint8_t *mem = Vulkan::tmem_ptr() + (state.tlut = tex.addr);
-
     uint32_t ram = tex_addr + sl * tex_nibs / 2;
     uint32_t width = (sh - sl + 1) * tex_nibs / 2;
     memcpy(mem, R4300::pages[0] + ram, width);
@@ -678,8 +677,8 @@ namespace RDP {
 
   void zbuf_triangle(RDPCommand &cmd) {
     std::array<uint32_t, 4> instr = fetch<4>(pc);
-    cmd.zpos = instr[0], cmd.zde = instr[2];
-    cmd.zdx = instr[1];
+    cmd.tex[3] = instr[0], cmd.tde[3] = instr[2];
+    cmd.tdx[3] = instr[1];
   }
 
   template <uint8_t type>
@@ -760,7 +759,7 @@ namespace RDP {
         case 0x2e: set_zprim(); break;
         case 0x2f: set_other_modes(); break;
         case 0x30: load_tlut(); break;
-        case 0x32: printf("[RDP] SET TILE SIZE\n"); pc += 8; break;
+        case 0x32: set_tile_size(); break;
         case 0x33: load_block(); break;
         case 0x34: load_tile(); break;
         case 0x35: set_tile(); break;

@@ -53,8 +53,9 @@ struct RDPCommand {
 
 struct RDPTex {
   uint format, size;
-  uint width, addr, pal;
-  uint mask[2], shift[2];
+  uint width, addr;
+  int2 sth, stl, shift;
+  uint pal, pad;
 };
 
 /* === Resource Buffers === */
@@ -111,16 +112,17 @@ uint pack32(uint4 color) {
   return (c.w << 24) | (c.z << 16) | (c.y << 8) | c.x;
 }
 
+uint4 unpack32(uint color) {
+  uint a = color >> 24, b = color >> 16;
+  return uint4(color, color >> 8, b, a) & 0xff;
+}
+
 /* === Pipeline Stages === */
 
-uint read_texel(RDPTex tex, RDPCommand cmd, uint s, uint t) {
-  s >>= 5, t >>= 5; // convert 16.16 texture coords to texels
-  uint ms = s & (1 << tex.mask[0]), mt = t & (1 << tex.mask[1]);
-  //if (tex.shift[0] <= 10) { s >>= tex.shift[0]; } else { s <<= (16 - tex.shift[0]); }
-  //if (tex.shift[1] <= 10) { t >>= tex.shift[1]; } else { t <<= (16 - tex.shift[1]); }
-  if (tex.mask[0]) { s &= ((1 << tex.mask[0]) - 1); if (ms) s = ((1 << tex.mask[0]) - 1) - s; }
-  if (tex.mask[1]) { t &= ((1 << tex.mask[1]) - 1); if (mt) t = ((1 << tex.mask[1]) - 1) - t; }
-  
+uint read_texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
+  bool2 mst = tex.shift & 0x100, en = (mask != 0);
+  st ^= -(en & (st >> mask) & mst), st &= (en << mask) - 1;
+  uint s = st.x, t = st.y;
   tex.addr = (tex.addr & 0xfff) + (cmd.tmem << 12);
   cmd.tlut = (cmd.tlut & 0xfff) + (cmd.tmem << 12);
   if (tex.format == 0 && tex.size == 2) {        // 16 bit RGBA
@@ -232,12 +234,20 @@ bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out uint4 s
   return bool2(zle, zge);
 }
 
-uint sample_tex(uint3 stw, RDPCommand cmd) {
+uint sample_tex(int3 stw, RDPCommand cmd) {
   if (~cmd.type & T_TEX) return 0;
   uint mode = cmd.modes[0]; stw >>= 16;
   RDPTex tex = texes[cmd.tmem * 8 + cmd.tile];
+  // correct perspective, apply shift
   if (mode & M0_PERSP) stw = 32768.0 * stw / stw.z;
-  return read_texel(tex, cmd, stw.x, stw.y);
+  int2 shl = tex.shift & 0xf, st = stw.xy;
+  st = shl > 10 ? st << (16 - shl) : st >> shl;
+  // get mask, clamp coords to tex bounds
+  uint2 mask = min((tex.shift >> 4) & 0xf, 10);
+  bool2 cst = (tex.shift >> 9) || (mask == 0);
+  int2 stl = tex.stl << 3, sth = tex.sth << 3;
+  st = cst ? clamp(st - stl, 0, sth - stl) : st - stl;
+  return read_texel(st >> 5, mask, tex, cmd);
 }
 
 uint sample_shade(int2 dxy, RDPCommand cmd) {
