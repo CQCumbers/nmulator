@@ -32,6 +32,8 @@ struct TileData {
 struct GlobalData {
   uint width, size;
   uint n_cmds, pad;
+  uint2 zenc[128];
+  uint2 zdec[8];
 };
 
 struct RDPCommand {
@@ -84,7 +86,8 @@ uint write_rgba16(uint input) {
   uint output = ((input >> 3) & 0x1f) << 3;
   output |= ((input >> 13) & 0x7) | (((input >> 11) & 0x3) << 14);
   output |= ((input >> 19) & 0x1f) << 9;
-  return output | (((input >> 31) & 0x1) << 8);
+  output |= 0x200;
+  return output | ((input >> 31) << 8);
 }
 
 uint4 usadd(uint4 a, uint4 b) {
@@ -115,6 +118,23 @@ uint pack32(uint4 color) {
 uint4 unpack32(uint color) {
   uint a = color >> 24, b = color >> 16;
   return uint4(color, color >> 8, b, a) & 0xff;
+}
+
+uint unpackz(uint enc) {
+  uint dz =  (enc & 0x3) << 2;
+  uint exp_ = (enc >> 13) & 0x7;
+  uint mant = (enc >> 2) & 0x7ff;
+  uint2 val = globals[0].zdec[exp_];
+  uint dec = (mant << val.x) + val.y;
+  return ((dec & 0x3ffff) << 4) | dz;
+}
+
+uint packz(uint dec) {
+  uint idx = (dec >> 15) & 0x7f;
+  uint dz = (dec >> 2) & 0x3;
+  uint2 val = globals[0].zenc[idx];
+  uint mant = (dec >> val.x) & 0x7ff;
+  return (val.y << 13) | (mant << 2) | dz;
 }
 
 /* === Pipeline Stages === */
@@ -204,7 +224,8 @@ uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
   xa = max(xa, (int4)cmd.sxh) >> 14;
   xb = min(xb, (int4)cmd.sxl) >> 14;
   int4 x = pos.x * 4 + int4(0, 1, 0, 1);
-  return dot(vy && xa < x && x < xb, (int4)1);
+  uint cvg = dot(vy && xa < x + 2 && x + 2 < xb, 1);
+  return cvg + dot(vy && xa < x && x < xb, 1);
 }
 
 bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out uint4 stwz) {
@@ -264,7 +285,7 @@ uint combine(uint tex, uint shade, RDPCommand cmd) {
 
 uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
   // multiply 3-bit coverage and 5-bit alpha
-  uint mux = cmd.modes[1], alpha = color >> 27, ocvg = pixel >> 27;
+  uint mux = cmd.modes[1], alpha = color >> 27, ocvg = pixel >> 29;
   if (mux & M1_ALPHA2CVG) cvg = (alpha * cvg + 4) >> 5;
   if (mux & M1_CVG2ALPHA) alpha = cvg << 2;
   if ((mux & M1_ALPHA) && alpha < (cmd.blend >> 27)) return pixel;
@@ -272,7 +293,7 @@ uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
   uint p = sel(mux >> 30, uint4(color, pixel, cmd.blend, cmd.fog));
   uint a = sel(mux >> 26, uint4(alpha, cmd.fog >> 27, alpha, 0x0));
   uint m = sel(mux >> 22, uint4(color, pixel, cmd.blend, cmd.fog));
-  uint b = sel(mux >> 18, uint4(a ^ 0x1f, pixel >> 27, 0x1f, 0x0)) + 1;
+  uint b = sel(mux >> 18, uint4(a ^ 0x1f, pixel >> 29, 0x1f, 0x0)) + 1;
   // skip inputs based on flags
   bool copy = cmd.modes[0] & M0_COPY;
   bool on_cvg = mux & M1_ON_CVG, force = mux & M1_BLEND;
@@ -281,7 +302,7 @@ uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
   else if (on_cvg && !full) a = 0, b = 1;
   // blend selected inputs
   int c1 = clamp(cvg + ocvg, 0, 7), c2 = (cvg + ocvg) & 7;
-  uint output = sel(mux >> 8, uint4(c1, c2, 0x7, ocvg)) << 27;
+  uint output = sel(mux >> 8, uint4(c1, c2, 0x7, ocvg)) << 29;
   for (uint i = 0; i < 3; ++i) {
     uint pc = (p >> (i * 8)) & 0xff;
     uint mc = (m >> (i * 8)) & 0xff;
@@ -296,8 +317,9 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   GlobalData global = globals[0];
   if (GlobalID.x >= global.width) return;
   uint tile_pos = GlobalID.y * global.width + GlobalID.x;
-  uint pixel = pixels.Load(tile_pos * global.size), zmem = zbuf.Load(tile_pos * 4);
+  uint pixel = pixels.Load(tile_pos * global.size), zmem = zbuf.Load(tile_pos * 2);
   if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
+  zmem = unpackz(tile_pos & 0x1 ? zmem >> 16 : zmem);
 
   TileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < 64; ++i) {
@@ -327,5 +349,11 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       pixels.InterlockedOr(tile_pos * 2, write_rgba16(pixel));
     }
   } else pixels.Store(tile_pos * 4, pixel);
-  zbuf.Store(tile_pos * 4, zmem);
+  if (tile_pos & 0x1) {
+    zbuf.InterlockedAnd(tile_pos * 2, 0x0000ffff);
+    zbuf.InterlockedOr(tile_pos * 2, packz(zmem) << 16);
+  } else {
+    zbuf.InterlockedAnd(tile_pos * 2, 0xffff0000);
+    zbuf.InterlockedOr(tile_pos * 2, packz(zmem));
+  }
 }

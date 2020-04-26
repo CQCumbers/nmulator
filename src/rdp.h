@@ -32,6 +32,8 @@ struct TileData {
 struct GlobalData {
   uint32_t width, size;
   uint32_t n_cmds, pad;
+  uint32_t zenc[128][2];
+  uint32_t zdec[8][2];
 };
 
 struct RDPState {
@@ -110,7 +112,7 @@ namespace Vulkan {
   uint8_t *pixels_ptr() { return mapped_mem + pixels_offset; }
 
   const VkDeviceSize zbuf_offset = align(pixels_offset + pixels_size);
-  const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint32_t);
+  const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint16_t);
   uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
 
   const VkDeviceSize total_size = zbuf_offset + zbuf_size;
@@ -317,25 +319,34 @@ namespace Vulkan {
     record_commands(layout, pipeline, descriptors);
     
     // map memory so buffers can filled by cpu
-    vkMapMemory(device, memory, 0, total_size, 0, reinterpret_cast<void**>(&mapped_mem));
+    auto ptr = reinterpret_cast<void**>(&mapped_mem);
+    vkMapMemory(device, memory, 0, total_size, 0, ptr);
     memset(tiles_ptr(), 0, tiles_size);
 
-    uint32_t *zbuf = reinterpret_cast<uint32_t*>(zbuf_ptr());
-    for (uint32_t i = 0; i < 320 * 240; ++i) zbuf[i] = 0x3ffff0;
-
-    /*zlut_t *zlut = Vulkan::globals_ptr().zlut;
-    for (uint8_t i = 0; i < 0x88; ++i) {
-      uint32_t &shl = zlut[i].shift;
-      uint32_t &exp = zlut[i].exponent;
-      if (i < 0x40) shl = 6, exp = 0;
-      else if (i < 0x60) shl = 5, exp = 1;
-      else if (i < 0x70) shl = 4, exp = 2;
-      else if (i < 0x78) shl = 3, exp = 3;
-      else if (i < 0x7c) shl = 2, exp = 4;
-      else if (i < 0x7e) shl = 1, exp = 5;
-      else if (i < 0x7f) shl = 0, exp = 6;
-      else if (i < 0x80) shl = 0, exp = 7;
-    }*/
+    // setup z encoding LUT
+    uint32_t (*zenc)[2] = Vulkan::globals_ptr()->zenc;
+    for (uint8_t i = 0; i < 128; ++i) {
+      uint32_t &shr = zenc[i][0];
+      uint32_t &exp = zenc[i][1];
+      if (i < 0x40) shr = 6, exp = 0;
+      else if (i < 0x60) shr = 9, exp = 1;
+      else if (i < 0x70) shr = 8, exp = 2;
+      else if (i < 0x78) shr = 7, exp = 3;
+      else if (i < 0x7c) shr = 6, exp = 4;
+      else if (i < 0x7e) shr = 5, exp = 5;
+      else if (i < 0x7f) shr = 4, exp = 6;
+      else shr = 4, exp = 7;
+    }
+    // setup z decoding LUT
+    uint32_t (*zdec)[2] = Vulkan::globals_ptr()->zdec;
+    zdec[0][0] = 6, zdec[0][1] = 0x00000;
+    zdec[1][0] = 5, zdec[1][1] = 0x20000;
+    zdec[2][0] = 4, zdec[2][1] = 0x30000;
+    zdec[3][0] = 3, zdec[3][1] = 0x38000;
+    zdec[4][0] = 2, zdec[4][1] = 0x3c000;
+    zdec[5][0] = 1, zdec[5][1] = 0x3e000;
+    zdec[6][0] = 0, zdec[6][1] = 0x3f000;
+    zdec[7][0] = 0, zdec[7][1] = 0x3f800;
   }
 
   /* === Runtime Methods === */
@@ -420,17 +431,22 @@ namespace Vulkan {
     }
   }
 
-  void render(uint8_t *pixels, uint8_t *zbuf, uint32_t len) {
-    if (!pixels || n_cmds == 0) return;
+  void render(uint8_t *img, uint32_t img_len, uint8_t *zbuf, uint32_t zbuf_len) {
+    if (!img || n_cmds == 0) return;
     if (dump_next) dump_buffer();
     globals_ptr()->n_cmds = n_cmds;
-    memcpy(pixels_ptr(), pixels, len);
-    run_commands(); n_cmds = 0; memset(tiles_ptr(), 0, tiles_size);
-    memcpy(pixels, pixels_ptr(), len);
-    
-    // periodically clear zbuffer
-    uint32_t *zbuf2 = reinterpret_cast<uint32_t*>(zbuf_ptr());
-    for (uint32_t i = 0; i < 320 * 240; ++i) zbuf2[i] = 0x3ffff0;
+    memcpy(zbuf_ptr(), zbuf, zbuf_len);
+    memcpy(pixels_ptr(), img, img_len);
+    run_commands();
+    n_cmds = 0, memset(tiles_ptr(), 0, tiles_size);
+    memcpy(zbuf, zbuf_ptr(), zbuf_len);
+    memcpy(img, pixels_ptr(), img_len);
+
+    uint8_t *last_tmem = tmem_ptr();
+    RDPTex *last_texes = texes_ptr();
+    n_tmems = 0;
+    memcpy(tmem_ptr(), last_tmem, 0x1000);
+    memcpy(texes_ptr(), last_texes, sizeof(RDPTex) * 8);
   }
 }
 
@@ -494,13 +510,15 @@ namespace RDP {
   }
 
   void render() {
-    //memset(tile_dirty, 0, 8);
-    Vulkan::render(img_addr, zbuf_addr, img_width * height * img_size);
+    uint32_t img_len = img_width * height * img_size;
+    uint32_t zbuf_len = img_width * height * 2;
+    Vulkan::render(img_addr, img_len, zbuf_addr, zbuf_len);
   }
 
   /* === Instruction Translations === */
 
   void set_image() {
+    render();
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
     img_width = (instr[0] & 0x3ff) + 1;
