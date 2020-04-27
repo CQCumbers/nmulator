@@ -1569,6 +1569,7 @@ struct MipsJit {
 
   void invalid(uint32_t instr) {
     printf("Unimplemented instruction %x\n", instr);
+    printf("is_rsp: %x\n", is_rsp);
     exit(1);
   }
 

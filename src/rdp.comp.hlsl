@@ -1,6 +1,8 @@
 /* === Bitfield Flags === */
 
+#define M0_FILL      0x00300000
 #define M0_COPY      0x00200000
+#define M0_2CYCLE    0x00100000
 #define M0_PERSP     0x00080000
 #define M0_TLUT_IA   0x00004000
 
@@ -50,7 +52,7 @@ struct RDPCommand {
   uint tlut, tmem, texes;
   uint fill, fog, blend;
   uint env, prim, zprim;
-  uint keys[3];
+  uint keys, keyc, pad2;
 };
 
 struct RDPTex {
@@ -110,6 +112,19 @@ uint sel(uint idx, uint4 inputs) {
   }
 }
 
+uint sel(uint idx, uint4 i0, uint4 i1) {
+   if (idx >= 8) return 0;
+   uint4 inp = (idx & 0x4) ? i1 : i0;
+   return sel(idx, inp);
+}
+
+uint sel(uint idx, uint4 i0, uint4 i1, uint4 i2, uint4 i3) {
+   if (idx >= 16) return 0;
+   uint4 inp0 = (idx & 0x8) ? i2 : i0;
+   uint4 inp1 = (idx & 0x8) ? i3 : i1;
+   return sel(idx & 0x7, inp0, inp1);
+}
+
 uint pack32(uint4 color) {
   uint4 c = min(color >> 16, 0xff);
   return (c.w << 24) | (c.z << 16) | (c.y << 8) | c.x;
@@ -117,7 +132,12 @@ uint pack32(uint4 color) {
 
 uint4 unpack32(uint color) {
   uint a = color >> 24, b = color >> 16;
-  return uint4(color, color >> 8, b, a) & 0xff;
+  uint4 c = uint4(color, color >> 8, b, a);
+  return (c & 0xff) << 16;
+}
+
+uint unpacka(uint color) {
+  return (color >> 24) << 16;
 }
 
 uint unpackz(uint enc) {
@@ -204,6 +224,13 @@ uint read_texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
   return 0xffff00ff;
 }
 
+uint read_noise(uint seed) {
+  seed = (seed ^ 61) ^ (seed >> 16);
+  seed *= 9, seed = seed ^ (seed >> 4);
+  seed *= 0x27d4eb2d, seed = seed ^ (seed >> 15);
+  return seed;
+}
+
 uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
   // check pixel within y bounds
   int y1 = max(cmd.yh, cmd.syh);
@@ -233,6 +260,7 @@ bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out uint4 s
   stwz = stwz + cmd.tdx * dxy.x / 4;
   // read old z, dz from zbuf
   bool skip = (~cmd.type & T_ZBUF) || (~cmd.modes[1] & M1_ZCMP);
+  skip = skip || (cmd.modes[0] & M0_COPY);
   if (cvg == 0 || skip) return bool2(true);
   int oz = zmem >> 4, odz = zmem & 0xf;
   bool zmax = (oz == 0x3ffff);
@@ -277,10 +305,36 @@ uint sample_shade(int2 dxy, RDPCommand cmd) {
   return pack32(rgba + cmd.sdx * dxy.x / 4);
 }
 
-uint combine(uint tex, uint shade, RDPCommand cmd) {
-  if (cmd.type & T_TEX) return tex;
-  if (cmd.type & T_SHADE) return shade;
-  return globals[0].size == 4 ? cmd.fill : read_rgba16(cmd.fill);
+uint combine(uint tex, uint shade, uint noise_, RDPCommand cmd) {
+  uint cycle = cmd.modes[0] & M0_FILL;
+  if (cycle == M0_COPY) return tex;
+  if (cycle == M0_FILL) return cmd.fill;
+  // read mux values
+  uint mux0 = cmd.mux[0], mux1 = cmd.mux[1];
+  uint mc = (mux0 >> 15) & 0x1f;
+  // setup input options
+  uint4 i1 = uint4(0, tex, tex, cmd.prim);
+  uint4 i2 = uint4(shade, cmd.env, -1, 0);
+  uint4 i3 = uint4(tex, tex, cmd.prim, shade);
+  uint4 ia2 = uint4(shade, cmd.env, -1, noise_);
+  uint4 ib2 = uint4(shade, cmd.env, cmd.keyc, 0);
+  uint4 ic2 = uint4(shade, cmd.env, cmd.keys, 0);
+  // select packed inputs
+  uint pa = sel((mux0 >> 20) & 0xf, i1, ia2);
+  uint pb = sel((mux1 >> 28) & 0xf, i1, ib2);
+  uint pc = sel(mc, i1, ic2, i3, uint4(cmd.env, 0, 0, 0));
+  uint pd = sel((mux1 >> 15) & 0x7, i1, i2);
+  // unpack input channels
+  uint4 a = unpack32(pa), b = unpack32(pb);
+  uint4 c = unpack32(pc), d = unpack32(pd);
+  if (mc >= 7) c = c.wwww;
+  // select alpha inputs
+  a.w = unpacka(sel((mux0 >> 12) & 0x7, i1, i2));
+  b.w = unpacka(sel((mux1 >> 12) & 0x7, i1, i2));
+  c.w = unpacka(sel((mux0 >> 9) & 0x7, i1, i2));
+  d.w = unpacka(sel((mux1 >> 9) & 0x7, i1, i2));
+  // combine selected inputs
+  return pack32((a - b) * (c >> 16) / 256 + d);
 }
 
 uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
@@ -289,6 +343,7 @@ uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
   if (mux & M1_ALPHA2CVG) cvg = (alpha * cvg + 4) >> 5;
   if (mux & M1_CVG2ALPHA) alpha = cvg << 2;
   if ((mux & M1_ALPHA) && alpha < (cmd.blend >> 27)) return pixel;
+  if (cvg == 0) return pixel;
   // select blender inputs
   uint p = sel(mux >> 30, uint4(color, pixel, cmd.blend, cmd.fog));
   uint a = sel(mux >> 26, uint4(alpha, cmd.fog >> 27, alpha, 0x0));
@@ -303,13 +358,9 @@ uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
   // blend selected inputs
   int c1 = clamp(cvg + ocvg, 0, 7), c2 = (cvg + ocvg) & 7;
   uint output = sel(mux >> 8, uint4(c1, c2, 0x7, ocvg)) << 29;
-  for (uint i = 0; i < 3; ++i) {
-    uint pc = (p >> (i * 8)) & 0xff;
-    uint mc = (m >> (i * 8)) & 0xff;
-    uint oc = (a * pc + b * mc) / (a + b);
-    output |= min(oc, 0xff) << (i * 8);
-  }
-  return output;
+  uint4 p4 = unpack32(p), m4 = unpack32(m);
+  uint4 res = (a * p4 + b * m4) / (a + b);
+  return (pack32(res) & 0xffffff) | output;
 }
 
 [numthreads(8, 8, 1)]
@@ -320,6 +371,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   uint pixel = pixels.Load(tile_pos * global.size), zmem = zbuf.Load(tile_pos * 2);
   if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
   zmem = unpackz(tile_pos & 0x1 ? zmem >> 16 : zmem);
+  uint noise_ = read_noise(tile_pos);
 
   TileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < 64; ++i) {
@@ -335,7 +387,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       if (cvg == 0 || !depth.x) continue;
       uint tex = sample_tex(stwz, cmd);
       uint shade = sample_shade(dxy, cmd);
-      uint color = combine(tex, shade, cmd);
+      uint color = combine(tex, shade, noise_, cmd);
       pixel = blend(pixel, color, cvg, true, cmd);
     }
   }

@@ -42,7 +42,7 @@ struct RDPState {
   uint32_t tlut, tmem, texes;
   uint32_t fill, fog, blend;
   uint32_t env, prim, zprim;
-  uint32_t keys[3];
+  uint32_t keys, keyc, pad2;
 };
 
 struct RDPCommand {
@@ -576,13 +576,16 @@ namespace RDP {
   }
 
   void set_key_r() {
-    state.keys[0] = bswap32(fetch<2>(pc)[1]);
+    uint32_t instr = fetch<2>(pc)[1];
+    state.keys &= 0xffff00, state.keyc &= 0xffff00;
+    state.keys |= (instr >> 0) & 0xff, state.keyc |= (instr >> 8) & 0xff;
   }
 
   void set_key_gb() {
-    std::array<uint32_t, 2> instr = fetch<2>(pc);
-    state.keys[2] = (instr[1] & 0xffff) | ((instr[0] & 0xfff) << 16);
-    state.keys[1] = (instr[1] >> 16) | ((instr[0] & 0xfff000) >> 4);
+    uint32_t instr = fetch<2>(pc)[1];
+    state.keys &= 0xff, state.keyc &= 0xff;
+    state.keys |= (instr >> 8) & 0xff00, state.keys |= (instr << 8) & 0xff0000;
+    state.keyc |= (instr >> 16) & 0xff00, state.keyc |= (instr << 4) & 0xff0000;
   }
 
   void set_texture() {
