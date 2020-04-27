@@ -255,14 +255,14 @@ uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
   return cvg + dot(vy && xa < x && x < xb, 1);
 }
 
-bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out uint4 stwz) {
+bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out int4 stwz) {
   stwz = cmd.tex + cmd.tde * dxy.y / 4;
   stwz = stwz + cmd.tdx * dxy.x / 4;
   // read old z, dz from zbuf
   bool skip = (~cmd.type & T_ZBUF) || (~cmd.modes[1] & M1_ZCMP);
   skip = skip || (cmd.modes[0] & M0_COPY);
   if (cvg == 0 || skip) return bool2(true);
-  int oz = zmem >> 4, odz = zmem & 0xf;
+  uint oz = zmem >> 4, odz = zmem & 0xf;
   bool zmax = (oz == 0x3ffff);
   // calculate new z from slopes
   uint nz = (cmd.zprim >> 14) & 0x3fffc;
@@ -337,13 +337,13 @@ uint combine(uint tex, uint shade, uint noise_, RDPCommand cmd) {
   return pack32((a - b) * (c >> 16) / 256 + d);
 }
 
-uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
+uint blend(uint pixel, uint color, inout uint zmem, uint oz, uint cvg, bool far, RDPCommand cmd) {
   // multiply 3-bit coverage and 5-bit alpha
   uint mux = cmd.modes[1], alpha = color >> 27, ocvg = pixel >> 29;
   if (mux & M1_ALPHA2CVG) cvg = (alpha * cvg + 4) >> 5;
   if (mux & M1_CVG2ALPHA) alpha = cvg << 2;
-  if ((mux & M1_ALPHA) && alpha < (cmd.blend >> 27)) return pixel;
-  if (cvg == 0) return pixel;
+  if (cvg == 0) { zmem = oz; return pixel; }
+  if ((mux & M1_ALPHA) && alpha < (cmd.blend >> 27)) { zmem = oz; return pixel; }
   // select blender inputs
   uint p = sel(mux >> 30, uint4(color, pixel, cmd.blend, cmd.fog));
   uint a = sel(mux >> 26, uint4(alpha, cmd.fog >> 27, alpha, 0x0));
@@ -352,12 +352,14 @@ uint blend(uint pixel, uint color, uint cvg, bool far, RDPCommand cmd) {
   // skip inputs based on flags
   bool copy = cmd.modes[0] & M0_COPY;
   bool on_cvg = mux & M1_ON_CVG, force = mux & M1_BLEND;
-  bool full = cvg + ocvg > 7, aa = (mux & M1_AA) && far && !full;
-  if (copy || !(force || aa)) a = 1, b = ocvg = 0;
-  else if (on_cvg && !full) a = 0, b = 1;
+  bool full = cvg + ocvg > 7, aa = mux & M1_AA;
+  //if (copy) return (full && alpha ? color : pixel);
+  //if (on_cvg && !full) a = 0, b = 0x1f;
+  //if (!force && (full || !far || !aa)) a = 0x1f, b = ocvg = 0;
   // blend selected inputs
   int c1 = clamp(cvg + ocvg, 0, 7), c2 = (cvg + ocvg) & 7;
-  uint output = sel(mux >> 8, uint4(c1, c2, 0x7, ocvg)) << 29;
+  //if (!force && (full || !far || !aa)) c1 = (cvg + ocvg - 1) & 7;
+  uint output = sel(mux >> 8, uint4(c1, c2, 7, ocvg)) << 29;
   uint4 p4 = unpack32(p), m4 = unpack32(m);
   uint4 res = (a * p4 + b * m4) / (a + b);
   return (pack32(res) & 0xffffff) | output;
@@ -381,14 +383,14 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       RDPCommand cmd = cmds[(i << 5) | lsb];
       bitmask &= ~(0x1 << lsb);
 
-      int2 dxy; uint4 stwz;
+      int2 dxy; int4 stwz; uint oz = zmem;
       uint cvg = visible(GlobalID.xy, cmd, dxy);
       bool2 depth = compare_z(zmem, cvg, dxy, cmd, stwz);
       if (cvg == 0 || !depth.x) continue;
       uint tex = sample_tex(stwz, cmd);
       uint shade = sample_shade(dxy, cmd);
       uint color = combine(tex, shade, noise_, cmd);
-      pixel = blend(pixel, color, cvg, true, cmd);
+      pixel = blend(pixel, color, zmem, oz, cvg, depth.y, cmd);
     }
   }
   

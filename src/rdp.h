@@ -433,7 +433,6 @@ namespace Vulkan {
 
   void render(uint8_t *img, uint32_t img_len, uint8_t *zbuf, uint32_t zbuf_len) {
     if (!img || n_cmds == 0) return;
-    if (dump_next) dump_buffer();
     globals_ptr()->n_cmds = n_cmds;
     memcpy(zbuf_ptr(), zbuf, zbuf_len);
     memcpy(pixels_ptr(), img, img_len);
@@ -441,6 +440,8 @@ namespace Vulkan {
     n_cmds = 0, memset(tiles_ptr(), 0, tiles_size);
     memcpy(zbuf, zbuf_ptr(), zbuf_len);
     memcpy(img, pixels_ptr(), img_len);
+
+    if (dump_next && *img != 0xff) dump_buffer();
 
     uint8_t *last_tmem = tmem_ptr();
     RDPTex *last_texes = texes_ptr();
@@ -704,8 +705,10 @@ namespace RDP {
 
   template <uint8_t type>
   void triangle() {
-    //printf("[RDP] Triangle of type %x\n", type);
+    printf("[RDP] Triangle of type %x\n", type);
     std::array<uint32_t, 8> instr = fetch<8>(pc);
+    for (uint8_t i = 0; i < 8; ++i) printf("%x ", instr[i]);
+    printf("\n");
     uint32_t t = type | ((instr[0] >> 19) & 0x10);
     RDPCommand cmd = {
       .type = t, .tile = (instr[0] >> 16) & 0x7,
