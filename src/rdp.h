@@ -328,7 +328,7 @@ namespace Vulkan {
     for (uint8_t i = 0; i < 128; ++i) {
       uint32_t &shr = zenc[i][0];
       uint32_t &exp = zenc[i][1];
-      if (i < 0x40) shr = 6, exp = 0;
+      if (i < 0x40) shr = 10, exp = 0;
       else if (i < 0x60) shr = 9, exp = 1;
       else if (i < 0x70) shr = 8, exp = 2;
       else if (i < 0x78) shr = 7, exp = 3;
@@ -434,11 +434,12 @@ namespace Vulkan {
   void render(uint8_t *img, uint32_t img_len, uint8_t *zbuf, uint32_t zbuf_len) {
     if (!img || n_cmds == 0) return;
     globals_ptr()->n_cmds = n_cmds;
-    memcpy(zbuf_ptr(), zbuf, zbuf_len);
+    if (zbuf) memcpy(zbuf_ptr(), zbuf, zbuf_len);
+    else memset(zbuf_ptr(), 0xff, zbuf_len);
     memcpy(pixels_ptr(), img, img_len);
     run_commands();
     n_cmds = 0, memset(tiles_ptr(), 0, tiles_size);
-    memcpy(zbuf, zbuf_ptr(), zbuf_len);
+    if (zbuf) memcpy(zbuf, zbuf_ptr(), zbuf_len);
     memcpy(img, pixels_ptr(), img_len);
 
     if (dump_next && *img != 0xff) dump_buffer();
@@ -511,9 +512,12 @@ namespace RDP {
   }
 
   void render() {
+    printf("RDP render to %x, %x\n", img_addr - R4300::pages[0], zbuf_addr - R4300::pages[0]);
     uint32_t img_len = img_width * height * img_size;
     uint32_t zbuf_len = img_width * height * 2;
+    printf("800a43bf: %x\n", R4300::pages[0][0xa43bf]);
     Vulkan::render(img_addr, img_len, zbuf_addr, zbuf_len);
+    printf("800a43bf: %x\n", R4300::pages[0][0xa43bf]);
   }
 
   /* === Instruction Translations === */
@@ -540,6 +544,7 @@ namespace RDP {
 
   void set_other_modes() {
     std::array<uint32_t, 2> instr = fetch<2>(pc);
+    printf("Modes M0: %x\n", instr[0]);
     memcpy(state.modes, instr.data(), 8);
   }
 
@@ -562,6 +567,7 @@ namespace RDP {
 
   void set_env() {
     state.env = bswap32(fetch<2>(pc)[1]);
+    printf("ENV color set to %x\n", state.env);
   }
 
   void set_prim() {
@@ -605,6 +611,7 @@ namespace RDP {
     tex.width = ((instr[0] >> 9) & 0xff) << 3;
     tex.addr = (instr[0] & 0x1ff) << 3, tex.pal = (instr[1] >> 20) & 0xf;
     tex.shift[0] = instr[1] & 0x3ff, tex.shift[1] = (instr[1] >> 10) & 0x3ff;
+    printf("set_tile with format = %x, size = %x, shift=%x\n", tex.format, tex.size, tex.shift[0]);
   }
 
   void set_tile_size() {
@@ -614,9 +621,11 @@ namespace RDP {
     RDPTex &tex = Vulkan::texes_ptr()[tex_idx];
     tex.sth[0] = (instr[1] >> 12) & 0xfff, tex.sth[1] = instr[1] & 0xfff;
     tex.stl[0] = (instr[0] >> 12) & 0xfff, tex.stl[1] = instr[0] & 0xfff;
+    printf("set_tile_size with stl = %x, %x\n", tex.stl[0], tex.stl[1]);
   }
 
   void load_tile() {
+    printf("Load tile\n");
     // Set RDP tile size
     Vulkan::add_tmem_copy(state);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
@@ -641,10 +650,11 @@ namespace RDP {
   }
 
   void load_block() {
+    printf("Load block\n");
     // Set copy parameters
     Vulkan::add_tmem_copy(state);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
-    uint32_t sh = (instr[1] >> 12) & 0xfff/*, dxt = instr[1] & 0xfff*/;
+    uint32_t sh = (instr[1] >> 12) & 0xfff, dxt = instr[1] & 0xfff;
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
     RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
     // Copy from texture image to tmem
@@ -699,6 +709,8 @@ namespace RDP {
 
   void zbuf_triangle(RDPCommand &cmd) {
     std::array<uint32_t, 4> instr = fetch<4>(pc);
+    for (uint8_t i = 0; i < 4; ++i) printf("%x ", instr[i]);
+    printf("\n");
     cmd.tex[3] = instr[0], cmd.tde[3] = instr[2];
     cmd.tdx[3] = instr[1];
   }
@@ -727,17 +739,18 @@ namespace RDP {
   template <bool flip>
   void tex_rectangle(RDPCommand &cmd) {
     std::array<uint32_t, 2> instr = fetch<2>(pc);
-    (flip ? cmd.tex[1] : cmd.tex[0]) = (instr[0] >> 16) << 6;
-    (flip ? cmd.tex[0] : cmd.tex[1]) = (instr[0] & 0xffff) << 6;
+    (flip ? cmd.tex[1] : cmd.tex[0]) = (instr[0] >> 16) << 16;
+    (flip ? cmd.tex[0] : cmd.tex[1]) = (instr[0] & 0xffff) << 16;
     (flip ? cmd.tdx[0] : cmd.tde[1]) = (instr[1] & 0xffff) << 11;
     (flip ? cmd.tde[1] : cmd.tdx[0]) = (instr[1] >> 16) << 11;
+    printf("[RDP] tex = %x, %x\n", cmd.tex[0], cmd.tex[1]);
     if (state.modes[0] & 0x200000) cmd.tdx[0] = 0x200000;
     cmd.tde[0] = 0, cmd.tdx[1] = 0;
   }
 
   template <uint8_t type>
   void rectangle() {
-    //printf("[RDP] Rectangle of type %x\n", type);
+    printf("[RDP] Rectangle of type %x\n", type);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     RDPCommand cmd = {
       .type = type, .tile = (instr[1] >> 24) & 0x7,

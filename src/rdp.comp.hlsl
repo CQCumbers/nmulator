@@ -75,21 +75,22 @@ struct RDPTex {
 
 /* === Utility Functions === */
 
-uint read_rgba16(uint input) {
-  // GBARG25153 to ABGR8888
-  uint output = ((input >> 3) & 0x1f) << 3;
-  output |= ((input & 0x7) << 2 | ((input >> 14) & 0x3)) << 11;
-  output |= ((input >> 9) & 0x1f) << 19;
-  return output | (((input >> 8) & 0x1) * 0xff) << 24;
+uint read_rgba16(uint enc) {
+  // bswapped RGBA5551 to ABGR8888
+  enc = ((enc << 8) | (enc >> 8)) & 0xffff;
+  uint dec = -(enc & 0x1) & (0xff << 24);
+  dec |= (enc & 0x3e) << 18;
+  dec |= (enc & 0x7c0) << 5;
+  return dec | ((enc & 0xf800) >> 8);
 }
 
-uint write_rgba16(uint input) {
-  // ABGR8888 to GBARG25153
-  uint output = ((input >> 3) & 0x1f) << 3;
-  output |= ((input >> 13) & 0x7) | (((input >> 11) & 0x3) << 14);
-  output |= ((input >> 19) & 0x1f) << 9;
-  output |= 0x200;
-  return output | ((input >> 31) << 8);
+uint write_rgba16(uint dec) {
+  // ABGR8888 to bswapped RGBA5551
+  uint enc = (dec & (0xff << 24)) != 0;
+  enc |= (dec >> 18) & 0x3e;
+  enc |= (dec >> 5) & 0x7c0;
+  enc |= (dec << 8) & 0xf800;
+  return ((enc << 8) | (enc >> 8)) & 0xffff;
 }
 
 uint4 usadd(uint4 a, uint4 b) {
@@ -141,20 +142,19 @@ uint unpacka(uint color) {
 }
 
 uint unpackz(uint enc) {
-  uint dz =  (enc & 0x3) << 2;
-  uint exp_ = (enc >> 13) & 0x7;
-  uint mant = (enc >> 2) & 0x7ff;
-  uint2 val = globals[0].zdec[exp_];
+  enc = ((enc << 8) | (enc >> 8)) & 0xffff;
+  uint dz =  (enc & 0x3) << 2, mant = (enc >> 2) & 0x7ff;
+  uint2 val = globals[0].zdec[enc >> 13];
   uint dec = (mant << val.x) + val.y;
   return ((dec & 0x3ffff) << 4) | dz;
 }
 
 uint packz(uint dec) {
-  uint idx = (dec >> 15) & 0x7f;
   uint dz = (dec >> 2) & 0x3;
-  uint2 val = globals[0].zenc[idx];
+  uint2 val = globals[0].zenc[(dec >> 15) & 0x7f];
   uint mant = (dec >> val.x) & 0x7ff;
-  return (val.y << 13) | (mant << 2) | dz;
+  uint enc = (val.y << 13) | (mant << 2) | dz;
+  return ((enc << 8) | (enc >> 8)) & 0xffff;
 }
 
 /* === Pipeline Stages === */
@@ -167,6 +167,7 @@ uint read_texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
   cmd.tlut = (cmd.tlut & 0xfff) + (cmd.tmem << 12);
   if (tex.format == 0 && tex.size == 2) {        // 16 bit RGBA
     uint tex_pos = tex.addr + t * tex.width + s * 2;
+    //if (t & 0x1) tex_pos ^= 0x4;
     uint texel = tmem.Load(tex_pos);
     return read_rgba16(s & 0x1 ? texel >> 16 : texel & 0xffff);
   } else if (tex.format == 0 && tex.size == 3) { // 32 bit RGBA
@@ -245,14 +246,15 @@ uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
   // compute valid sub-scanlines
   bool lft = cmd.type & (T_LMAJOR | T_RECT);
   int4 xa = (lft ? x1 : x2), xb = (lft ? x2 : x1);
+  if (cmd.modes[0] & M0_COPY) y2 += 1, xb += 1 << 14;
   bool4 vy = (int4)y1 <= y && y < (int4)y2 && xa < xb;
   dxy = pos * 4, dxy.x -= (x1.x >> 14), dxy.y -= cmd.yh;
   // check x bounds at every other subpixel
   xa = max(xa, (int4)cmd.sxh) >> 14;
   xb = min(xb, (int4)cmd.sxl) >> 14;
   int4 x = pos.x * 4 + int4(0, 1, 0, 1);
-  uint cvg = dot(vy && xa < x + 2 && x + 2 < xb, 1);
-  return cvg + dot(vy && xa < x && x < xb, 1);
+  uint cvg = dot(vy && xa <= x + 2 && x + 2 < xb, 1);
+  return cvg + dot(vy && xa <= x && x < xb, 1);
 }
 
 bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out int4 stwz) {
@@ -270,6 +272,7 @@ bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out int4 st
   // get new dz from prim_z
   uint ndz = firstbithigh(max(cmd.zprim & 0xffff, 1));
   uint dz = 0x1 << max(ndz, odz);
+  //uint dz = 0x1 << ndz;
   uint mode = cmd.modes[1] & M1_ZMODE;
   if (mode == ZTRANS || cvg > 7) dz = 0;
   // compare new z with old z
@@ -301,8 +304,8 @@ uint sample_tex(int3 stw, RDPCommand cmd) {
 
 uint sample_shade(int2 dxy, RDPCommand cmd) {
   if (~cmd.type & T_SHADE) return 0;
-  uint4 rgba = cmd.shade + cmd.sde * dxy.y / 4;
-  return pack32(rgba + cmd.sdx * dxy.x / 4);
+  int4 rgba = cmd.shade + cmd.sde * dxy.y / 4;
+  return pack32(max(rgba + cmd.sdx * dxy.x / 4, 0));
 }
 
 uint combine(uint tex, uint shade, uint noise_, RDPCommand cmd) {
@@ -371,8 +374,9 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   if (GlobalID.x >= global.width) return;
   uint tile_pos = GlobalID.y * global.width + GlobalID.x;
   uint pixel = pixels.Load(tile_pos * global.size), zmem = zbuf.Load(tile_pos * 2);
-  if (global.size == 2) pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel);
-  zmem = unpackz(tile_pos & 0x1 ? zmem >> 16 : zmem);
+  zmem = unpackz(tile_pos & 0x1 ? zmem >> 16 : zmem & 0xffff);
+  if (global.size == 2)
+    pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel & 0xffff);
   uint noise_ = read_noise(tile_pos);
 
   TileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
@@ -391,9 +395,17 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       uint shade = sample_shade(dxy, cmd);
       uint color = combine(tex, shade, noise_, cmd);
       pixel = blend(pixel, color, zmem, oz, cvg, depth.y, cmd);
+      //pixel = color;
     }
   }
   
+  if (tile_pos & 0x1) {
+    zbuf.InterlockedAnd(tile_pos * 2, 0x0000ffff);
+    zbuf.InterlockedOr(tile_pos * 2, packz(zmem) << 16);
+  } else {
+    zbuf.InterlockedAnd(tile_pos * 2, 0xffff0000);
+    zbuf.InterlockedOr(tile_pos * 2, packz(zmem));
+  }
   if (global.size == 2) {
     if (tile_pos & 0x1) {
       pixels.InterlockedAnd(tile_pos * 2, 0x0000ffff);
@@ -403,11 +415,4 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       pixels.InterlockedOr(tile_pos * 2, write_rgba16(pixel));
     }
   } else pixels.Store(tile_pos * 4, pixel);
-  if (tile_pos & 0x1) {
-    zbuf.InterlockedAnd(tile_pos * 2, 0x0000ffff);
-    zbuf.InterlockedOr(tile_pos * 2, packz(zmem) << 16);
-  } else {
-    zbuf.InterlockedAnd(tile_pos * 2, 0xffff0000);
-    zbuf.InterlockedOr(tile_pos * 2, packz(zmem));
-  }
 }
