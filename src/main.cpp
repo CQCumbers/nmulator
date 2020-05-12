@@ -10,7 +10,7 @@ int main(int argc, char* argv[]) {
   R4300::init(file), fclose(file);
   if (argc == 3) Debugger::init(atoi(argv[2]));
 
-  sched(R4300::update, 0);
-  sched(R4300::vi_update, 6510);
-  while (true) exec_next();
+  Sched::add(R4300::update, 0);
+  Sched::add(R4300::vi_update, 6510);
+  Sched::start_loop();
 }

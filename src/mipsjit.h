@@ -341,17 +341,17 @@ struct MipsJit {
 
   void check_watch(uint32_t pc, bool invalidate=false) {
     if (is_rsp || pc == block_end) return;
-    Label cont = as.newLabel();
+    /*Label cont = as.newLabel();
     as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::tlb_miss));
     as.cmp(x86::dword_ptr(x86::rax), 1), as.jne(cont);
     as.and_(x86_spill(13 + dev_cop0), ~0xff);
     as.or_(x86_spill(13 + dev_cop0), 0x8), as.mov(x86::dword_ptr(x86::rax), 0);
     if (invalidate) {
       as.mov(x86::rax, reinterpret_cast<uint64_t>(R4300::block));
-      as.mov(x86::byte_ptr(x86::rax, 24), 0);
+      as.mov(x86::byte_ptr(x86::rax, 28), 0);
     }
     as.mov(x86_spill(14 + dev_cop0), pc - 4), as.mov(x86::edi, 0x80000000);
-    as.jmp(exc_label), as.bind(cont);
+    as.jmp(exc_label), as.bind(cont);*/
   }
 
   /* === Instruction Translations === */
@@ -2463,7 +2463,8 @@ struct MipsJit {
       uint32_t instr = is_rsp ? RSP::fetch(pc) : R4300::fetch(pc);
       uint32_t pg = pc & hpage_mask;
       if (!is_rsp && pg != hpage) R4300::protect(hpage = pg);
-      //if (is_rsp) printf("RSP PC: %x, instr %x\n", pc & 0xfff, instr);
+      //if (is_rsp) printf("RSP PC: %x, instr: %x\n", pc & 0xfff, instr);
+      //if (!is_rsp) printf("R4300 PC: %x\n", pc);
       pc = check_breaks(pc, next_pc), next_pc += 4;
       switch (instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
@@ -2540,8 +2541,12 @@ struct MipsJit {
       as.bind(cont_label);
     }
 
+    // check still_top (no intervening events)
+    as.mov(x86::rcx, reinterpret_cast<uint64_t>(&Sched::until));
+    as.sub(x86::qword_ptr(x86::rcx), is_rsp ? cycles * 2 : cycles);
+    as.cmp(x86::qword_ptr(x86::rcx), 0), as.jl(exit_label);
+
     // check next_pc matches and block valid
-    /*Label jump_label = as.newLabel();
     constexpr uint8_t next = 8, npc = 16, ncycles = 24, valid = 28;
     if (is_rsp) {
       as.mov(x86::rax, reinterpret_cast<uint64_t>(RSP::block));
@@ -2556,27 +2561,12 @@ struct MipsJit {
     as.mov(x86::rsi, x86::qword_ptr(x86::rax, next));
     as.cmp(x86::byte_ptr(x86::rsi, valid), 1); as.jne(exit_label);
 
-    // check still_top (no intervening events)
-    as.mov(x86::edx, x86::dword_ptr(x86::rsi, ncycles));
-    constexpr uint32_t n_events = 0, now = 8, next_time = 16, top = 32;
-    as.mov(x86::rax, reinterpret_cast<uint64_t>(scheduler()));
-    as.cmp(x86::byte_ptr(x86::rax, n_events), 0); as.je(jump_label);
-    as.mov(x86::rcx, x86::qword_ptr(x86::rax, now)); as.add(x86::rcx, x86::rdx);
-    as.sub(x86::rcx, x86::qword_ptr(x86::rax, top)); as.test(x86::rcx, x86::rcx);
-    as.jg(exit_label); as.bind(jump_label);
-
-    // update values of now and next_time
-    as.movq(x86::xmm0, x86::qword_ptr(x86::rax, next_time));
-    as.add(x86::rdx, x86::qword_ptr(x86::rax, next_time));
-    as.movq(x86::xmm1, x86::rdx); as.punpcklqdq(x86::xmm0, x86::xmm1);
-    as.movdqu(x86::dqword_ptr(x86::rax, now), x86::xmm0);
-
     // update value of block, jump to code
     if (is_rsp) as.mov(x86::rax, reinterpret_cast<uint64_t>(&RSP::block));
     else as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::block));
     as.mov(x86::qword_ptr(x86::rax), x86::rsi);
     as.mov(x86::rdx, x86::qword_ptr(x86::rsi));
-    as.add(x86::rdx, is_rsp ? 94 : 67); as.jmp(x86::rdx);*/
+    as.add(x86::rdx, is_rsp ? 94 : 67); as.jmp(x86::rdx);
 
     as.bind(exit_label);
     x86_store_all(); as.pop(x86::rbp);

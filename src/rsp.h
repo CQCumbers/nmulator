@@ -12,14 +12,14 @@ namespace R4300 {
   void set_irqs(uint32_t mask);
   void unset_irqs(uint32_t mask);
 
-  uint32_t crc32(uint8_t *bytes, uint32_t len);
+  uint32_t crc32_2(uint8_t *bytes, uint32_t len);
 }
 
 namespace RSP {
   uint8_t *dmem = nullptr;
   uint8_t *imem = nullptr;
   const uint32_t addr_mask = 0xfff;
-  bool step = true, moved = false;
+  bool step = false, moved = false;
   const uint16_t rcp_rsq_rom[1024] = {
     0xffff, 0xff00, 0xfe01, 0xfd04, 0xfc07, 0xfb0c, 0xfa11, 0xf918,
     0xf81f, 0xf727, 0xf631, 0xf53b, 0xf446, 0xf352, 0xf25f, 0xf16d,
@@ -189,7 +189,7 @@ namespace RSP {
   const uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
   robin_hood::unordered_node_map<uint64_t, Block> blocks;
   uint32_t pc = 0x0; Block *block = &empty;
-  uint64_t hash = 0x0;
+  uint64_t hash = 0x12345678000;
 
   inline bool halted() {
     return reg_array[4 + dev_cop0] & 0x1;
@@ -200,12 +200,12 @@ namespace RSP {
   }
 
   void print_state() {
-    for (uint8_t i = 1; i < 32; ++i)
-      printf("Reg $%d: %llx\n", i, reg_array[i]);
-    printf("\n- ff0: ");
-    for (uint8_t i = 0; i < 16; ++i)
-      printf("%llx ", read<uint8_t>(0xff0 + i));
-    /*printf("- ACC: ");
+    /*for (uint8_t i = 1; i < 32; ++i)
+      printf("Reg $%d: %llx\n", i, reg_array[i]);*/
+    printf("PC_START: %llx\n", reg_array[0x28]);
+    printf("PC_END: %llx\n", reg_array[0x29]);
+    printf("PC_CURRENT: %llx\n", reg_array[0x2a]);
+    /*printf("- ACC: "8;
     for (uint8_t i = 0; i < 24; ++i)
       printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 32 * 2]))[23 - i]);
     printf("\n- VCO: ");
@@ -241,8 +241,9 @@ namespace RSP {
     printf("\n- R0: ");
     for (uint8_t i = 0; i < 8; ++i)
       printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 0 * 2]))[7 - i]);
-    printf("\n- $25: %llx $23: %llx $14: %llx $29: %llx $2: %llx\n- ce0: ",
-        reg_array[25], reg_array[23], reg_array[14], reg_array[29], reg_array[2]);
+    //printf("\n- $25: %llx $23: %llx $14: %llx $29: %llx $2: %llx\n- ce0: ",
+    //    reg_array[25], reg_array[23], reg_array[14], reg_array[29], reg_array[2]);
+    printf("\n- ce0: ");
     for (uint8_t i = 0; i < 32; ++i)
       printf("%llx ", read<uint8_t>(0xce0 + i));
     printf("\n- 360: ");
@@ -257,25 +258,22 @@ namespace RSP {
     printf("\n- d50: ");
     for (uint8_t i = 0; i < 16; ++i)
       printf("%llx ", read<uint8_t>(0xd50 + i));*/
-    /*for (uint32_t i = 0; i < 0x1000; i += 0x10) {
+    for (uint32_t i = 0xf0; i < 0x100; i += 0x10) {
       printf("\n- %x: ", i);
       for (uint8_t j = 0; j < 16; ++j)
         printf("%llx ", read<uint8_t>(i + j));
-    }*/
+    }
     printf("\n---\n");
   }
 
   void update() {
-    uint32_t cycles = 0;
-    if (hash_dirty) {
-      hash = R4300::crc32(imem, 0x1000) << 12;
+    /*if (hash_dirty) {
+      hash = R4300::crc32_2(imem, 0x1000) << 12;
       hash_dirty = false, block->valid = false;
-    }
-    while (still_top(cycles)) {
-      bool run = false;
+    }*/
+    while (Sched::until >= 0) {
       if (block->valid) {
-        pc = block->code();
-        moved = false, run = true;
+        pc = block->code(), moved = false;
         if (broke()) R4300::set_irqs(0x1);
         if (R4300::logging_on) print_state();
 
@@ -285,7 +283,7 @@ namespace RSP {
         block = block->next;
       }
 
-      if (halted()) { block->valid = false; return; }
+      if (halted()) { /*block->valid = false;*/ return; }
       if (!block->valid || R4300::logging_on) {
         printf("Compiling block at %x\n", pc);
         CodeHolder code; 
@@ -296,15 +294,14 @@ namespace RSP {
         runtime.add(&block->code, &code);
         block->valid = true;
       }
-      cycles = run ? block->cycles : 0;
     }
-    sched(update, cycles);
+    Sched::add(update, 0);
   }
 
   void set_status(uint32_t val) {
     if (halted() && (val & 0x1)) {
       printf("Scheduling RSP at %x\n", R4300::pc);
-      block = &blocks[pc + hash];
+      block = &blocks[hash + pc];
       if (!block->valid) {
         CodeHolder code; 
         code.init(runtime.codeInfo());
@@ -314,8 +311,9 @@ namespace RSP {
         runtime.add(&block->code, &code);
         block->valid = true;
       }
-      sched(update, block->cycles);
+      Sched::add(update, 0);
     }
+    printf("Writing %x to RSP_STATUS\n", val);
     //if (val == 0x400) printf("400 written to STATUS\n"),
     //R4300::logging_on = true;
     reg_array[4 + dev_cop0] &= ~(val & 0x1);       // HALT
