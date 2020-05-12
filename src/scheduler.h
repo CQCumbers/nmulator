@@ -3,72 +3,47 @@
 
 #include <algorithm>
 
-namespace RSP {
-  void update();
-}
+namespace Sched {
+  struct Event {
+    uint64_t time;
+    void (*func)();
+  };
 
-namespace RDP {
-  void update();
-}
+  bool operator<(const Event& lhs, const Event& rhs) {
+    return (int64_t)lhs.time - (int64_t)rhs.time > 0;
+  }
 
-namespace R4300 {
-  void update();
-  void vi_update();
-  void ai_update();
-  void pi_update();
-  void timer_fire();
-}
-
-struct Event {
-  uint64_t time;
-  void (*func)();
-};
-
-struct Scheduler {
   uint8_t n_events;
-  uint64_t now;
-  Event next;
+  uint64_t next;
+  int64_t until;
   Event events[16];
-};
 
-static Scheduler s;
+  void add(void (*func)(), uint64_t time) {
+    Event &e = events[n_events++];
+    e.func = func, e.time = next - until + time;
+    std::push_heap(events, events + n_events);
+    until -= next - events[0].time, next = events[0].time;
+  }
 
-bool operator<(const Event& lhs, const Event& rhs) {
-  return (int64_t)lhs.time - (int64_t)rhs.time > 0;
-}
-
-inline Scheduler *scheduler() {
-  return &s;
-}
-
-inline void sched(void (*func)(), uint64_t time) {
-  Event &e = s.events[s.n_events++];
-  e.func = func, e.time = s.now + time;
-  std::push_heap(s.events, s.events + s.n_events);
-}
-
-inline bool still_top(uint64_t time) {
-  uint64_t t = s.events[0].time;
-  if (s.n_events == 0 || (int64_t)(s.now + time) - (int64_t)t <= 0) {
-    s.now = s.next.time, s.next.time += time; return true;
-  } else return false;
-}
-
-inline void resched(void (*func)(), uint64_t time) {
-  for (Event *e = s.events; e < s.events + s.n_events; ++e) {
-    if (e->func == func) {
-      e->time = s.now + time;
-      std::make_heap(s.events, s.events + s.n_events);
+  void move(void (*func)(), uint64_t time) {
+    for (Event *e = events; e < events + n_events; ++e) {
+      if (e->func != func) continue;
+      e->time = next - until + time;
+      std::make_heap(events, events + n_events);
+      until -= next - events[0].time, next = events[0].time;
       return;
     }
+    add(func, time);
   }
-  sched(func, time);
-}
 
-inline void exec_next() {
-  s.next = s.events[0];
-  std::pop_heap(s.events, s.events + (s.n_events--));
-  s.next.func(), s.now = s.next.time;
+  void start_loop() {
+    while (true) {
+      std::pop_heap(events, events + (n_events--));
+      Event &now = events[n_events];
+      next = events[0].time, until = next - now.time;
+      now.func();
+    }
+  }
 }
 
 inline uint32_t pext_low(uint32_t val, uint32_t mask) {

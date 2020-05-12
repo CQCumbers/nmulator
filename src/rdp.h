@@ -515,9 +515,7 @@ namespace RDP {
     printf("RDP render to %x, %x\n", img_addr - R4300::pages[0], zbuf_addr - R4300::pages[0]);
     uint32_t img_len = img_width * height * img_size;
     uint32_t zbuf_len = img_width * height * 2;
-    printf("800a43bf: %x\n", R4300::pages[0][0xa43bf]);
     Vulkan::render(img_addr, img_len, zbuf_addr, zbuf_len);
-    printf("800a43bf: %x\n", R4300::pages[0][0xa43bf]);
   }
 
   /* === Instruction Translations === */
@@ -544,7 +542,7 @@ namespace RDP {
 
   void set_other_modes() {
     std::array<uint32_t, 2> instr = fetch<2>(pc);
-    printf("Modes M0: %x\n", instr[0]);
+    //printf("Modes M0: %x\n", instr[0]);
     memcpy(state.modes, instr.data(), 8);
   }
 
@@ -567,7 +565,6 @@ namespace RDP {
 
   void set_env() {
     state.env = bswap32(fetch<2>(pc)[1]);
-    printf("ENV color set to %x\n", state.env);
   }
 
   void set_prim() {
@@ -621,11 +618,17 @@ namespace RDP {
     RDPTex &tex = Vulkan::texes_ptr()[tex_idx];
     tex.sth[0] = (instr[1] >> 12) & 0xfff, tex.sth[1] = instr[1] & 0xfff;
     tex.stl[0] = (instr[0] >> 12) & 0xfff, tex.stl[1] = instr[0] & 0xfff;
-    printf("set_tile_size with stl = %x, %x\n", tex.stl[0], tex.stl[1]);
+  }
+
+  uint32_t taddr(uint32_t addr) {
+    if (tex_nibs != 8) return addr & 0xfff;
+    // handle rgba32 split into hi/lo tmem
+    uint32_t offs = (addr / 2) & 0x7fe;
+    uint32_t high = (addr & 0x2) << 10;
+    return high | offs | (addr & 0x1);
   }
 
   void load_tile() {
-    printf("Load tile\n");
     // Set RDP tile size
     Vulkan::add_tmem_copy(state);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
@@ -634,23 +637,21 @@ namespace RDP {
     tex.sth[0] = (instr[1] >> 12) & 0xfff, tex.sth[1] = instr[1] & 0xfff;
     tex.stl[0] = (instr[0] >> 12) & 0xfff, tex.stl[1] = instr[0] & 0xfff;
     // Copy from texture image to tmem
+    uint32_t offset = tex.stl[1] / 4 * tex_width + tex.stl[0] / 4;
+    uint32_t len = tex.sth[0] / 4 - tex.stl[0] / 4 + 1, flip = 0;
+    offset = offset * tex_nibs / 2, len = len * tex_nibs / 2;
+    uint8_t *ram = R4300::pages[0] + tex_addr + offset;
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
-    uint32_t ram = tex.stl[1] / 4 * tex_width + tex.stl[0] / 4;
-    uint32_t len = tex.sth[0] / 4 - tex.stl[0] / 4 + 1;
-    ram = tex_addr + ram * tex_nibs / 2, len = len * tex_nibs / 2;
+    // Swap every other 16-bit word on odd rows
     for (int32_t i = 0; i <= (tex.sth[1] - tex.stl[1]) / 4; ++i) {
-      if (tex_nibs == 8) {
-        for (uint32_t i = 0; i < len; i += 4) {
-          memcpy(mem + i / 2, R4300::pages[0] + ram + i, 2);
-          memcpy(mem + 0x800 + i / 2, R4300::pages[0] + ram + i + 2, 2);
-        }
-      } else memcpy(mem, R4300::pages[0] + ram, len);
-      mem += tex.width, ram += tex_width * tex_nibs / 2;
+      for (uint32_t j = 0; j < len; ++j)
+        mem[taddr(j) ^ flip] = ram[j];
+      mem += tex.width, flip ^= 0x4;
+      ram += tex_width * tex_nibs / 2;
     }
   }
 
   void load_block() {
-    printf("Load block\n");
     // Set copy parameters
     Vulkan::add_tmem_copy(state);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
@@ -658,10 +659,18 @@ namespace RDP {
     uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
     RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
     // Copy from texture image to tmem
-    uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
     uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
-    uint32_t width = (sh - sl + 1) * tex_nibs / 2;
-    memcpy(mem, R4300::pages[0] + tex_addr + offset, width);
+    uint32_t len = (sh - sl + 1) * tex_nibs / 2, flip = 0;
+    uint8_t *ram = R4300::pages[0] + tex_addr + offset;
+    uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
+    // Swap every other 16-bit word on odd rows
+    for (uint32_t i = 0; i < len;) {
+      for (uint32_t t = 0; t < 0x800 && i < len;) {
+        mem[taddr(i) ^ flip] = *(ram++);
+        if ((i++ & 0x7) == 0x7) t += dxt;
+      }
+      mem += tex.width, flip ^= 0x4;
+    }
   }
 
   void load_tlut() {
@@ -695,6 +704,8 @@ namespace RDP {
 
   void tex_triangle(RDPCommand &cmd) {
     std::array<uint32_t, 16> instr = fetch<16>(pc);
+    //for (uint8_t i = 0; i < 16; ++i) printf("%x ", instr[i]);
+    //printf("\n");
     cmd.tex[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
     cmd.tex[1] = (instr[0] << 16) | (instr[4] & 0xffff);
     cmd.tex[2] = (instr[1] & 0xffff0000) | (instr[5] >> 16);
@@ -709,18 +720,16 @@ namespace RDP {
 
   void zbuf_triangle(RDPCommand &cmd) {
     std::array<uint32_t, 4> instr = fetch<4>(pc);
-    for (uint8_t i = 0; i < 4; ++i) printf("%x ", instr[i]);
-    printf("\n");
     cmd.tex[3] = instr[0], cmd.tde[3] = instr[2];
     cmd.tdx[3] = instr[1];
   }
 
   template <uint8_t type>
   void triangle() {
-    printf("[RDP] Triangle of type %x\n", type);
+    //printf("[RDP] Triangle of type %x\n", type);
     std::array<uint32_t, 8> instr = fetch<8>(pc);
-    for (uint8_t i = 0; i < 8; ++i) printf("%x ", instr[i]);
-    printf("\n");
+    //for (uint8_t i = 0; i < 8; ++i) printf("%x ", instr[i]);
+    //printf("\n");
     uint32_t t = type | ((instr[0] >> 19) & 0x10);
     RDPCommand cmd = {
       .type = t, .tile = (instr[0] >> 16) & 0x7,
@@ -743,14 +752,14 @@ namespace RDP {
     (flip ? cmd.tex[0] : cmd.tex[1]) = (instr[0] & 0xffff) << 16;
     (flip ? cmd.tdx[0] : cmd.tde[1]) = (instr[1] & 0xffff) << 11;
     (flip ? cmd.tde[1] : cmd.tdx[0]) = (instr[1] >> 16) << 11;
-    printf("[RDP] tex = %x, %x\n", cmd.tex[0], cmd.tex[1]);
+    //printf("[RDP] tex = %x, %x\n", cmd.tex[0], cmd.tex[1]);
     if (state.modes[0] & 0x200000) cmd.tdx[0] = 0x200000;
     cmd.tde[0] = 0, cmd.tdx[1] = 0;
   }
 
   template <uint8_t type>
   void rectangle() {
-    printf("[RDP] Rectangle of type %x\n", type);
+    //printf("[RDP] Rectangle of type %x\n", type);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     RDPCommand cmd = {
       .type = type, .tile = (instr[1] >> 24) & 0x7,
@@ -774,8 +783,7 @@ namespace RDP {
     if (pc >= pc_end) return;
     pc -= offset, offset = 0;
     // interpret config instructions 
-    uint32_t cycles = 0;
-    while (still_top(cycles)) {
+    while (Sched::until >= 0) {
       uint64_t start = pc;
       switch (opcode(pc)) {
         case 0x00: pc += 8; break;
@@ -815,10 +823,10 @@ namespace RDP {
         default: invalid(); break;
       }
       if (pc > pc_end) pc = pc_end, offset = pc_end - start;
+      Sched::until -= 0;  // Avoid handling double buffering
       if (pc == pc_end) { status |= 0x80; return; }
-      cycles = 1;
     }
-    sched(update, cycles);
+    Sched::add(update, 0);
   }
 }
 

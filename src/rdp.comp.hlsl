@@ -166,11 +166,12 @@ uint read_texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
   tex.addr = (tex.addr & 0xfff) + (cmd.tmem << 12);
   cmd.tlut = (cmd.tlut & 0xfff) + (cmd.tmem << 12);
   if (tex.format == 0 && tex.size == 2) {        // 16 bit RGBA
+    if (t & 0x1) s ^= 0x2;
     uint tex_pos = tex.addr + t * tex.width + s * 2;
-    //if (t & 0x1) tex_pos ^= 0x4;
     uint texel = tmem.Load(tex_pos);
     return read_rgba16(s & 0x1 ? texel >> 16 : texel & 0xffff);
   } else if (tex.format == 0 && tex.size == 3) { // 32 bit RGBA
+    if (t & 0x1) s ^= 0x2;
     uint tex_pos = tex.addr + t * tex.width + s * 2;
     tex_pos = (tex.addr & ~0x7ff) | (tex_pos & 0x7ff);
     uint texel1 = tmem.Load(tex_pos + 0x800), texel2 = tmem.Load(tex_pos);
@@ -178,6 +179,7 @@ uint read_texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
     texel2 = s & 0x1 ? texel2 >> 16 : texel2 & 0xffff;
     return texel1 | texel2;
   } else if (tex.format == 2 && tex.size == 1) { // 8 bit CI
+    if (t & 0x1) s ^= 0x4;
     uint tex_pos = tex.addr + t * tex.width + s;
     uint idx = (tmem.Load(tex_pos) >> ((s & 0x3) * 8)) & 0xff;
     uint texel = tmem.Load(cmd.tlut + idx * 2);
@@ -187,6 +189,7 @@ uint read_texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
       return (a << 24) | (i << 16) | (i << 8) | i;
     } else return read_rgba16(texel);
   } else if (tex.format == 2 && tex.size == 0) { // 4 bit CI
+    if (t & 0x1) s ^= 0x8;
     uint tex_pos = tex.addr + t * tex.width + s / 2;
     uint idx = tmem.Load(tex_pos) >> ((s & 0x6) * 4);
     idx = (s & 0x1 ? idx : idx >> 4) & 0xf;
@@ -197,26 +200,31 @@ uint read_texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
       return (a << 24) | (i << 16) | (i << 8) | i;
     } else return read_rgba16(texel);
   } else if (tex.format == 3 && tex.size == 2) { // 16 bit IA
+    if (t & 0x1) s ^= 0x2;
     uint texel = tmem.Load(tex.addr + t * tex.width + s * 2);
     texel = s & 0x1 ? texel >> 16 : texel & 0xffff;
     uint i = texel & 0xff, a = texel >> 8;
     return (a << 24) | (i << 16) | (i << 8) | i;
   } else if (tex.format == 3 && tex.size == 1) { // 8 bit IA
+    if (t & 0x1) s ^= 0x4;
     uint tex_pos = tex.addr + t * tex.width + s;
     uint texel = tmem.Load(tex_pos) >> ((s & 0x3) * 8);
     uint i = texel & 0xf0, a = (texel << 4) & 0xf0;
     return (a << 24) | (i << 16) | (i << 8) | i;
   } else if (tex.format == 3 && tex.size == 0) { // 4 bit IA
+    if (t & 0x1) s ^= 0x8;
     uint tex_pos = tex.addr + t * tex.width + s / 2;
     uint texel = tmem.Load(tex_pos) >> ((s & 0x6) * 4);
     texel = (s & 0x1 ? texel : texel >> 4) & 0xf;
     uint i = (texel & 0xe) << 4, a = (texel & 0x1) * 0xff;
     return (a << 24) | (i << 16) | (i << 8) | i;
   } else if (tex.format == 4 && tex.size == 1) { // 8 bit I
+    if (t & 0x1) s ^= 0x4;
     uint tex_pos = tex.addr + t * tex.width + s;
     uint i = (tmem.Load(tex_pos) >> ((s & 0x3) * 8)) & 0xff;
     return (i << 24) | (i << 16) | (i << 8) | i;
   } else if (tex.format == 4 && tex.size == 0) { // 4 bit I
+    if (t & 0x1) s ^= 0x8;
     uint tex_pos = tex.addr + t * tex.width + s / 2;
     uint texel = tmem.Load(tex_pos) >> ((s & 0x6) * 4);
     uint i = (s & 0x1 ? texel << 4 : texel) & 0xf0;
@@ -229,7 +237,8 @@ uint read_noise(uint seed) {
   seed = (seed ^ 61) ^ (seed >> 16);
   seed *= 9, seed = seed ^ (seed >> 4);
   seed *= 0x27d4eb2d, seed = seed ^ (seed >> 15);
-  return seed;
+  uint i = seed & 0xff;
+  return 0xff000000 | (i << 16) | (i << 8) | i;
 }
 
 uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
@@ -311,7 +320,7 @@ uint sample_shade(int2 dxy, RDPCommand cmd) {
 uint combine(uint tex, uint shade, uint noise_, RDPCommand cmd) {
   uint cycle = cmd.modes[0] & M0_FILL;
   if (cycle == M0_COPY) return tex;
-  if (cycle == M0_FILL) return cmd.fill;
+  if (cycle == M0_FILL) return read_rgba16(cmd.fill);
   // read mux values
   uint mux0 = cmd.mux[0], mux1 = cmd.mux[1];
   uint mc = (mux0 >> 15) & 0x1f;
@@ -377,7 +386,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   zmem = unpackz(tile_pos & 0x1 ? zmem >> 16 : zmem & 0xffff);
   if (global.size == 2)
     pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel & 0xffff);
-  uint noise_ = read_noise(tile_pos);
+  uint noise_ = 0xff888888;
 
   TileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
   for (uint i = 0; i < 64; ++i) {
