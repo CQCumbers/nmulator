@@ -189,7 +189,7 @@ namespace RSP {
   const uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
   robin_hood::unordered_node_map<uint64_t, Block> blocks;
   uint32_t pc = 0x0; Block *block = &empty;
-  uint64_t hash = 0x12345678000;
+  //uint32_t hashes[32];
 
   inline bool halted() {
     return reg_array[4 + dev_cop0] & 0x1;
@@ -272,27 +272,29 @@ namespace RSP {
       hash_dirty = false, block->valid = false;
     }*/
     while (Sched::until >= 0) {
-      if (block->valid) {
-        pc = block->code(), moved = false;
+      if (block->code) {
+        pc = block->code() & 0xffc, moved = false;
         if (broke()) R4300::set_irqs(0x1);
-        if (R4300::logging_on) print_state();
+        //if (R4300::logging_on) print_state();
 
-        uint64_t key = hash + pc;
-        if (block->next_pc != key)
-          block->next_pc = key, block->next = &blocks[key];
-        block = block->next;
+        uint8_t line = (pc >> 2) & 0x7;
+        uint64_t key = (pc | 0x1000);
+        if (block->next_pc[line] != key) {
+          block->next_pc[line] = key;
+          block->next[line] = &blocks[key];
+        }
+        block = block->next[line];
       }
 
       if (halted()) { /*block->valid = false;*/ return; }
-      if (!block->valid || R4300::logging_on) {
-        printf("Compiling block at %x\n", pc);
+      uint32_t hash = R4300::crc32_2(imem + pc, block->len * 8);
+      if (!block->code || block->hash != hash) {
         CodeHolder code; 
         code.init(runtime.codeInfo());
         MipsJit<Device::rsp> jit(code);
-
-        block->cycles = jit.jit_block() * 2;
+        block->len = jit.jit_block();
+        block->hash = R4300::crc32_2(imem + pc, block->len * 8);
         runtime.add(&block->code, &code);
-        block->valid = true;
       }
     }
     Sched::add(update, 0);
@@ -301,15 +303,15 @@ namespace RSP {
   void set_status(uint32_t val) {
     if (halted() && (val & 0x1)) {
       printf("Scheduling RSP at %x\n", R4300::pc);
-      block = &blocks[hash + pc];
-      if (!block->valid) {
+      block = &blocks[(pc &= 0xffc) | 0x1000];
+      uint32_t hash = R4300::crc32_2(imem + pc, block->len * 8);
+      if (!block->code || block->hash != hash) {
         CodeHolder code; 
         code.init(runtime.codeInfo());
         MipsJit<Device::rsp> jit(code);
-
-        block->cycles = jit.jit_block() * 2;
+        block->len = jit.jit_block();
+        block->hash = R4300::crc32_2(imem + pc, block->len * 8);
         runtime.add(&block->code, &code);
-        block->valid = true;
       }
       Sched::add(update, 0);
     }

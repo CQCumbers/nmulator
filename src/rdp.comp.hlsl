@@ -300,7 +300,7 @@ uint sample_tex(int3 stw, RDPCommand cmd) {
   uint mode = cmd.modes[0]; stw >>= 16;
   RDPTex tex = texes[cmd.tmem * 8 + cmd.tile];
   // correct perspective, apply shift
-  if (mode & M0_PERSP) stw = 32768.0 * stw / stw.z;
+  if (mode & M0_PERSP) stw = 32768.0 * stw / abs((float3)stw.z);
   int2 shl = tex.shift & 0xf, st = stw.xy;
   st = shl > 10 ? st << (16 - shl) : st >> shl;
   // get mask, clamp coords to tex bounds
@@ -404,7 +404,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       uint shade = sample_shade(dxy, cmd);
       uint color = combine(tex, shade, noise_, cmd);
       pixel = blend(pixel, color, zmem, oz, cvg, depth.y, cmd);
-      //pixel = color;
+      //pixel = shade;
     }
   }
   

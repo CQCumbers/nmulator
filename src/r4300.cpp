@@ -1,11 +1,4 @@
-#ifndef R4300_H
-#define R4300_H
-
-#include "rsp.h"
-#include "rdp.h"
-#include <xmmintrin.h>
-
-#ifdef _WIN32
+#if defined(_WIN32)
 #  include <SDL.h>
 #  undef main
 #  include <memory.h>
@@ -16,13 +9,11 @@
 #  include <signal.h>
 #endif
 
-namespace Debugger {
-  void update();
-};
+#include "components.h"
 
 namespace R4300 {
   uint8_t *pages[0x100] = {nullptr};
-  uint32_t tlb[0x20][4];
+  uint32_t tlb[0x20][4] = {{0x80000000}};
   constexpr uint32_t addr_mask = 0x1fffffff;
   constexpr uint32_t page_mask = 0x1fffff;
 
@@ -45,6 +36,8 @@ namespace R4300 {
   void write(uint32_t addr, int64_t val);
   void joy_update(SDL_Event &event);
   void update();
+
+  uint32_t crc32(uint8_t *bytes, uint32_t len);
 
   /* === MIPS Interface registers === */
 
@@ -71,19 +64,20 @@ namespace R4300 {
   template <bool write>
   void rsp_dma(uint32_t val) {
     uint32_t skip = (val >> 20) & 0xfff, count = (val >> 12) & 0xff;
-    uint32_t len = (val & 0xfff) + 8, m1 = 0x7ffff8, m0 = 0x1ff8;
-    uint64_t &r0 = rsp_cop0[0], &r1 = rsp_cop0[1];
-    if ((r0 & 0xff8) + (len &= ~0x7) > 0x1000) len = 0x1000 - (r0 & 0xff8);
-    printf("[RSP] DMA with count %x, len %x, from %llx to %llx,"
-      "to_dram: %x, at pc: %x\n", count + 1, len, r1, r0, write, RSP::pc);
+    uint32_t len = (val & 0xfff) + 8, m1 = 0x7ffffc, m0 = 0x1ffc;
+    uint64_t &r0 = rsp_cop0[0], &r1 = rsp_cop0[1]; r1 &= ~0x7;
+    if ((r0 & 0xffc) + (len &= ~0x7) > 0x1000) len = 0x1000 - (r0 & 0xffc);
+    printf("[RSP] DMA with count %x, len %x, from %llx to %llx, at pc: %x\n", count + 1, len, r1, r0, RSP::pc);
     for (uint32_t i = 0; i <= count; ++i, r1 += len + skip, r0 += len) {
       uint8_t *ram = pages[0] + (r1 &= m1), *mem = RSP::dmem + (r0 &= m0);
       write ? memcpy(ram, mem, len) : memcpy(mem, ram, len);
     }
     /*if (r0 > 0x1000 && !write) {
-      for (uint32_t i = 0; i < 32; ++i)
-        RSP::hashes[i] = crc32_2(RSP::imem + i * 128, 128);
-      printf("RSP hash[31] is %x\n", RSP::hashes[31]);
+      RSP::hash = crc32(RSP::imem, 0x1000);
+      RSP::hash <<= 12, RSP::block->valid = false;
+      //for (auto &block: RSP::blocks)
+      //  block.second.valid = false;
+      printf("Set hash to %x\n", RSP::hash);
     }*/
   }
 
@@ -102,7 +96,7 @@ namespace R4300 {
 
   void vi_update() {
     if (vi_line == vi_irq) set_irqs(0x8);
-    vi_line += 0x2, Sched::add(vi_update, 6510);
+    vi_line += 0x2, sched(vi_update, 6510);
 
     if (vi_line < vi_height) return;
     bool interlaced = vi_status & 0x40;
@@ -131,7 +125,6 @@ namespace R4300 {
     }
     SDL_RenderCopy(renderer, texture, nullptr, nullptr);
     SDL_RenderPresent(renderer);
-    //Vulkan::run_graphics();
 
     for (SDL_Event e; SDL_PollEvent(&e);) {
       if (e.type == SDL_QUIT) exit(0);
@@ -151,9 +144,9 @@ namespace R4300 {
   void ai_update() {
     if (!ai_run || ai_len == 0) return;
     uint32_t new_len = SDL_GetQueuedAudioSize(audio_dev) >> ai_bits;
-    if (new_len <= ai_start || new_len < 0x100)
+    if (new_len <= ai_start || new_len == 0)
       ai_status &= ~0x80000001, ai_start = 0, set_irqs(0x4);
-    else Sched::add(ai_update, (new_len - ai_start) << 10);
+    else sched(ai_update, (new_len - ai_start) << 10);
     ai_len = new_len - ai_start;
   }
 
@@ -164,7 +157,7 @@ namespace R4300 {
       SDL_AudioFormat fmt = (ai_bits ? AUDIO_S16MSB : AUDIO_S8);
       SDL_AudioSpec spec = {
         .freq = static_cast<int>(ntsc_clock / (ai_rate + 1)) << !ai_bits,
-        .format = fmt, .channels = 2, .samples = 0x100,
+        .format = fmt, .channels = 2, .samples = 0x100
       };
       audio_dev = SDL_OpenAudioDevice(nullptr, 0, &spec, nullptr, 0);
       SDL_PauseAudioDevice(audio_dev, 0); ai_dirty = false;
@@ -172,7 +165,7 @@ namespace R4300 {
     ai_start = ai_len, ai_len = len & 0x1fff8;
     if (ai_start != 0) ai_status |= 0x80000001;
     SDL_QueueAudio(audio_dev, pages[0] + ai_ram, ai_len);
-    Sched::move(ai_update, ai_len << 10);
+    sched(ai_update, ai_len << 10);
   }
 
   /* === Peripheral & Serial Interface registers === */
@@ -186,7 +179,7 @@ namespace R4300 {
   uint64_t eeprom[0x200], mempack[0x1000];
 
   void pi_update() {
-    //printf("[PI] DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, pi_len + 1);
+    printf("[PI] DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, pi_len + 1);
     if (pi_write) memcpy(pages[0] + pi_ram, pages[0] + pi_rom, pi_len + 1);
     else memcpy(pages[0] + pi_rom, pages[0] + pi_ram, pi_len + 1);
     set_irqs(0x10); pi_status &= ~0x1;
@@ -369,20 +362,18 @@ namespace R4300 {
     }
   }
 
-  bool logging_on = false;
-
   template <typename T>
   void mmio_write(uint32_t addr, uint32_t val) {
     if ((addr & addr_mask & ~0x1fff) == 0x4000000) {
-      //printf("RSP MMIO Write of %x to %x, block: %x\n", val, addr & 0x1fff, pc);
+      printf("RSP MMIO Write of %x to %x, block: %x\n", val, addr & 0x1fff, pc);
       return RSP::write<T, true>(addr, val);
     }
     switch (addr & addr_mask) {
       default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
       // RSP Interface
       case 0x4040000: rsp_cop0[0] = val & 0x1fff; return;
-      case 0x4040004: rsp_cop0[1] = val & 0xffffff;
-        //printf("[RSP] Writing %llx to DMA_SRC\n", rsp_cop0[1]);
+      case 0x4040004: rsp_cop0[1] = val & 0xffffff; return;
+        printf("[RSP] Writing %llx to DMA_SRC\n", rsp_cop0[1]);
         //printf("DMEM 4e0 is %llx %llx\n", RSP::read<uint32_t>(0x4e0), RSP::read<uint32_t>(0x4e4));
         //printf("DMEM 5f8 is %llx %llx\n", RSP::read<uint32_t>(0x5f8), RSP::read<uint32_t>(0x5fc));
         //if (rsp_cop0[1] == 0x3bb790 || rsp_cop0[1] == 0x3aa538*)
@@ -442,19 +433,20 @@ namespace R4300 {
       case 0x4600008:
         if (pi_status & 0x1) return;
         pi_len = val, pi_write = false;
-        Sched::add(pi_update, 0);
+        sched(pi_update, 0/*pi_len / 2*/);
         pi_status |= 0x1; return;
       case 0x460000c:
         if (pi_status & 0x1) return;
         pi_len = val, pi_write = true;
-        Sched::add(pi_update, 0);
+        sched(pi_update, 0/*pi_len / 2*/);
         pi_status |= 0x1; return;
       case 0x4600010: unset_irqs(0x10); return;
       // Serial Interface
       case 0x4800000: si_ram = val & 0xffffff; return;
       case 0x4800004: si_update();
+        printf("a43bf: %x\n", pages[0][0xa43bf]);
         memcpy(pages[0] + si_ram, pages[0xfe] + 0x7c0, 0x40);
-        //printf("SI writing to %x, a43bf: %x\n", si_ram, pages[0][0xa43bf]);
+        printf("SI writing to %x, a43bf: %x\n", si_ram, pages[0][0xa43bf]);
         set_irqs(0x2); return;
       case 0x4800010:
         memcpy(pages[0xfe] + 0x7c0, pages[0] + si_ram, 0x40);
@@ -494,6 +486,7 @@ namespace R4300 {
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     uint8_t *page = pages[(addr >> 21) & 0xff];
     if ((addr & addr_mask) == 0x1fc007e4) {
+      printf("Hacky CIC emulation\n");
       pages[0][0x1fc007ff] = 0x80;  // Hacky CIC emulation
     }
     if (!page) return mmio_read<T>(addr);
@@ -508,7 +501,7 @@ namespace R4300 {
 
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
-    if (((addr >> 4) & 0xffff) == 0x44ec)
+    if (((addr >> 4) & 0xffff) == 0xa442)
       printf("Writing %llx to %x, block: %x\n", val, addr, pc);
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     //broke |= watch_w[addr];
@@ -523,7 +516,12 @@ namespace R4300 {
     }
   }
 
+  const uint32_t hpage_mask = addr_mask & ~0xfff;
+  uint32_t last_pg = -1;  // reset to -1 before calling compile
+
   uint32_t fetch(uint32_t addr) {
+    uint32_t pg = pc & hpage_mask;
+    if (pg != last_pg) protect(last_pg = pg);
     return read<uint32_t, true>(addr);
   }
 
@@ -531,19 +529,69 @@ namespace R4300 {
 
   robin_hood::unordered_node_map<uint32_t, Block> blocks;
   robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
-  const uint32_t hpage_mask = addr_mask & ~0xfff;
   bool modified = false; Block *block = &empty;
+
+  bool is_break(uint32_t pc) {
+    if (!moved) { moved = true; return false; }
+    return (broke = broke || breaks[pc]);
+  }
+
+  void mtc0(uint32_t reg, uint32_t val) {
+    regs[reg + cfg.cop0] = val;
+    if (reg != 9 && reg != 11) return;
+    if (reg == 11) cause &= ~0x8000;
+    uint32_t cycles = (compare - count) * 2;
+    Sched::add(timer_fire, cycles);
+  }
+
+  void emit_link(ReadPtr &out) {
+    using namespace asmjit;
+
+    JitRuntime runtime;
+    CodeHolder code;
+    code.init(rt.codeInfo());
+    x86::Assembler as(&code);
+
+    as.mov(x86::rax, reinterpret_cast<uint64_t>(block));
+    as.cmp(x86::rdi, x86::qword_ptr(x86::rax, npc)); as.jne(exit_label);
+
+    rt.add(&out, &code);
+  }
+
+  JitConfig cfg = {
+    .read = {
+      read<int8_t>, read<int16_t>,
+      read<int32_t>, read<int64_t>
+    },
+    .write = {
+      write<int8_t>, write<int16_t>,
+      write<int32_t>, write<int64_t>
+    },
+    .fetch = fetch, .link = link,
+    .pc = 0xbfc00000,
+    .cop0 = 0x22, .cop1 = 0x42,
+    .regs = regs, .tlb = tlb,
+  };
+
 
   void timer_fire() {
     cause |= 0x8000, cause &= ~0xff;
   }
 
   void timer_update() {
-    uint32_t cycles = (compare - count) * 2;
-    Sched::move(timer_fire, cycles);
   }
 
-#ifdef _WIN32
+  inline void irqs_update() {
+    uint8_t ip = ((cause & status) >> 8) & 0xff;
+    if ((status & 0x3) != 0x1 || ip == 0x0) return;
+
+    // if interrupt enabled and triggered, set pc to handler address
+    printf("Jumping to interrupt instead of %x: %x\n", pc, fetch(pc));
+    printf("IP: %x MI: %x MASK: %x VI_INTR %x\n", ip, mi_irqs, mi_mask, vi_irq);
+    reg_array[14 + dev_cop0] = pc; pc = 0x80000180; status |= 0x2;
+  }
+
+#if defined(_WIN32)
   uint8_t *alloc_pages(uint32_t size) {
     return reinterpret_cast<uint8_t*>(VirtualAlloc(
       nullptr, size, MEM_COMMIT, PAGE_READWRITE
@@ -560,7 +608,7 @@ namespace R4300 {
 
   void unprotect(uint32_t hpage) {
     DWORD old;
-    for (uint32_t addr : prot_pages[hpage]) blocks[addr].code = nullptr;
+    for (uint32_t addr : prot_pages[hpage]) blocks[addr].valid = false;
     VirtualProtect(pages[0] + hpage, 0x1000, PAGE_READWRITE, &old);
     prot_pages[hpage].clear(); modified = true;
   }
@@ -592,7 +640,7 @@ namespace R4300 {
   }
 
   void unprotect(uint32_t hpage) {
-    for (uint32_t addr : prot_pages[hpage]) blocks[addr].code = nullptr;
+    for (uint32_t addr : prot_pages[hpage]) blocks[addr].valid = false;
     mprotect(pages[0] + hpage, 0x1000, PROT_READ | PROT_WRITE);
     prot_pages[hpage].clear(); modified = true;
   }
@@ -615,31 +663,33 @@ namespace R4300 {
 #endif
 
   void update() {
-    while (Sched::until >= 0) {
-      if (block->code) {
+    uint32_t cycles = 0;
+    while (still_top(cycles)) {
+      bool run = block->valid;
+      if (run) {
         pc = block->code();
-        /*if (broke) {
+        if (broke) {
           Debugger::update();
           blocks.clear();
           block->next_pc = 0;
-        }*/
-        uint8_t line = (pc >> 2) & 0x7;
-        if (block->next_pc[line] != pc) {
-          block->next_pc[line] = pc;
-          block->next[line] = &blocks[pc & addr_mask];
         }
-        block = block->next[line];
+        if (block->next_pc != pc)
+          block->next_pc = pc, block->next = &blocks[pc & addr_mask];
+        block = block->next;
       }
-      
-      if (!block->code) {
+
+      if (!block->valid) {
         CodeHolder code; 
         code.init(runtime.codeInfo());
         MipsJit<Device::r4300> jit(code);
-        jit.jit_block();
+
+        block->cycles = jit.jit_block();
         runtime.add(&block->code, &code);
+        block->valid = true;
       }
+      cycles = run ? block->cycles : 0;
     }
-    Sched::add(update, 0);
+    sched(update, cycles);
   }
 
   uint32_t crc32(uint8_t *bytes, uint32_t len) {
@@ -652,13 +702,6 @@ namespace R4300 {
       }
     }
     return ~crc;
-  }
-
-  uint32_t crc32_2(uint8_t *bytes, uint32_t len) {
-    uint64_t crc = 0, *msg = (uint64_t*)bytes;
-    for (uint32_t i = 0; i < len / 8; ++i)
-        crc = _mm_crc32_u64(crc, msg[i]);
-    return (uint32_t)crc;
   }
 
   void init(FILE *file) {
@@ -696,14 +739,13 @@ namespace R4300 {
     pixels = alloc_pages(0x200000);
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
     SDL_SetHint(SDL_HINT_RENDER_VSYNC, "0");
-    SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_VULKAN, &window, &renderer);
+    SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
     SDL_RenderClear(renderer);
-    Vulkan::init(window);
+    Vulkan::init();
 
     // setup RSP
-    RSP::dmem = pages[0] + 0x04000000;
-    RSP::imem = pages[0] + 0x04001000;
+    RSP::mem = pages[0] + 0x04000000;
     rsp_cop0[4] = 0x1, rsp_cop0[11] = 0x80;
   }
 }

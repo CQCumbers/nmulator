@@ -7,9 +7,12 @@
 #include <string.h>
 #include <stdio.h>
 #include "scheduler.h"
-#include "shader.spv"
+#include "comp.spv"
+#include "vert.spv"
+#include "frag.spv"
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_vulkan.h>
 #include <sys/mman.h>
 
 static uint8_t *alloc_pages(uint32_t size) {
@@ -72,8 +75,13 @@ namespace RDP {
 
 namespace Vulkan {
   VkDevice device = VK_NULL_HANDLE;
+  VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+  VkSemaphore available, finished;
+
+  VkQueue queue = VK_NULL_HANDLE;
   uint32_t queue_idx = 0;
-  VkCommandBuffer commands = VK_NULL_HANDLE;
+  std::vector<VkCommandBuffer> graphics_cmds;
+  VkCommandBuffer compute_cmds = VK_NULL_HANDLE;
 
   constexpr VkDeviceSize align(VkDeviceSize offset) {
     return (offset + 0x1f) & ~0x1f;
@@ -120,47 +128,291 @@ namespace Vulkan {
 
   /* === Vulkan Initialization == */
 
+  void init_instance(SDL_Window *window, VkInstance *instance) {
+    // get required extensions from SDL
+    uint32_t n_exts = 0;
+    SDL_Vulkan_GetInstanceExtensions(window, &n_exts, 0);
+    std::vector<const char*> exts(n_exts);
+    SDL_Vulkan_GetInstanceExtensions(window, &n_exts, exts.data());
+    exts.push_back("VK_KHR_surface"), ++n_exts;
+    const char *layers[] = { "VK_LAYER_KHRONOS_validation" };
+    // create vulkan instance
+    const VkApplicationInfo app_info = {
+      .pApplicationName = "nmulator RDP",
+      .apiVersion = VK_API_VERSION_1_0
+    };
+    const VkInstanceCreateInfo instance_info = {
+      .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+      .pApplicationInfo = &app_info,
+      .enabledLayerCount = 1, .ppEnabledLayerNames = layers,
+      .enabledExtensionCount = n_exts,
+      .ppEnabledExtensionNames = exts.data()
+    };
+    vkCreateInstance(&instance_info, 0, instance);
+  }
+
   void init_device(const VkInstance &instance, VkPhysicalDevice *gpu) {
     // check all vulkan physical devices
     uint32_t n_gpus = 0;
     vkEnumeratePhysicalDevices(instance, &n_gpus, 0);
     std::vector<VkPhysicalDevice> gpus(n_gpus);
     vkEnumeratePhysicalDevices(instance, &n_gpus, gpus.data());
+    // TODO: handle seperate compute and graphics queue families
     for (VkPhysicalDevice gpu_ : gpus) {
       // check queue families on each device
       uint32_t n_queues = 0;
       vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, 0);
       std::vector<VkQueueFamilyProperties> queues(n_queues);
-      vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, &queues[0]);
+      vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, queues.data());
       // if queue family supports compute, init virtual device
       for (uint32_t i = 0; i < n_queues; ++i) {
-        if (~queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT) continue;
+        if (~queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) continue;
         const float priority = 1.0;
         const VkDeviceQueueCreateInfo queue_info = {
           .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
           .queueFamilyIndex = (queue_idx = i),
-          .queueCount = 1, .pQueuePriorities = &priority,
+          .queueCount = 1, .pQueuePriorities = &priority
         };
+        const char *exts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
         const VkDeviceCreateInfo device_info = {
           .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
           .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue_info,
+          .enabledExtensionCount = 1, .ppEnabledExtensionNames = exts
         };
         vkCreateDevice((*gpu = gpu_), &device_info, 0, &device);
+        vkGetDeviceQueue(device, queue_idx, 0, &queue);
         return;
       }
     }
-    printf("No compute queue found\n"), exit(1);
+    printf("No compatible GPU found\n"), exit(1);
   }
 
-  void init_pipeline(const uint32_t *code, uint32_t code_size,
-      VkDescriptorSetLayout *desc_layout, VkPipelineLayout *layout, VkPipeline *pipeline) {
-    // load shader code into module
-    const VkShaderModuleCreateInfo module_info = {
-      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = code_size, .pCode = code,
+  void init_swapchain(SDL_Window *window, const VkInstance &instance,
+      const VkPhysicalDevice &gpu, VkSurfaceFormatKHR *fmt, VkExtent2D *extent) {
+    VkSurfaceKHR surface;
+    VkSurfaceCapabilitiesKHR capable;
+    SDL_Vulkan_CreateSurface(window, instance, &surface);
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpu, surface, &capable);
+    // setup swapchain surface format
+    uint32_t n_formats = 1;;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, surface, &n_formats, fmt);
+    if (fmt->format == VK_FORMAT_UNDEFINED) fmt->format = VK_FORMAT_B8G8R8A8_UNORM;
+    // setup present mode, window extents
+    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
+    uint32_t images = 3; int32_t width, height;
+    if (images - 1 < capable.minImageCount - 1) images = capable.minImageCount;
+    if (images - 1 > capable.maxImageCount - 1) images = capable.maxImageCount;
+    SDL_Vulkan_GetDrawableSize(window, &width, &height);
+    extent->width = width, extent->height = height;
+    // create complete swapchain
+    const VkSwapchainCreateInfoKHR swapchain_info = {
+      .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+      .surface = surface, .minImageCount = images,
+      .imageFormat = fmt->format, .imageColorSpace = fmt->colorSpace,
+      .imageExtent = *extent, .imageArrayLayers = 1,
+      .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .preTransform = capable.currentTransform,
+      .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+      .presentMode = mode, .clipped = VK_TRUE
     };
-    VkShaderModule module_ = VK_NULL_HANDLE;
-    vkCreateShaderModule(device, &module_info, 0, &module_);
+    vkCreateSwapchainKHR(device, &swapchain_info, 0, &swapchain);
+  }
+
+  void init_semaphores() {
+    const VkSemaphoreCreateInfo semaphore_info = {
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+    };
+    vkCreateSemaphore(device, &semaphore_info, nullptr, &available);
+    vkCreateSemaphore(device, &semaphore_info, nullptr, &finished);
+  }
+
+  void init_renderpass(const VkSurfaceFormatKHR &fmt, VkRenderPass *pass) {
+    const VkAttachmentDescription attach = {
+      .format = fmt.format, .samples = VK_SAMPLE_COUNT_1_BIT,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+      .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    };
+    const VkAttachmentReference attach_ref = {
+      .attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    };
+    const VkSubpassDescription subpass = {
+      .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+      .colorAttachmentCount = 1, .pColorAttachments = &attach_ref
+    };
+    const VkRenderPassCreateInfo pass_info = {
+      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+      .attachmentCount = 1, .pAttachments = &attach,
+      .subpassCount = 1, .pSubpasses = &subpass,
+    };
+    vkCreateRenderPass(device, &pass_info, 0, pass);
+  }
+
+  void init_graphics(const VkExtent2D &extent, const VkRenderPass &pass,
+      VkPipelineLayout *layout, VkPipeline *pipeline) {
+    // load shader code into module
+    const VkShaderModuleCreateInfo vert_info = {
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(vert_code), .pCode = vert_code,
+    };
+    const VkShaderModuleCreateInfo frag_info = {
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(frag_code), .pCode = frag_code,
+    };
+    VkShaderModule vert, frag;
+    vkCreateShaderModule(device, &vert_info, 0, &vert);
+    vkCreateShaderModule(device, &frag_info, 0, &frag);
+    // create graphics pipeline with shaders
+    const VkPipelineLayoutCreateInfo layout_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+    };
+    vkCreatePipelineLayout(device, &layout_info, 0, layout);
+    const VkPipelineShaderStageCreateInfo stage_info[] = {
+      {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vert, .pName = "main"
+      }, {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag, .pName = "main"
+      }
+    };
+    // create empty vertex input, assembly info
+    const VkPipelineVertexInputStateCreateInfo input_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    const VkPipelineInputAssemblyStateCreateInfo assembly_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 
+      .primitiveRestartEnable = VK_FALSE
+    };
+    // setup viewport and scissor
+    const VkViewport viewport = {
+      .width = (float)extent.width, .height = (float)extent.height,
+      .minDepth = 0.0f, .maxDepth = 1.0f
+    };
+    const VkRect2D scissor = { .offset = {0, 0}, .extent = extent };
+    const VkPipelineViewportStateCreateInfo viewport_info = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1, .pViewports = &viewport,
+      .scissorCount = 1, .pScissors = &scissor
+    };
+    // setup fixed function operations
+    const VkPipelineRasterizationStateCreateInfo rasterizer = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .depthClampEnable = VK_FALSE, .rasterizerDiscardEnable = VK_FALSE,
+      .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1.0f,
+      .cullMode = VK_CULL_MODE_BACK_BIT, .frontFace = VK_FRONT_FACE_CLOCKWISE,
+      .depthBiasEnable = VK_FALSE
+    };
+    const VkPipelineMultisampleStateCreateInfo multisampling = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .sampleShadingEnable = VK_FALSE, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+    };
+    const VkPipelineColorBlendAttachmentState attach = {
+      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+        | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+      .blendEnable = VK_FALSE
+    };
+    const VkPipelineColorBlendStateCreateInfo blender = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .logicOpEnable = VK_FALSE, .attachmentCount = 1, .pAttachments = &attach
+    };
+    // create graphics pipeline
+    const VkGraphicsPipelineCreateInfo pipeline_info = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .stageCount = 2, .pStages = stage_info,
+      .pVertexInputState = &input_info, .pInputAssemblyState = &assembly_info,
+      .pViewportState = &viewport_info, .pRasterizationState = &rasterizer,
+      .pMultisampleState = &multisampling, .pColorBlendState = &blender,
+      .layout = *layout, .renderPass = pass
+    };
+    vkCreateGraphicsPipelines(device, 0, 1, &pipeline_info, 0, pipeline);
+    vkDestroyShaderModule(device, vert, nullptr);
+    vkDestroyShaderModule(device, frag, nullptr);
+  }
+
+  void init_framebufs(const VkSurfaceFormatKHR &fmt, const VkExtent2D &extent,
+      const VkRenderPass &pass, std::vector<VkFramebuffer> &framebufs) {
+    // retrieve swapchain images
+    uint32_t n_images = 0;
+    vkGetSwapchainImagesKHR(device, swapchain, &n_images, nullptr);
+    std::vector<VkImage> images(n_images); 
+    vkGetSwapchainImagesKHR(device, swapchain, &n_images, images.data());
+    framebufs.resize(n_images);
+    // create view and framebuffer for each image
+    for (uint32_t i = 0; i < n_images; ++i) {
+      VkImageViewCreateInfo view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = images[i], .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = fmt.format, .subresourceRange = {
+          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+          .baseMipLevel = 0, .levelCount = 1,
+          .baseArrayLayer = 0, .layerCount = 1
+        }
+      };
+      VkImageView view;
+      vkCreateImageView(device, &view_info, 0, &view);
+      const VkFramebufferCreateInfo framebuf_info = {
+        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .renderPass = pass, .attachmentCount = 1,
+        .pAttachments = &view, .width = extent.width,
+        .height = extent.height, .layers = 1,
+      };
+      vkCreateFramebuffer(device, &framebuf_info, 0, &framebufs[i]);
+    }
+  }
+
+  void record_graphics(const std::vector<VkFramebuffer> &framebufs,
+      const VkExtent2D &extent, const VkRenderPass &pass, const VkPipeline &pipeline) {
+    // allocate command buffers from command pool
+    const VkCommandPoolCreateInfo pool_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .queueFamilyIndex = queue_idx
+    };
+    VkCommandPool pool;
+    vkCreateCommandPool(device, &pool_info, 0, &pool);
+    const VkCommandBufferAllocateInfo cmd_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = (uint32_t)framebufs.size()
+    };
+    graphics_cmds.resize(framebufs.size());
+    vkAllocateCommandBuffers(device, &cmd_info, graphics_cmds.data());
+    for (uint32_t i = 0; i < framebufs.size(); ++i) {
+      // record draw commands for each framebuf
+      VkCommandBuffer cmds = graphics_cmds[i];
+      const VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      };
+      vkBeginCommandBuffer(cmds, &begin_info);
+      const VkClearValue clear = { { 0.0f, 0.1f, 0.2f, 1.0f } };
+      const VkRenderPassBeginInfo pass_info = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass = pass, .framebuffer = framebufs[i],
+        .clearValueCount = 1, .pClearValues = &clear,
+        .renderArea.offset = { .x = 0,.y = 0 },
+        .renderArea.extent = extent
+      };
+      vkCmdBeginRenderPass(cmds, &pass_info, VK_SUBPASS_CONTENTS_INLINE);
+      vkCmdBindPipeline(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+      vkCmdDraw(cmds, 3, 1, 0, 0);
+      vkCmdEndRenderPass(cmds), vkEndCommandBuffer(cmds);
+    }
+  }
+
+  void init_compute(VkDescriptorSetLayout *desc_layout,
+      VkPipelineLayout *layout, VkPipeline *pipeline) {
+    // load shader code into module
+    const VkShaderModuleCreateInfo comp_info = {
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = sizeof(comp_code), .pCode = comp_code,
+    };
+    VkShaderModule comp;
+    vkCreateShaderModule(device, &comp_info, 0, &comp);
     // describe needed descriptor set layout for shader
     const VkDescriptorSetLayoutBinding bindings[] = {
       {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
@@ -185,18 +437,19 @@ namespace Vulkan {
     const VkPipelineShaderStageCreateInfo stage_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
       .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = module_, .pName = "main"
+      .module = comp, .pName = "main"
     };
     const VkComputePipelineCreateInfo pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
       .stage = stage_info, .layout = *layout
     };
     vkCreateComputePipelines(device, 0, 1, &pipeline_info, 0, pipeline);
+    vkDestroyShaderModule(device, comp, nullptr);
   }
 
   void init_buffer(const VkPhysicalDevice &gpu, VkDeviceMemory *memory) {
     // create shared buffer to hold descriptors
-    VkBufferCreateInfo buffer_info = {
+    const VkBufferCreateInfo buffer_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = total_size, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -232,7 +485,7 @@ namespace Vulkan {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
       .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &pool_size
     };
-    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorPool pool;
     vkCreateDescriptorPool(device, &pool_info, 0, &pool);
     const VkDescriptorSetAllocateInfo descriptors_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -262,61 +515,68 @@ namespace Vulkan {
     vkUpdateDescriptorSets(device, 7, write_descriptors, 0, 0);
   }
   
-  void record_commands(const VkPipelineLayout &layout, const VkPipeline &pipeline,
+  void record_compute(const VkPipelineLayout &layout, const VkPipeline &pipeline,
       const VkDescriptorSet &descriptors) {
     // allocate command buffer from command pool
     const VkCommandPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
       .queueFamilyIndex = queue_idx
     };
-    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPool pool;
     vkCreateCommandPool(device, &pool_info, 0, &pool);
-    const VkCommandBufferAllocateInfo commands_info = {
+    const VkCommandBufferAllocateInfo cmd_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
       .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
       .commandBufferCount = 1
     };
-    vkAllocateCommandBuffers(device, &commands_info, &commands);
+    vkAllocateCommandBuffers(device, &cmd_info, &compute_cmds);
     // record commands - bind descriptor set to set layout, start pipeline
     const VkCommandBufferBeginInfo begin_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
     };
-    vkBeginCommandBuffer(commands, &begin_info);
-    vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE,
+    vkBeginCommandBuffer(compute_cmds, &begin_info);
+    vkCmdBindPipeline(compute_cmds, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(compute_cmds, VK_PIPELINE_BIND_POINT_COMPUTE,
       layout, 0, 1, &descriptors, 0, 0);
-    vkCmdDispatch(commands, gwidth, gheight, 1);
-    vkEndCommandBuffer(commands);
+    vkCmdDispatch(compute_cmds, gwidth, gheight, 1);
+    vkEndCommandBuffer(compute_cmds);
   }
+  
 
-  void init() {
-    // setup Vulkan instance, logical device
-    VkInstance instance = VK_NULL_HANDLE;
-    VkPhysicalDevice gpu = VK_NULL_HANDLE;
-    const VkApplicationInfo app_info = {
-      .pApplicationName = "nmulator RDP",
-      .apiVersion = VK_API_VERSION_1_0
-    };
-    const char *layer = "VK_LAYER_KHRONOS_validation";
-    const VkInstanceCreateInfo instance_info = {
-      .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-      .pApplicationInfo = &app_info,
-      .enabledLayerCount = 1, .ppEnabledLayerNames = &layer,
-    };
-    vkCreateInstance(&instance_info, 0, &instance);
+  void init(SDL_Window *window) {
+    // setup Vulkan instance, window, logical device
+    VkInstance instance;
+    VkPhysicalDevice gpu;
+    VkSurfaceFormatKHR fmt;
+    VkExtent2D extent;
+
+    init_instance(window, &instance);
     init_device(instance, &gpu);
+    init_swapchain(window, instance, gpu, &fmt, &extent);
+    init_semaphores();
+    
+    // setup graphics pipeline work
+    VkPipelineLayout layout;
+    VkPipeline pipeline;
+    VkRenderPass pass;
+    std::vector<VkFramebuffer> framebufs;
 
-    VkDescriptorSetLayout desc_layout = VK_NULL_HANDLE;
-    VkPipelineLayout layout = VK_NULL_HANDLE;
-    VkDescriptorSet descriptors = VK_NULL_HANDLE;
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
+    init_renderpass(fmt, &pass);
+    init_graphics(extent, pass, &layout, &pipeline);
+    init_framebufs(fmt, extent, pass, framebufs);
+    record_graphics(framebufs, extent, pass, pipeline);
 
-    // use structured bindings instead of output params?
-    init_pipeline(shader, sizeof(shader), &desc_layout, &layout, &pipeline);
+    // setup compute pipeline work
+    VkDescriptorSetLayout desc_layout;
+    //VkPipelineLayout layout;
+    VkDescriptorSet descriptors;
+    //VkPipeline pipeline;
+    VkDeviceMemory memory;
+
+    init_compute(&desc_layout, &layout, &pipeline);
     init_buffer(gpu, &memory);
     init_descriptors(desc_layout, &descriptors);
-    record_commands(layout, pipeline, descriptors);
+    record_compute(layout, pipeline, descriptors);
     
     // map memory so buffers can filled by cpu
     auto ptr = reinterpret_cast<void**>(&mapped_mem);
@@ -351,6 +611,37 @@ namespace Vulkan {
 
   /* === Runtime Methods === */
 
+  void run_graphics() {
+    uint32_t idx = 0;
+    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, available, 0, &idx);
+    VkPipelineStageFlags mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    const VkSubmitInfo submit_info = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .waitSemaphoreCount = 1, .pWaitSemaphores = &available, 
+      .pWaitDstStageMask = &mask,
+      .commandBufferCount = 1, .pCommandBuffers = &graphics_cmds[idx],
+      .signalSemaphoreCount = 1, .pSignalSemaphores = &finished
+    };
+    vkQueueSubmit(queue, 1, &submit_info, 0);
+    const VkPresentInfoKHR present_info = {
+      .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+      .waitSemaphoreCount = 1, .pWaitSemaphores = &finished,
+      .swapchainCount = 1, .pSwapchains = &swapchain,
+      .pImageIndices = &idx, .pResults = 0
+    };
+    vkQueuePresentKHR(queue, &present_info);
+    vkQueueWaitIdle(queue);
+  }
+
+  void run_compute() {
+    const VkSubmitInfo submit_info = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1, .pCommandBuffers = &compute_cmds
+    };
+    vkQueueSubmit(queue, 1, &submit_info, 0);
+    vkQueueWaitIdle(queue);
+  }
+
   void add_tmem_copy(RDPState &state) {
     uint8_t *last_tmem = tmem_ptr();
     RDPTex *last_texes = texes_ptr();
@@ -361,17 +652,6 @@ namespace Vulkan {
     memcpy(tmem_ptr(), last_tmem, 0x1000);
     memcpy(texes_ptr(), last_texes, sizeof(RDPTex) * 8);
     state.tmem = n_tmems;
-  }
-
-  void run_commands() {
-    VkQueue queue = VK_NULL_HANDLE;
-    vkGetDeviceQueue(device, queue_idx, 0, &queue);
-    const VkSubmitInfo submitInfo = {
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .commandBufferCount = 1, .pCommandBuffers = &commands
-    };
-    vkQueueSubmit(queue, 1, &submitInfo, 0);
-    vkQueueWaitIdle(queue);
   }
 
   void add_rdp_cmd(RDPCommand cmd) {
@@ -398,7 +678,6 @@ namespace Vulkan {
   }
 
   void run_buffer() {
-    init();
     FILE *file = fopen("dump.bin", "r");
     if (!file) printf("error: can't open file\n"), exit(1);
     fread(mapped_mem, 1, total_size, file);
@@ -408,14 +687,15 @@ namespace Vulkan {
     SDL_Renderer *renderer = nullptr;
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
     SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
-    SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI, &window, &renderer);
+    SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_VULKAN, &window, &renderer);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
     SDL_RenderClear(renderer);
 
     SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA5551,
         SDL_TEXTUREACCESS_STREAMING, 320, 240);
 
-    run_commands();
+    init(window);
+    run_compute();
     uint16_t *pixels = (uint16_t*)pixels_ptr();
     uint16_t *out = (uint16_t*)alloc_pages(320 * 240 * 2);
     for (uint32_t i = 0; i < 320 * 240; ++i)
@@ -437,7 +717,7 @@ namespace Vulkan {
     if (zbuf) memcpy(zbuf_ptr(), zbuf, zbuf_len);
     else memset(zbuf_ptr(), 0xff, zbuf_len);
     memcpy(pixels_ptr(), img, img_len);
-    run_commands();
+    run_compute();
     n_cmds = 0, memset(tiles_ptr(), 0, tiles_size);
     if (zbuf) memcpy(zbuf, zbuf_ptr(), zbuf_len);
     memcpy(img, pixels_ptr(), img_len);
@@ -620,12 +900,11 @@ namespace RDP {
     tex.stl[0] = (instr[0] >> 12) & 0xfff, tex.stl[1] = instr[0] & 0xfff;
   }
 
-  uint32_t taddr(uint32_t addr) {
-    if (tex_nibs != 8) return addr & 0xfff;
+  uint32_t taddr(uint32_t addr, uint32_t tex_nibs) {
     // handle rgba32 split into hi/lo tmem
-    uint32_t offs = (addr / 2) & 0x7fe;
-    uint32_t high = (addr & 0x2) << 10;
-    return high | offs | (addr & 0x1);
+    if (tex_nibs != 8) return (addr / 2) & 0x7ff;
+    uint32_t offs = (addr / 4) & 0x3ff;
+    return ((addr & 0x2) << 9) | offs;
   }
 
   void load_tile() {
@@ -642,11 +921,12 @@ namespace RDP {
     offset = offset * tex_nibs / 2, len = len * tex_nibs / 2;
     uint8_t *ram = R4300::pages[0] + tex_addr + offset;
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
+    const uint32_t tn = tex_nibs;
     // Swap every other 16-bit word on odd rows
     for (int32_t i = 0; i <= (tex.sth[1] - tex.stl[1]) / 4; ++i) {
-      for (uint32_t j = 0; j < len; ++j)
-        mem[taddr(j) ^ flip] = ram[j];
-      mem += tex.width, flip ^= 0x4;
+      for (uint32_t j = 0; j < len; j += 2)
+        ((uint16_t*)mem)[taddr(j, tn) ^ flip] = ((uint16_t*)ram)[j / 2];
+      mem += tex.width, flip ^= 0x2;
       ram += tex_width * tex_nibs / 2;
     }
   }
@@ -661,15 +941,16 @@ namespace RDP {
     // Copy from texture image to tmem
     uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
     uint32_t len = (sh - sl + 1) * tex_nibs / 2, flip = 0;
-    uint8_t *ram = R4300::pages[0] + tex_addr + offset;
+    uint16_t *ram = (uint16_t*)(R4300::pages[0] + tex_addr + offset);
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
+    const uint32_t tn = tex_nibs;
     // Swap every other 16-bit word on odd rows
     for (uint32_t i = 0; i < len;) {
-      for (uint32_t t = 0; t < 0x800 && i < len;) {
-        mem[taddr(i) ^ flip] = *(ram++);
-        if ((i++ & 0x7) == 0x7) t += dxt;
+      for (uint32_t t = 0; t < 0x800 && i < len; i += 2) {
+        ((uint16_t*)mem)[taddr(i, tn) ^ flip] = *(ram++);
+        if ((i & 0x7) == 0x6) t += dxt;
       }
-      mem += tex.width, flip ^= 0x4;
+      mem += tex.width, flip ^= 0x2;
     }
   }
 
@@ -823,7 +1104,6 @@ namespace RDP {
         default: invalid(); break;
       }
       if (pc > pc_end) pc = pc_end, offset = pc_end - start;
-      Sched::until -= 0;  // Avoid handling double buffering
       if (pc == pc_end) { status |= 0x80; return; }
     }
     Sched::add(update, 0);

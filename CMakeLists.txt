@@ -8,9 +8,11 @@ add_subdirectory(extern/asmjit)
 
 # compile shader into array
 set(HLSL "${CMAKE_CURRENT_SOURCE_DIR}/src/rdp.comp.hlsl")
-set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/src/shader.spv")
+set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/src/comp.spv")
 add_custom_command(OUTPUT ${SPIRV}
-    COMMAND glslangValidator -V -D ${HLSL} -e main --vn shader -o ${SPIRV}
+    COMMAND glslangValidator -V -D ${HLSL} -e main --vn comp_code -o ${SPIRV}
+    COMMAND glslangValidator -V -D ${CMAKE_CURRENT_SOURCE_DIR}/src/rdp.vert.hlsl -e main --vn vert_code -o ${CMAKE_CURRENT_SOURCE_DIR}/src/vert.spv
+    COMMAND glslangValidator -V -D ${CMAKE_CURRENT_SOURCE_DIR}/src/rdp.frag.hlsl -e main --vn frag_code -o ${CMAKE_CURRENT_SOURCE_DIR}/src/frag.spv
     DEPENDS ${HLSL})
 add_custom_target(shader DEPENDS ${SPIRV})
 
@@ -23,7 +25,7 @@ add_dependencies(nmulator shader)
 
 # set nmulator compiler options
 target_compile_options(nmulator PRIVATE
-    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -msse4.2
         -fno-exceptions -fno-rtti -fno-strict-aliasing>
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /EHsc /GR->)
 target_compile_features(nmulator PRIVATE cxx_std_20)
