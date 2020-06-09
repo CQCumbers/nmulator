@@ -15,6 +15,14 @@
 #include <SDL2/SDL_vulkan.h>
 #include <sys/mman.h>
 
+namespace R4300 {
+  extern bool logging_on;
+  extern uint8_t *pages[0x100];
+  void set_irqs(uint32_t mask);
+  template <typename T, bool map>
+  int64_t read(uint32_t addr);
+}
+
 static uint8_t *alloc_pages(uint32_t size) {
   return reinterpret_cast<uint8_t*>(mmap(
     nullptr, size, PROT_READ | PROT_WRITE,
@@ -90,7 +98,7 @@ namespace Vulkan {
   /* === Descriptor Memory Access === */
 
   uint8_t *mapped_mem = nullptr;
-  const uint32_t group_size = 8, max_cmds = 2048, max_copies = 512;
+  const uint32_t group_size = 8, max_cmds = 2048, max_copies = 4096;
   uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0, n_tmems = 0;
   bool dump_next = false;
@@ -123,7 +131,11 @@ namespace Vulkan {
   const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint16_t);
   uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
 
-  const VkDeviceSize total_size = zbuf_offset + zbuf_size;
+  const VkDeviceSize rdram_offset = align(zbuf_offset + zbuf_size);
+  const VkDeviceSize rdram_size = 320 * 240 * sizeof(uint32_t);
+  uint8_t *rdram_ptr() { return mapped_mem + rdram_offset; }
+
+  const VkDeviceSize total_size = rdram_offset + rdram_size;
   VkBuffer buffer = VK_NULL_HANDLE;
 
   /* === Vulkan Initialization == */
@@ -253,7 +265,8 @@ namespace Vulkan {
   }
 
   void init_graphics(const VkExtent2D &extent, const VkRenderPass &pass,
-      VkPipelineLayout *layout, VkPipeline *pipeline) {
+      VkDescriptorSetLayout *desc_layout, VkPipelineLayout *layout,
+      VkPipeline *pipeline) {
     // load shader code into module
     const VkShaderModuleCreateInfo vert_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -266,9 +279,20 @@ namespace Vulkan {
     VkShaderModule vert, frag;
     vkCreateShaderModule(device, &vert_info, 0, &vert);
     vkCreateShaderModule(device, &frag_info, 0, &frag);
+    // describe needed descriptor set layout for shader
+    const VkDescriptorSetLayoutBinding binding = {
+      .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
+    };
+    const VkDescriptorSetLayoutCreateInfo desc_layout_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = 1, .pBindings = &binding
+    };
+    vkCreateDescriptorSetLayout(device, &desc_layout_info, 0, desc_layout);
     // create graphics pipeline with shaders
     const VkPipelineLayoutCreateInfo layout_info = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1, .pSetLayouts = desc_layout
     };
     vkCreatePipelineLayout(device, &layout_info, 0, layout);
     const VkPipelineShaderStageCreateInfo stage_info[] = {
@@ -366,8 +390,39 @@ namespace Vulkan {
     }
   }
 
+  void init_graphics_desc(const VkDescriptorSetLayout &layout, VkDescriptorSet *descriptors) {
+    // allocate descriptor set from descriptor pool
+    const VkDescriptorPoolSize pool_size = {
+      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1
+    };
+    const VkDescriptorPoolCreateInfo pool_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &pool_size
+    };
+    VkDescriptorPool pool;
+    vkCreateDescriptorPool(device, &pool_info, 0, &pool);
+    const VkDescriptorSetAllocateInfo descriptors_info = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = pool, .descriptorSetCount = 1, .pSetLayouts = &layout
+    };
+    vkAllocateDescriptorSets(device, &descriptors_info, descriptors);
+    // bind buffer to descriptor set
+    const VkDescriptorBufferInfo buffer_info = {
+      .buffer = buffer, .offset = rdram_offset, .range = rdram_size
+    };
+    const VkWriteDescriptorSet write_descriptor = {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = *descriptors, .dstBinding = 0, .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &buffer_info
+    };
+    vkUpdateDescriptorSets(device, 1, &write_descriptor, 0, 0);
+  }
+
   void record_graphics(const std::vector<VkFramebuffer> &framebufs,
-      const VkExtent2D &extent, const VkRenderPass &pass, const VkPipeline &pipeline) {
+      const VkExtent2D &extent, const VkRenderPass &pass,
+      const VkPipelineLayout &layout, const VkPipeline &pipeline,
+      const VkDescriptorSet &descriptors) {
     // allocate command buffers from command pool
     const VkCommandPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -389,7 +444,7 @@ namespace Vulkan {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       };
       vkBeginCommandBuffer(cmds, &begin_info);
-      const VkClearValue clear = { { 0.0f, 0.1f, 0.2f, 1.0f } };
+      const VkClearValue clear = { 0.0f, 0.1f, 0.2f, 1.0f };
       const VkRenderPassBeginInfo pass_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = pass, .framebuffer = framebufs[i],
@@ -399,6 +454,7 @@ namespace Vulkan {
       };
       vkCmdBeginRenderPass(cmds, &pass_info, VK_SUBPASS_CONTENTS_INLINE);
       vkCmdBindPipeline(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+      vkCmdBindDescriptorSets(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptors, 0, 0);
       vkCmdDraw(cmds, 3, 1, 0, 0);
       vkCmdEndRenderPass(cmds), vkEndCommandBuffer(cmds);
     }
@@ -476,7 +532,7 @@ namespace Vulkan {
     vkBindBufferMemory(device, buffer, *memory, 0);
   }
 
-  void init_descriptors(const VkDescriptorSetLayout &layout, VkDescriptorSet *descriptors) {
+  void init_compute_desc(const VkDescriptorSetLayout &layout, VkDescriptorSet *descriptors) {
     // allocate descriptor set from descriptor pool
     const VkDescriptorPoolSize pool_size = {
       .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 7
@@ -506,8 +562,7 @@ namespace Vulkan {
     for (uint8_t i = 0; i < 7; ++i) {
       write_descriptors[i] = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = *descriptors, .dstBinding = i,
-        .descriptorCount = 1,
+        .dstSet = *descriptors, .dstBinding = i, .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
         .pBufferInfo = &buffer_info[i]
       };
@@ -544,38 +599,36 @@ namespace Vulkan {
   
 
   void init(SDL_Window *window) {
-    // setup Vulkan instance, window, logical device
     VkInstance instance;
     VkPhysicalDevice gpu;
     VkSurfaceFormatKHR fmt;
     VkExtent2D extent;
-
-    init_instance(window, &instance);
-    init_device(instance, &gpu);
-    init_swapchain(window, instance, gpu, &fmt, &extent);
-    init_semaphores();
+    VkDeviceMemory memory;
     
-    // setup graphics pipeline work
     VkPipelineLayout layout;
+    VkDescriptorSetLayout desc_layout;
+    VkDescriptorSet descriptors;
     VkPipeline pipeline;
     VkRenderPass pass;
     std::vector<VkFramebuffer> framebufs;
 
+    // configure GPU, display, and memory
+    init_instance(window, &instance);
+    init_device(instance, &gpu);
+    init_swapchain(window, instance, gpu, &fmt, &extent);
+    init_semaphores();
+    init_buffer(gpu, &memory);
+
+    // setup graphics pipeline work
     init_renderpass(fmt, &pass);
-    init_graphics(extent, pass, &layout, &pipeline);
     init_framebufs(fmt, extent, pass, framebufs);
-    record_graphics(framebufs, extent, pass, pipeline);
+    init_graphics(extent, pass, &desc_layout, &layout, &pipeline);
+    init_compute_desc(desc_layout, &descriptors);
+    record_graphics(framebufs, extent, pass, layout, pipeline, descriptors);
 
     // setup compute pipeline work
-    VkDescriptorSetLayout desc_layout;
-    //VkPipelineLayout layout;
-    VkDescriptorSet descriptors;
-    //VkPipeline pipeline;
-    VkDeviceMemory memory;
-
     init_compute(&desc_layout, &layout, &pipeline);
-    init_buffer(gpu, &memory);
-    init_descriptors(desc_layout, &descriptors);
+    init_compute_desc(desc_layout, &descriptors);
     record_compute(layout, pipeline, descriptors);
     
     // map memory so buffers can filled by cpu
@@ -678,11 +731,6 @@ namespace Vulkan {
   }
 
   void run_buffer() {
-    FILE *file = fopen("dump.bin", "r");
-    if (!file) printf("error: can't open file\n"), exit(1);
-    fread(mapped_mem, 1, total_size, file);
-    fclose(file);
-    
     SDL_Window *window = nullptr;
     SDL_Renderer *renderer = nullptr;
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
@@ -690,11 +738,16 @@ namespace Vulkan {
     SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_VULKAN, &window, &renderer);
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
     SDL_RenderClear(renderer);
+    init(window);
 
     SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA5551,
         SDL_TEXTUREACCESS_STREAMING, 320, 240);
 
-    init(window);
+    FILE *file = fopen("dump.bin", "r");
+    if (!file) printf("error: can't open file\n"), exit(1);
+    fread(mapped_mem, 1, total_size, file);
+    fclose(file);
+
     run_compute();
     uint16_t *pixels = (uint16_t*)pixels_ptr();
     uint16_t *out = (uint16_t*)alloc_pages(320 * 240 * 2);
@@ -713,22 +766,32 @@ namespace Vulkan {
 
   void render(uint8_t *img, uint32_t img_len, uint8_t *zbuf, uint32_t zbuf_len) {
     if (!img || n_cmds == 0) return;
-    globals_ptr()->n_cmds = n_cmds;
-    if (zbuf) memcpy(zbuf_ptr(), zbuf, zbuf_len);
-    else memset(zbuf_ptr(), 0xff, zbuf_len);
-    memcpy(pixels_ptr(), img, img_len);
-    run_compute();
-    n_cmds = 0, memset(tiles_ptr(), 0, tiles_size);
-    if (zbuf) memcpy(zbuf, zbuf_ptr(), zbuf_len);
-    memcpy(img, pixels_ptr(), img_len);
-
-    if (dump_next && *img != 0xff) dump_buffer();
 
     uint8_t *last_tmem = tmem_ptr();
     RDPTex *last_texes = texes_ptr();
     n_tmems = 0;
     memcpy(tmem_ptr(), last_tmem, 0x1000);
     memcpy(texes_ptr(), last_texes, sizeof(RDPTex) * 8);
+
+    globals_ptr()->n_cmds = n_cmds;
+    if (zbuf) memcpy(zbuf_ptr(), zbuf, zbuf_len);
+    else memset(zbuf_ptr(), 0xff, zbuf_len);
+    memcpy(pixels_ptr(), img, img_len);
+
+    /*if (dump_next && img[1] != 0xff) {
+      memset(pixels_ptr(), 0, pixels_size);
+      printf("Resetting pixels\n");
+      dump_buffer(), dump_next = true;
+    }*/
+
+    run_compute();
+    n_cmds = 0, memset(tiles_ptr(), 0, tiles_size);
+    if (zbuf) memcpy(zbuf, zbuf_ptr(), zbuf_len);
+    memcpy(img, pixels_ptr(), img_len);
+    
+    /*if (dump_next && img[1] != 0x0 && img[1] != 0xff) {
+      dump_next = false;
+    }*/
   }
 }
 
@@ -740,14 +803,6 @@ namespace RSP {
   template <typename T, bool all>
   int64_t read(uint32_t addr);
   extern bool step;
-}
-
-namespace R4300 {
-  extern bool logging_on;
-  extern uint8_t *pages[0x100];
-  void set_irqs(uint32_t mask);
-  template <typename T, bool map>
-  int64_t read(uint32_t addr);
 }
 
 namespace RDP {
@@ -806,6 +861,7 @@ namespace RDP {
     img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
     img_width = (instr[0] & 0x3ff) + 1;
     img_addr = R4300::pages[0] + (instr[1] & 0x3ffffff);
+    printf("IMG_ADDR is now %x\n", img_addr);
 
     GlobalData *globals = Vulkan::globals_ptr();
     globals->width = img_width, globals->size = img_size;
@@ -1007,10 +1063,7 @@ namespace RDP {
 
   template <uint8_t type>
   void triangle() {
-    //printf("[RDP] Triangle of type %x\n", type);
     std::array<uint32_t, 8> instr = fetch<8>(pc);
-    //for (uint8_t i = 0; i < 8; ++i) printf("%x ", instr[i]);
-    //printf("\n");
     uint32_t t = type | ((instr[0] >> 19) & 0x10);
     RDPCommand cmd = {
       .type = t, .tile = (instr[0] >> 16) & 0x7,
@@ -1023,7 +1076,14 @@ namespace RDP {
     if (type & 0x4) shade_triangle(cmd);
     if (type & 0x2) tex_triangle(cmd);
     if (type & 0x1) zbuf_triangle(cmd);
-    if (pc <= pc_end) Vulkan::add_rdp_cmd(cmd);
+    if (pc <= pc_end) {
+      Vulkan::add_rdp_cmd(cmd);
+      printf("[RDP] Triangle of type %x\n", type);
+      for (uint8_t i = 0; i < 8; ++i) printf("%x ", instr[i]);
+      if (instr[0] == 0xcf800156)
+        Vulkan::dump_next = true;
+      printf("\n");
+    }
   }
 
   template <bool flip>

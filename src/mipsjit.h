@@ -14,8 +14,10 @@ struct Block {
   Function code;
   uint32_t len;
   uint32_t hash;
+
   Block *next[8];
   uint64_t next_pc[8];
+  uint64_t pad[14];
 };
 
 JitRuntime runtime;
@@ -53,6 +55,8 @@ namespace RSP {
   extern uint8_t *imem;
   extern uint32_t hashes[32];
   extern Block *block;
+
+  extern Block blocks[0x1000];
 
   uint32_t fetch(uint32_t addr);
   template <typename T, bool all=false>
@@ -330,6 +334,7 @@ struct MipsJit {
       if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
       R4300::broke = true; return block_end;
     }
+    //return next_pc;
   }
 
   /*void check_watch(uint32_t pc) {
@@ -2600,32 +2605,31 @@ struct MipsJit {
     as.cmp(x86::qword_ptr(x86::rax), 0), as.jl(exit_label);
 
     // check next_pc matches and block valid
-    constexpr uint8_t hlen = 8, hash = 12, next = 16, npc = 80;
-    Block *block = (is_rsp ? RSP::block : R4300::block);
+    constexpr uint8_t hlen = 8, hash = 12;
+    constexpr uint8_t next = 16, npc = 80;
     if (is_rsp) as.and_(x86::edi, 0xffc);
 
-    as.mov(x86::rax, reinterpret_cast<uint64_t>(block));
-    as.mov(x86::ecx, x86::edi), as.and_(x86::ecx, 0x1c);
-    //if (is_rsp) as.add(x86::edi, 0x1000);
-    as.cmp(x86::rdi, x86::qword_ptr(x86::rax, x86::rcx, 1, npc));
-    //if (is_rsp) as.sub(x86::edi, 0x1000);
-    as.jne(exit_label);
+    if (!is_rsp) {
+      as.mov(x86::rax, reinterpret_cast<uint64_t>(R4300::block));
+      as.mov(x86::ecx, x86::edi), as.and_(x86::ecx, 0x1c);
+      as.cmp(x86::rdi, x86::qword_ptr(x86::rax, x86::rcx, 1, npc));
+      as.jne(exit_label);
+      as.mov(x86::rsi, x86::qword_ptr(x86::rax, x86::rcx, 1, next));
+    } else {
+      as.mov(x86::rax, reinterpret_cast<uint64_t>(RSP::blocks));
+      as.mov(x86::ecx, x86::edi), as.shl(x86::ecx, 7);
+      as.lea(x86::rsi, x86::qword_ptr(x86::rax, x86::rcx));
 
-    // load block, validate instruction hash
-    as.mov(x86::rsi, x86::qword_ptr(x86::rax, x86::rcx, 1, next));
-    if (is_rsp) {
-      /*Label loop = as.newLabel();
+      Label loop = as.newLabel();
       as.mov(x86::edx, x86::dword_ptr(x86::rsi, hlen)), as.xor_(x86::eax, x86::eax);
       as.mov(x86::rcx, reinterpret_cast<uint64_t>(RSP::imem));
-      as.bind(loop), as.crc32(x86::rax, x86::qword_ptr(x86::rcx, x86::rdi));
-      as.add(x86::rcx, 8), as.sub(x86::edx, 1), as.jnz(loop);
-      as.cmp(x86::eax, x86::dword_ptr(x86::rsi, hash)), as.jne(exit_label);*/
-      as.jmp(exit_label);
+      as.bind(loop), as.crc32(x86::eax, x86::dword_ptr(x86::rcx, x86::rdi));
+      as.add(x86::rcx, 4), as.sub(x86::edx, 1), as.ja(loop);
+      as.cmp(x86::eax, x86::dword_ptr(x86::rsi, hash)), as.jne(exit_label);
     }
     as.mov(x86::rdx, x86::qword_ptr(x86::rsi));
     as.cmp(x86::rdx, 0), as.je(exit_label);
 
-    // update value of block, jump to code
     if (is_rsp) as.mov(x86::rax, reinterpret_cast<uint64_t>(&RSP::block));
     else as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::block));
     as.mov(x86::qword_ptr(x86::rax), x86::rsi);
@@ -2635,7 +2639,7 @@ struct MipsJit {
     x86_store_all(); as.pop(x86::rbp);
     as.mov(x86::eax, x86::edi); as.ret();
     if (is_rsp) printf("Compiled block with %x bytes\n", cycles * 4);
-    return (cycles + 1) / 2;
+    return cycles;
   }
 };
 

@@ -36,8 +36,8 @@ namespace Sched {
 
   int64_t until;
   uint64_t ev_array[16];
-  uint64_t *events = ev_array + 16;
-  uint64_t *const top = events - 1;
+  uint64_t *events = ev_array + 15;
+  uint64_t *const top = events;
 
   void move_down(uint64_t *ptr, uint64_t event) {
     while (ptr < top && !after(event, ptr[1]))
@@ -110,5 +110,7 @@ inline uint64_t pext_low(uint64_t val, uint64_t mask) {
 #  define bswap32(x)  __builtin_bswap32(x)
 #  define bswap64(x)  __builtin_bswap64(x)
 #endif
+
+//#define printf(fmt, ...) (0)
 
 #endif

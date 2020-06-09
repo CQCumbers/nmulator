@@ -26,6 +26,7 @@ namespace Debugger {
 
   void recv_gdb(sock_t sockfd, char *cmd_buf) {
     char cmd_c = '\0', cmd_idx = 0;
+    //uint8_t cmd_c = 0, cmd_idx = 0;
     // ignore acks and invalid cmds
     if (!recv(sockfd, &cmd_c, 1, MSG_WAITALL)) return;
     if (cmd_c == '+') return;

@@ -3,7 +3,7 @@
 
 #include "rsp.h"
 #include "rdp.h"
-#include <xmmintrin.h>
+#include <immintrin.h>
 
 #ifdef _WIN32
 #  include <SDL.h>
@@ -82,7 +82,7 @@ namespace R4300 {
     }
     /*if (r0 > 0x1000 && !write) {
       for (uint32_t i = 0; i < 32; ++i)
-        RSP::hashes[i] = crc32_2(RSP::imem + i * 128, 128);
+        RSP::hashes[i] = crc32(RSP::imem + i * 128, 128);
       printf("RSP hash[31] is %x\n", RSP::hashes[31]);
     }*/
   }
@@ -100,6 +100,36 @@ namespace R4300 {
   SDL_Texture *texture = nullptr;
   uint8_t *pixels = nullptr;
 
+  robin_hood::unordered_map<uint32_t, Block> blocks;
+
+  void convert16(uint8_t *dst, const uint8_t *src, uint32_t len) {
+    // convert rgba5551 to bgra8888, 16 byte aligned len
+    __m128i imm0xf8 = _mm_set1_epi16(0xf8);
+    __m128i shuffle = _mm_set_epi8(
+      14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1);
+    for (uint32_t i = 0; i < len; i += 16, src += 16, dst += 32) {
+      __m128i data = _mm_loadu_si128((__m128i*)src);
+      __m128i pack = _mm_shuffle_epi8(data, shuffle);
+      __m128i r = _mm_and_si128(_mm_srli_epi16(pack, 8), imm0xf8);
+      __m128i g = _mm_and_si128(_mm_srli_epi16(pack, 3), imm0xf8);
+      __m128i b = _mm_and_si128(_mm_slli_epi16(pack, 2), imm0xf8);
+      __m128i gb = _mm_or_si128(_mm_slli_epi16(g, 8), b);
+      _mm_storeu_si128((__m128i*)dst, _mm_unpacklo_epi16(gb, r));
+      _mm_storeu_si128((__m128i*)(dst + 16), _mm_unpackhi_epi16(gb, r));
+    }
+  }
+
+  void convert32(uint8_t *dst, const uint8_t *src, uint32_t len) {
+    // convert rgba8888 to bgra8888, 16 byte aligned len
+    __m128i shuffle = _mm_set_epi8(
+      15, 12, 13, 14, 11, 8, 9, 10, 7, 4, 5, 6, 3, 0, 1, 2);
+    for (uint32_t i = 0; i < len; i += 16, src += 16, dst += 16) {
+      __m128i data = _mm_loadu_si128((__m128i*)src);
+      __m128i pack = _mm_shuffle_epi8(data, shuffle);
+      _mm_storeu_si128((__m128i*)dst, pack);
+    }
+  }
+
   void vi_update() {
     if (vi_line == vi_irq) set_irqs(0x8);
     vi_line += 0x2, Sched::add(vi_update, 6510);
@@ -113,12 +143,19 @@ namespace R4300 {
 
     if (vi_dirty) {
       if (texture) SDL_DestroyTexture(texture);
-      texture = SDL_CreateTexture(renderer,
-        (format == 2 ? SDL_PIXELFORMAT_RGBA5551 : SDL_PIXELFORMAT_RGBA8888),
+      texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_STREAMING, vi_width, height);
       vi_dirty = false;
     }
-    if (format == 2) {
+
+    bool fmt16 = (format == 2);
+    uint8_t *pixels; int pitch, len = vi_width * height;
+    SDL_LockTexture(texture, NULL, (void**)&pixels, &pitch);
+    if (fmt16) convert16(pixels, pages[0] + vi_origin, len * 2);
+    else convert32(pixels, pages[0] + vi_origin, len * 4);
+    SDL_UnlockTexture(texture);
+
+    /*if (format == 2) {
       uint16_t *out = reinterpret_cast<uint16_t*>(pixels);
       for (uint32_t i = 0; i < vi_width * height; ++i)
         out[i] = read<uint16_t>(vi_origin + (i << 1));
@@ -128,10 +165,12 @@ namespace R4300 {
       for (uint32_t i = 0; i < vi_width * height; ++i)
         out[i] = read<uint32_t>(vi_origin + (i << 2));
       SDL_UpdateTexture(texture, nullptr, out, vi_width << 2);
-    }
+    }*/
     SDL_RenderCopy(renderer, texture, nullptr, nullptr);
     SDL_RenderPresent(renderer);
-    //Vulkan::run_graphics();
+    /*memcpy(Vulkan::rdram_ptr(), pages[0] + vi_origin, 320 * 240 * 2);
+    Vulkan::run_graphics();*/
+    //printf("%zu blocks cached\n", blocks.size());
 
     for (SDL_Event e; SDL_PollEvent(&e);) {
       if (e.type == SDL_QUIT) exit(0);
@@ -141,38 +180,44 @@ namespace R4300 {
 
   /* === Audio Interface registers === */
 
-  constexpr uint32_t ntsc_clock = 48681812;
-  uint32_t ai_status = 0x0, ai_ram = 0x0;
-  uint32_t ai_len = 0, ai_start = 0;
-  uint32_t ai_rate = 0, ai_bits = 0;
-  bool ai_run = false, ai_dirty = false;
+  uint32_t ai_status, ai_rate;
+  uint32_t ai_ram, ai_len;
+  uint32_t ai_start, ai_end;
+
+  bool ai_run, ai_dirty, ai_16bit;
+  const uint32_t ntsc_clock = 48681812;
+  const uint32_t audio_delay = 2048;
   SDL_AudioDeviceID audio_dev;
 
   void ai_update() {
-    if (!ai_run || ai_len == 0) return;
-    uint32_t new_len = SDL_GetQueuedAudioSize(audio_dev) >> ai_bits;
-    if (new_len <= ai_start || new_len < 0x100)
-      ai_status &= ~0x80000001, ai_start = 0, set_irqs(0x4);
-    else Sched::add(ai_update, (new_len - ai_start) << 10);
-    ai_len = new_len - ai_start;
+    // calculate samples remaining in play buffer
+    uint32_t prev_len = ai_len;
+    ai_len = SDL_GetQueuedAudioSize(audio_dev) >> ai_16bit;
+    ai_len = ai_len > audio_delay ? ai_len - audio_delay : 0;
+    if (ai_len > 0) return Sched::move(ai_update, 1);
+    if (prev_len > 0) set_irqs(0x4);
+    // play samples at saved address, set param buffer empty
+    if (~ai_status & 0x80000001) return;
+    SDL_QueueAudio(audio_dev, pages[0] + ai_start, ai_end);
+    ai_len = ai_end >> ai_16bit, ai_status &= ~0x80000001;
+    Sched::move(ai_update, ai_len << 12);
   }
 
   void ai_dma(uint32_t len) {
-    if (!ai_run || ai_start != 0) return;
-    //printf("[AI] DMA started with len %x\n", len);
+    if (!ai_run || len == 0) return;
+    // if AI config changes, update SDL AudioSpec
     if (ai_dirty) {
-      SDL_AudioFormat fmt = (ai_bits ? AUDIO_S16MSB : AUDIO_S8);
+      SDL_AudioFormat fmt = (ai_16bit ? AUDIO_S16MSB : AUDIO_S8);
       SDL_AudioSpec spec = {
-        .freq = static_cast<int>(ntsc_clock / (ai_rate + 1)) << !ai_bits,
-        .format = fmt, .channels = 2, .samples = 0x100,
+        .freq = (int)(ntsc_clock / (ai_rate + 1)) << !ai_16bit,
+        .format = fmt, .channels = 2, .samples = 256,
       };
       audio_dev = SDL_OpenAudioDevice(nullptr, 0, &spec, nullptr, 0);
-      SDL_PauseAudioDevice(audio_dev, 0); ai_dirty = false;
+      SDL_PauseAudioDevice(audio_dev, 0), ai_dirty = false;
     }
-    ai_start = ai_len, ai_len = len & 0x1fff8;
-    if (ai_start != 0) ai_status |= 0x80000001;
-    SDL_QueueAudio(audio_dev, pages[0] + ai_ram, ai_len);
-    Sched::move(ai_update, ai_len << 10);
+    // save DMA params, set param buffer full
+    ai_start = ai_ram, ai_end = len & 0x1fff8;
+    ai_status |= 0x80000001, ai_update();
   }
 
   /* === Peripheral & Serial Interface registers === */
@@ -434,8 +479,8 @@ namespace R4300 {
         if ((val & 0xfff) == ai_rate) return;
         ai_rate = val & 0xfff, ai_dirty = true; return;
       case 0x4500014:
-        if (((val >> 3) & 0x1) == ai_bits) return;
-        ai_bits = (val >> 3) & 0x1, ai_dirty = true; return;
+        if (((val >> 3) & 0x1) == ai_16bit) return;
+        ai_16bit = (val >> 3) & 0x1, ai_dirty = true; return;
       // Peripheral Interface
       case 0x4600000: pi_ram = val & 0xffffff; return;
       case 0x4600004: pi_rom = val & addr_mask; return;
@@ -529,7 +574,7 @@ namespace R4300 {
 
   /* === Actual CPU Functions === */
 
-  robin_hood::unordered_node_map<uint32_t, Block> blocks;
+  //robin_hood::unordered_node_map<uint32_t, Block> blocks;
   robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
   const uint32_t hpage_mask = addr_mask & ~0xfff;
   bool modified = false; Block *block = &empty;
@@ -618,11 +663,12 @@ namespace R4300 {
     while (Sched::until >= 0) {
       if (block->code) {
         pc = block->code();
-        /*if (broke) {
+        if (broke) {
           Debugger::update();
           blocks.clear();
-          block->next_pc = 0;
-        }*/
+          memset(block->next_pc, 0, 64);
+          memset(block->next, 0, 64);
+        }
         uint8_t line = (pc >> 2) & 0x7;
         if (block->next_pc[line] != pc) {
           block->next_pc[line] = pc;
@@ -643,22 +689,10 @@ namespace R4300 {
   }
 
   uint32_t crc32(uint8_t *bytes, uint32_t len) {
-    uint32_t crc = 0xffffffff;
-    for (uint32_t i = 0; i < len; ++i) {
-      crc ^= bytes[i];
-      for (uint32_t j = 0; j < 8; ++j) {
-         uint32_t mask = -(crc & 0x1);
-         crc = (crc >> 1) ^ (0xedb88320 & mask);
-      }
-    }
-    return ~crc;
-  }
-
-  uint32_t crc32_2(uint8_t *bytes, uint32_t len) {
-    uint64_t crc = 0, *msg = (uint64_t*)bytes;
-    for (uint32_t i = 0; i < len / 8; ++i)
-        crc = _mm_crc32_u64(crc, msg[i]);
-    return (uint32_t)crc;
+    uint32_t crc = 0, *msg = (uint32_t*)bytes;
+    for (uint32_t i = 0; i < len / 4; ++i)
+      crc = _mm_crc32_u32(crc, msg[i]);
+    return crc;
   }
 
   void init(FILE *file) {
@@ -684,11 +718,11 @@ namespace R4300 {
 
     write<uint32_t>(0xa0000318, 0x800000);  // 8MB RDRAM
     switch (crc32(pages[0] + 0x04000040, 0xfc0)) {
-      case 0x6170a4a1: write<uint32_t>(0xbfc007e4, 0x43f3f); break;  // 6101
-      case 0x90bb6cb5: write<uint32_t>(0xbfc007e4, 0x3f3f); break;   // 6102
-      case 0x0b050ee0: write<uint32_t>(0xbfc007e4, 0x783f); break;   // 6103
-      case 0x98bc2c86: write<uint32_t>(0xbfc007e4, 0x913f); break;   // 6105
-      case 0xacc8580a: write<uint32_t>(0xbfc007e4, 0x853f); break;   // 6106
+      case 0x583af077: write<uint32_t>(0xbfc007e4, 0x43f3f); break;  // 6101
+      case 0x98a02fa9: write<uint32_t>(0xbfc007e4, 0x3f3f); break;   // 6102
+      case 0x04e7fe6d: write<uint32_t>(0xbfc007e4, 0x783f); break;   // 6103
+      case 0x035e73e4: write<uint32_t>(0xbfc007e4, 0x913f); break;   // 6105
+      case 0x0f727fb1: write<uint32_t>(0xbfc007e4, 0x853f); break;   // 6106
       default: printf("No compatible CIC chip found\n"), exit(1);
     }
 
@@ -705,6 +739,8 @@ namespace R4300 {
     RSP::dmem = pages[0] + 0x04000000;
     RSP::imem = pages[0] + 0x04001000;
     rsp_cop0[4] = 0x1, rsp_cop0[11] = 0x80;
+
+    printf("Sched::until is at %llx\n", (uint64_t)&Sched::until);
   }
 }
 

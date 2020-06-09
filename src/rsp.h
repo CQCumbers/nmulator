@@ -6,13 +6,15 @@
 #include "scheduler.h"
 #include "mipsjit.h"
 
+#include <vector>
+
 namespace R4300 {
   extern bool logging_on;
   extern uint32_t pc;
   void set_irqs(uint32_t mask);
   void unset_irqs(uint32_t mask);
 
-  uint32_t crc32_2(uint8_t *bytes, uint32_t len);
+  uint32_t crc32(uint8_t *bytes, uint32_t len);
 }
 
 namespace RSP {
@@ -187,7 +189,8 @@ namespace RSP {
 
   uint64_t reg_array[0x100] = {0};
   const uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
-  robin_hood::unordered_node_map<uint64_t, Block> blocks;
+  robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
+  Block blocks[0x1000];
   uint32_t pc = 0x0; Block *block = &empty;
   //uint32_t hashes[32];
 
@@ -267,34 +270,39 @@ namespace RSP {
   }
 
   void update() {
-    /*if (hash_dirty) {
-      hash = R4300::crc32_2(imem, 0x1000) << 12;
-      hash_dirty = false, block->valid = false;
-    }*/
     while (Sched::until >= 0) {
       if (block->code) {
         pc = block->code() & 0xffc, moved = false;
         if (broke()) R4300::set_irqs(0x1);
         //if (R4300::logging_on) print_state();
-
-        uint8_t line = (pc >> 2) & 0x7;
-        uint64_t key = (pc | 0x1000);
-        if (block->next_pc[line] != key) {
-          block->next_pc[line] = key;
-          block->next[line] = &blocks[key];
-        }
-        block = block->next[line];
+        block = &blocks[pc];
       }
 
       if (halted()) { /*block->valid = false;*/ return; }
-      uint32_t hash = R4300::crc32_2(imem + pc, block->len * 8);
+      uint32_t hash = R4300::crc32(imem + pc, block->len * 4);
       if (!block->code || block->hash != hash) {
+        bool skip_compile = false;
+        for (auto &backup : backups[pc]) {
+          hash = R4300::crc32(imem + pc, backup.len * 4);
+          if (backup.hash == hash) {
+            block->code = backup.code;
+            block->len = backup.len;
+            block->hash = backup.hash;
+            skip_compile = true;
+          }
+        }
+        if (skip_compile) continue;
+
+        printf("Compiling block at %x, %x != %x\n", pc, hash, block->hash);
         CodeHolder code; 
         code.init(runtime.codeInfo());
         MipsJit<Device::rsp> jit(code);
         block->len = jit.jit_block();
-        block->hash = R4300::crc32_2(imem + pc, block->len * 8);
+        block->hash = R4300::crc32(imem + pc, block->len * 4);
         runtime.add(&block->code, &code);
+
+        backups[pc].push_back(*block);
+        printf("Adding new block at %x with hash %x\n", pc, block->hash);
       }
     }
     Sched::add(update, 0);
@@ -303,15 +311,17 @@ namespace RSP {
   void set_status(uint32_t val) {
     if (halted() && (val & 0x1)) {
       printf("Scheduling RSP at %x\n", R4300::pc);
-      block = &blocks[(pc &= 0xffc) | 0x1000];
-      uint32_t hash = R4300::crc32_2(imem + pc, block->len * 8);
+      block = &blocks[pc &= 0xffc];
+      uint32_t hash = R4300::crc32(imem + pc, block->len * 4);
       if (!block->code || block->hash != hash) {
         CodeHolder code; 
         code.init(runtime.codeInfo());
         MipsJit<Device::rsp> jit(code);
         block->len = jit.jit_block();
-        block->hash = R4300::crc32_2(imem + pc, block->len * 8);
+        block->hash = R4300::crc32(imem + pc, block->len * 4);
         runtime.add(&block->code, &code);
+
+        backups[pc].push_back(*block);
       }
       Sched::add(update, 0);
     }
