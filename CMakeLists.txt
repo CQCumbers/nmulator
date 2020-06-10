@@ -11,13 +11,11 @@ set(HLSL "${CMAKE_CURRENT_SOURCE_DIR}/src/rdp.comp.hlsl")
 set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/src/comp.spv")
 add_custom_command(OUTPUT ${SPIRV}
     COMMAND glslangValidator -V -D ${HLSL} -e main --vn comp_code -o ${SPIRV}
-    COMMAND glslangValidator -V -D ${CMAKE_CURRENT_SOURCE_DIR}/src/rdp.vert.hlsl -e main --vn vert_code -o ${CMAKE_CURRENT_SOURCE_DIR}/src/vert.spv
-    COMMAND glslangValidator -V -D ${CMAKE_CURRENT_SOURCE_DIR}/src/rdp.frag.hlsl -e main --vn frag_code -o ${CMAKE_CURRENT_SOURCE_DIR}/src/frag.spv
     DEPENDS ${HLSL})
 add_custom_target(shader DEPENDS ${SPIRV})
 
 # Link nmulator against dependencies
-add_executable(nmulator src/main.cpp)
+add_executable(nmulator src/main.cpp src/scheduler.cpp src/rdp.cpp src/rsp.cpp src/debugger.cpp)
 target_include_directories(nmulator PRIVATE ${SDL2_INCLUDE_DIRS})
 string(STRIP ${SDL2_LIBRARIES} SDL2_LIBRARIES)
 target_link_libraries(nmulator PRIVATE Vulkan::Vulkan ${SDL2_LIBRARIES} asmjit)

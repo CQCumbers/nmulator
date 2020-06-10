@@ -424,20 +424,12 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
         cmd.mux[1] = m1 | ((cmd.mux[1] << 4) & (0xf << 28));
         color = combine(tex, shade, noise_, color, cmd);
       }
-      if ((cmd.yh & 0x1fff) == 0x0101 &&
-          (cmd.ym & 0x1fff) == 0x11a &&
-          (cmd.modes[0]) == 0xEF182C10) {
-        // mux = C8113078, alpha = 0x1f, cvg = 8
-        pixel = 0xffff00ff;
-      } else {
+      pixel = blend(pixel, color, zmem, oz, cvg, depth.y, cmd);
+      if (cmd.modes[0] & M0_2CYCLE) {
+        cmd.modes[0] &= ~M0_2CYCLE;
+        uint mux = (cmd.modes[1] & 0x33330000) << 2;
+        cmd.modes[1] = mux | (cmd.modes[1] & 0xffff);
         pixel = blend(pixel, color, zmem, oz, cvg, depth.y, cmd);
-        //pixel = (zmem >> 4) | 0xffff0000;
-        if (cmd.modes[0] & M0_2CYCLE) {
-          cmd.modes[0] &= ~M0_2CYCLE;
-          uint mux = (cmd.modes[1] & 0x33330000) << 2;
-          cmd.modes[1] = mux | (cmd.modes[1] & 0xffff);
-          pixel = blend(pixel, color, zmem, oz, cvg, depth.y, cmd);
-        }
       }
     }
   }

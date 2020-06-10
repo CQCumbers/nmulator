@@ -1,6 +1,3 @@
-#ifndef DEBUGGER_H
-#define DEBUGGER_H
-
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
@@ -17,10 +14,12 @@
 #include <string.h>
 #include <numeric>
 
+#include "nmulator.h"
+
 using sock_t = decltype(socket(0, 0, 0));
 
 namespace Debugger {
-  constexpr unsigned buf_size = 2048;
+  const unsigned buf_size = 2048;
 
   /* === GDB Socket interaction == */ 
 
@@ -59,7 +58,9 @@ namespace Debugger {
 
   /* === GDB Protocol commands == */
 
-  char cmd_buf[buf_size] = {0};
+  sock_t gdb_sock;
+  const DbgConfig *cfg;
+  char cmd_buf[buf_size];
   char reg_names[70][8] = {
     "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
@@ -71,21 +72,6 @@ namespace Debugger {
     "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23",
     "f24", "f25", "f26", "f27", "f28", "f29", "f30", "f31",
   };
-  sock_t gdb_sock = 0;
-
-  uint64_t reg_vals(uint32_t idx) {
-    if (idx < 32) return R4300::reg_array[idx];
-    if (idx >= 38) return R4300::reg_array[idx + R4300::dev_cop1 - 38];
-    switch (idx) {
-      case 32: return R4300::reg_array[12 + R4300::dev_cop0];
-      case 33: return R4300::reg_array[R4300::lo];
-      case 34: return R4300::reg_array[R4300::hi];
-      case 35: return R4300::reg_array[8 + R4300::dev_cop0];
-      case 36: return R4300::reg_array[13 + R4300::dev_cop0];
-      case 37: return R4300::pc;
-      default: printf("Invalid register: %x\n", idx), exit(1);
-    }
-  }
 
   void query(sock_t sockfd, const char *cmd_buf) {
     char buf[buf_size - 4] = {0};
@@ -120,14 +106,14 @@ namespace Debugger {
   void read_regs(sock_t sockfd) {
     char buf[buf_size - 4] = {0};
     for (unsigned idx = 0; idx < 70; ++idx)
-      sprintf(buf + idx * 16, "%016llx", reg_vals(idx));
+      sprintf(buf + idx * 16, "%016llx", cfg->read_reg(idx));
     send_gdb(sockfd, buf);
   }
 
   void read_reg(sock_t sockfd, const char *cmd_buf) {
     char buf[17] = {0};
     uint32_t idx = strtoul(cmd_buf + 1, nullptr, 16);
-    sprintf(buf, "%016llx", reg_vals(idx));
+    sprintf(buf, "%016llx", cfg->read_reg(idx));
     send_gdb(sockfd, buf);
   }
 
@@ -136,26 +122,26 @@ namespace Debugger {
     uint32_t addr = strtoul(cmd_buf + 1, &ptr, 16);
     uint32_t len = strtoul(ptr + 1, nullptr, 16);
     for (unsigned i = 0; i < len; i += 8)
-      sprintf(buf + i * 2, "%016" PRIx64, R4300::read<uint64_t>(addr + i));
+      sprintf(buf + i * 2, "%016" PRIx64, cfg->read_mem(addr + i));
     send_gdb(sockfd, buf);
   }
 
-  template <bool active>
-  void set_break(sock_t sockfd, const char *cmd_buf) {
+  void set_break(sock_t sockfd, const char *cmd_buf, bool active) {
     uint32_t addr = strtoul(cmd_buf + 3, nullptr, 16);
     switch (cmd_buf[1]) {
       case '0':
-        R4300::breaks[addr] = active;
+        cfg->set_break(addr, active);
         return send_gdb(sockfd, "OK");
       case '2':
-        R4300::watch_w[addr] = active;
+        printf("Watchpoints not supported\n");
         return send_gdb(sockfd, "OK");
       default:
         return send_gdb(sockfd, "E01");
     }
   }
 
-  void update() {
+  bool update(const DbgConfig *config) {
+    cfg = config;
     send_gdb(gdb_sock, "S05");
     while (true) {
       memset(cmd_buf, 0, buf_size);
@@ -163,16 +149,16 @@ namespace Debugger {
       switch (cmd_buf[0]) {
         case 0x0: break;
         case '?': send_gdb(gdb_sock, "S05"); break;  // Stopped due to trap
-        case 'c': case 'C': R4300::broke = false;
-        case 's': R4300::moved = false; return;
+        case 'c': case 'C': return false;
+        case 's': return true;
         case 'g': read_regs(gdb_sock); break;
         case 'p': read_reg(gdb_sock, cmd_buf); break;
         case 'H': send_gdb(gdb_sock, "OK"); break;   // Switch to thread
         case 'k': printf("Killed by gdb\n"); exit(0);
         case 'm': read_mem(gdb_sock, cmd_buf); break;
         case 'q': query(gdb_sock, cmd_buf); break;
-        case 'z': set_break<false>(gdb_sock, cmd_buf); break;
-        case 'Z': set_break<true>(gdb_sock, cmd_buf); break;
+        case 'z': set_break(gdb_sock, cmd_buf, false); break;
+        case 'Z': set_break(gdb_sock, cmd_buf, true); break;
         default: send_gdb(gdb_sock, ""); break;
       }
     }
@@ -209,18 +195,5 @@ namespace Debugger {
     if (gdb_sock < 0) printf("Failed to accept gdb client\n"), exit(1);
     if (tmpsock != -1) shutdown(tmpsock, 2);
     printf("Connected to gdb client\n");
-    R4300::broke = true, update();
-  }
-
-  void check() {
-    fd_set sockset = {0};
-    FD_SET(gdb_sock, &sockset);
-    struct timeval timeout = {};
-    int socks = select(0, &sockset, nullptr, nullptr, &timeout);
-    printf("Selected sockets: %x\n", socks);
-    if (socks < 1) return;
-    R4300::broke = true; send_gdb(gdb_sock, "OK");
   }
 }
-
-#endif

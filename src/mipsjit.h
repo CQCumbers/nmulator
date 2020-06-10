@@ -2,7 +2,10 @@
 #define MIPSJIT_H
 
 #include "robin_hood.h"
+#include "nmulator.h"
+
 #include "asmjit/asmjit.h"
+#include "recip_rom.h"
 
 using namespace asmjit;
 
@@ -20,8 +23,8 @@ struct Block {
   uint64_t pad[14];
 };
 
-JitRuntime runtime;
-Block empty = {};
+extern JitRuntime runtime;
+extern Block empty;
 
 namespace R4300 {
   extern uint32_t mi_irqs;
@@ -31,8 +34,6 @@ namespace R4300 {
   extern uint64_t reg_array[0x63];
 
   extern bool broke, moved, tlb_miss;
-  extern robin_hood::unordered_map<uint32_t, bool> breaks;
-  extern robin_hood::unordered_map<uint32_t, bool> watch_w;
 
   extern uint32_t tlb[0x20][4];
   extern Block *block;
@@ -46,12 +47,15 @@ namespace R4300 {
   uint32_t fetch(uint32_t addr);
   void protect(uint32_t hpage);
   void timer_update();
+
+  bool get_break(uint32_t addr);
 }
 
 namespace RSP {
   extern bool step, moved;
   extern uint64_t reg_array[0x100];
   extern uint32_t pc;
+  extern uint8_t *dmem;
   extern uint8_t *imem;
   extern uint32_t hashes[32];
   extern Block *block;
@@ -63,7 +67,6 @@ namespace RSP {
   void write(uint32_t addr, T val);
   template <typename T, bool all=false>
   int64_t read(uint32_t addr);
-  extern const uint16_t rcp_rsq_rom[1024];
   void print_state();
 }
 
@@ -329,10 +332,11 @@ struct MipsJit {
       if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
       return block_end;
     } else {
-      if (!R4300::moved) { R4300::moved = true; return next_pc; }
-      if (!R4300::breaks[pc] && !R4300::broke) return next_pc;
+      //if (!R4300::moved) { R4300::moved = true; return next_pc; }
+      //if (!R4300::breaks[pc] && !R4300::broke) return next_pc;
+      if (!R4300::get_break(pc)) return next_pc;
       if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
-      R4300::broke = true; return block_end;
+      return block_end;
     }
     //return next_pc;
   }
@@ -1761,7 +1765,7 @@ struct MipsJit {
         as.and_(x86::esi, 1); as.or_(x86::eax, x86::esi);
         as.or_(x86::eax, 0x200); as.xor_(x86::ecx, 0x1f); as.shr(x86::ecx, 1);
       }
-      as.mov(x86::rsi, reinterpret_cast<uint64_t>(&RSP::rcp_rsq_rom));
+      as.mov(x86::rsi, reinterpret_cast<uint64_t>(recip_rom));
       as.mov(x86::ax, x86::word_ptr(x86::rsi, x86::eax, 1));
       as.or_(x86::eax, 0x10000); as.shl(x86::eax, 14); as.sar(x86::eax, x86::cl);
       as.xor_(x86::eax, x86::edx); as.bind(after_recip);

@@ -1,9 +1,12 @@
 #ifndef R4300_H
 #define R4300_H
 
-#include "rsp.h"
-#include "rdp.h"
+#include <vector>
+#include "robin_hood.h"
+#include "mipsjit.h"
+
 #include <immintrin.h>
+#include "nmulator.h"
 
 #ifdef _WIN32
 #  include <SDL.h>
@@ -16,19 +19,15 @@
 #  include <signal.h>
 #endif
 
-namespace Debugger {
-  void update();
-};
-
 namespace R4300 {
-  uint8_t *pages[0x100] = {nullptr};
+  uint8_t *pages[0x20000];
+  uint8_t *ram = nullptr;
+
   uint32_t tlb[0x20][4];
   constexpr uint32_t addr_mask = 0x1fffffff;
-  constexpr uint32_t page_mask = 0x1fffff;
+  constexpr uint32_t page_mask = 0xfff;
 
-  bool broke = false, moved = false, tlb_miss = false;
-  robin_hood::unordered_map<uint32_t, bool> breaks;
-  robin_hood::unordered_map<uint32_t, bool> watch_w;
+  bool tlb_miss = false;
   uint32_t pc = 0xbfc00000; //0xa4000040;
   uint64_t reg_array[0x63] = {0};
   constexpr uint8_t hi = 0x20, lo = 0x21;
@@ -43,6 +42,7 @@ namespace R4300 {
   int64_t read(uint32_t addr);
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val);
+
   void joy_update(SDL_Event &event);
   void update();
 
@@ -64,29 +64,6 @@ namespace R4300 {
     if (!(mi_irqs & mi_mask)) cause &= ~0x400;
   }
 
-  /* === RSP Interface registers === */
-
-  uint64_t *rsp_cop0 = RSP::reg_array + RSP::dev_cop0;
-
-  template <bool write>
-  void rsp_dma(uint32_t val) {
-    uint32_t skip = (val >> 20) & 0xfff, count = (val >> 12) & 0xff;
-    uint32_t len = (val & 0xfff) + 8, m1 = 0x7ffff8, m0 = 0x1ff8;
-    uint64_t &r0 = rsp_cop0[0], &r1 = rsp_cop0[1];
-    if ((r0 & 0xff8) + (len &= ~0x7) > 0x1000) len = 0x1000 - (r0 & 0xff8);
-    printf("[RSP] DMA with count %x, len %x, from %llx to %llx,"
-      "to_dram: %x, at pc: %x\n", count + 1, len, r1, r0, write, RSP::pc);
-    for (uint32_t i = 0; i <= count; ++i, r1 += len + skip, r0 += len) {
-      uint8_t *ram = pages[0] + (r1 &= m1), *mem = RSP::dmem + (r0 &= m0);
-      write ? memcpy(ram, mem, len) : memcpy(mem, ram, len);
-    }
-    /*if (r0 > 0x1000 && !write) {
-      for (uint32_t i = 0; i < 32; ++i)
-        RSP::hashes[i] = crc32(RSP::imem + i * 128, 128);
-      printf("RSP hash[31] is %x\n", RSP::hashes[31]);
-    }*/
-  }
-
   /* === Video Interface registers === */
 
   uint32_t vi_status = 0x0, vi_origin = 0x0;
@@ -101,6 +78,15 @@ namespace R4300 {
   uint8_t *pixels = nullptr;
 
   robin_hood::unordered_map<uint32_t, Block> blocks;
+
+  void vi_init() {
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "0");
+    const uint32_t flags = SDL_WINDOW_ALLOW_HIGHDPI;
+    SDL_CreateWindowAndRenderer(640, 480, flags, &window, &renderer);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+    SDL_RenderClear(renderer);
+  }
 
   void convert16(uint8_t *dst, const uint8_t *src, uint32_t len) {
     // convert rgba5551 to bgra8888, 16 byte aligned len
@@ -132,7 +118,7 @@ namespace R4300 {
 
   void vi_update() {
     if (vi_line == vi_irq) set_irqs(0x8);
-    vi_line += 0x2, Sched::add(vi_update, 6510);
+    vi_line += 0x2, Sched::add(TASK_VI, 6510);
 
     if (vi_line < vi_height) return;
     bool interlaced = vi_status & 0x40;
@@ -151,26 +137,12 @@ namespace R4300 {
     bool fmt16 = (format == 2);
     uint8_t *pixels; int pitch, len = vi_width * height;
     SDL_LockTexture(texture, NULL, (void**)&pixels, &pitch);
-    if (fmt16) convert16(pixels, pages[0] + vi_origin, len * 2);
-    else convert32(pixels, pages[0] + vi_origin, len * 4);
+    if (fmt16) convert16(pixels, ram + vi_origin, len * 2);
+    else convert32(pixels, ram + vi_origin, len * 4);
     SDL_UnlockTexture(texture);
 
-    /*if (format == 2) {
-      uint16_t *out = reinterpret_cast<uint16_t*>(pixels);
-      for (uint32_t i = 0; i < vi_width * height; ++i)
-        out[i] = read<uint16_t>(vi_origin + (i << 1));
-      SDL_UpdateTexture(texture, nullptr, out, vi_width << 1);
-    } else if (format == 3) {
-      uint32_t *out = reinterpret_cast<uint32_t*>(pixels);
-      for (uint32_t i = 0; i < vi_width * height; ++i)
-        out[i] = read<uint32_t>(vi_origin + (i << 2));
-      SDL_UpdateTexture(texture, nullptr, out, vi_width << 2);
-    }*/
     SDL_RenderCopy(renderer, texture, nullptr, nullptr);
     SDL_RenderPresent(renderer);
-    /*memcpy(Vulkan::rdram_ptr(), pages[0] + vi_origin, 320 * 240 * 2);
-    Vulkan::run_graphics();*/
-    //printf("%zu blocks cached\n", blocks.size());
 
     for (SDL_Event e; SDL_PollEvent(&e);) {
       if (e.type == SDL_QUIT) exit(0);
@@ -194,13 +166,13 @@ namespace R4300 {
     uint32_t prev_len = ai_len;
     ai_len = SDL_GetQueuedAudioSize(audio_dev) >> ai_16bit;
     ai_len = ai_len > audio_delay ? ai_len - audio_delay : 0;
-    if (ai_len > 0) return Sched::move(ai_update, 1);
+    if (ai_len > 0) return Sched::move(TASK_AI, 1);
     if (prev_len > 0) set_irqs(0x4);
     // play samples at saved address, set param buffer empty
     if (~ai_status & 0x80000001) return;
-    SDL_QueueAudio(audio_dev, pages[0] + ai_start, ai_end);
+    SDL_QueueAudio(audio_dev, ram + ai_start, ai_end);
     ai_len = ai_end >> ai_16bit, ai_status &= ~0x80000001;
-    Sched::move(ai_update, ai_len << 12);
+    Sched::move(TASK_AI, ai_len << 12);
   }
 
   void ai_dma(uint32_t len) {
@@ -232,8 +204,8 @@ namespace R4300 {
 
   void pi_update() {
     //printf("[PI] DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, pi_len + 1);
-    if (pi_write) memcpy(pages[0] + pi_ram, pages[0] + pi_rom, pi_len + 1);
-    else memcpy(pages[0] + pi_rom, pages[0] + pi_ram, pi_len + 1);
+    if (pi_write) memcpy(ram + pi_ram, ram + pi_rom, pi_len + 1);
+    else memcpy(ram + pi_rom, ram + pi_ram, pi_len + 1);
     set_irqs(0x10); pi_status &= ~0x1;
   }
 
@@ -294,7 +266,7 @@ namespace R4300 {
         case SDLK_DOWN: stick_y = 0; break;         // Stick Down
         case SDLK_LEFT: stick_x = 0; break;         // Stick Left
         case SDLK_RIGHT: stick_x = 0; break;        // Stick Right
-        case SDLK_q: Vulkan::dump_next = true; break;
+        case SDLK_q: RDP::dump = true; break;
         case SDLK_w: broke = true; break;
       }
     }
@@ -371,21 +343,19 @@ namespace R4300 {
 
   template <typename T>
   int64_t mmio_read(uint32_t addr) {
-    if ((addr & addr_mask & ~0x1fff) == 0x4000000)
-      return RSP::read<T, true>(addr);
     switch (addr & addr_mask) {
       default: /*printf("[MMIO] read from %x\n", addr);*/ return 0;
       // RSP Interface
-      case 0x4040000: return rsp_cop0[0];
-      case 0x4040004: return rsp_cop0[1];
-      case 0x4040010: return rsp_cop0[4];
-      case 0x404001c: return (rsp_cop0[7] ? 0x1 : rsp_cop0[7]++);
+      case 0x4040000: return RSP::cop0[0];
+      case 0x4040004: return RSP::cop0[1];
+      case 0x4040010: return RSP::cop0[4];
+      case 0x404001c: return (RSP::cop0[7] ? 0x1 : RSP::cop0[7]++);
       case 0x4080000: return RSP::pc & 0xffc;
       // RDP Interface
-      case 0x4100000: return RDP::pc_start;
-      case 0x4100004: return RDP::pc_end;
-      case 0x4100008: return RDP::pc;
-      case 0x410000c: return RDP::status;
+      case 0x4100000: return RSP::cop0[8];
+      case 0x4100004: return RSP::cop0[9];
+      case 0x4100008: return RSP::cop0[10];
+      case 0x410000c: return RSP::cop0[11];
       // MIPS Interface
       case 0x4300004: return mi_version;
       case 0x4300008: return mi_irqs;
@@ -414,46 +384,37 @@ namespace R4300 {
     }
   }
 
-  bool logging_on = false;
-
   template <typename T>
   void mmio_write(uint32_t addr, uint32_t val) {
-    if ((addr & addr_mask & ~0x1fff) == 0x4000000) {
-      //printf("RSP MMIO Write of %x to %x, block: %x\n", val, addr & 0x1fff, pc);
-      return RSP::write<T, true>(addr, val);
-    }
     switch (addr & addr_mask) {
       default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
       // RSP Interface
-      case 0x4040000: rsp_cop0[0] = val & 0x1fff; return;
-      case 0x4040004: rsp_cop0[1] = val & 0xffffff;
-        //printf("[RSP] Writing %llx to DMA_SRC\n", rsp_cop0[1]);
-        //printf("DMEM 4e0 is %llx %llx\n", RSP::read<uint32_t>(0x4e0), RSP::read<uint32_t>(0x4e4));
-        //printf("DMEM 5f8 is %llx %llx\n", RSP::read<uint32_t>(0x5f8), RSP::read<uint32_t>(0x5fc));
-        //if (rsp_cop0[1] == 0x3bb790 || rsp_cop0[1] == 0x3aa538*)
-        //  printf("First word: %x\n", *(uint32_t*)(pages[0] + rsp_cop0[1]));
-        return;
-      case 0x4040008: rsp_dma<false>(val); return;
-      case 0x404000c: rsp_dma<true>(val); return;
+      case 0x4040000: RSP::cop0[0] = val & 0x1fff; return;
+      case 0x4040004: RSP::cop0[1] = val & 0xffffff; return;
+      case 0x4040008: RSP::dma(val, false); return;
+      case 0x404000c: RSP::dma(val, true); return;
       case 0x4040010: RSP::set_status(val); return;
-      case 0x404001c: rsp_cop0[7] = 0x0; return;
+      case 0x404001c: RSP::cop0[7] = 0x0; return;
       case 0x4080000: RSP::pc = val & 0xffc; return;
       // RDP Interface
       case 0x4100000:
-        RDP::pc_start = val & addr_mask;
-        RDP::pc = RDP::pc_start; return;
+        // set RDP_PC_START
+        RSP::cop0[8] = val & addr_mask;
+        RSP::cop0[10] = RSP::cop0[8]; return;
       case 0x4100004:
-        Sched::add(RDP::update, 0);
-        RDP::pc_end = val & addr_mask; return;
+        // set RDP_PC_END
+        Sched::add(TASK_RDP, 0);
+        RSP::cop0[9] = val & addr_mask; return;
       case 0x410000c:
-        RDP::status &= ~pext_low(val >> 0, 0x7);
-        RDP::status |= pext_low(val >> 1, 0x7); return;
+        // update RDP_STATUS
+        RSP::cop0[11] &= ~pext(val >> 0, 0x7);
+        RSP::cop0[11] |= pext(val >> 1, 0x7); return;
       // MIPS Interface
       case 0x4300000:
         if (val & 0x800) unset_irqs(0x20); return;
       case 0x430000c:
-        mi_mask &= ~pext_low(val >> 0, 0x3f);
-        mi_mask |= pext_low(val >> 1, 0x3f);
+        mi_mask &= ~pext(val >> 0, 0x3f);
+        mi_mask |= pext(val >> 1, 0x3f);
         if (mi_irqs & mi_mask) {
           cause |= 0x400, cause &= ~0xff;
         } else cause &= ~0x400; return;
@@ -487,22 +448,21 @@ namespace R4300 {
       case 0x4600008:
         if (pi_status & 0x1) return;
         pi_len = val, pi_write = false;
-        Sched::add(pi_update, 0);
+        Sched::add(TASK_PI, 0);
         pi_status |= 0x1; return;
       case 0x460000c:
         if (pi_status & 0x1) return;
         pi_len = val, pi_write = true;
-        Sched::add(pi_update, 0);
+        Sched::add(TASK_PI, 0);
         pi_status |= 0x1; return;
       case 0x4600010: unset_irqs(0x10); return;
       // Serial Interface
       case 0x4800000: si_ram = val & 0xffffff; return;
       case 0x4800004: si_update();
-        memcpy(pages[0] + si_ram, pages[0xfe] + 0x7c0, 0x40);
-        //printf("SI writing to %x, a43bf: %x\n", si_ram, pages[0][0xa43bf]);
+        memcpy(ram + si_ram, ram + 0x1fc007c0, 0x40);
         set_irqs(0x2); return;
       case 0x4800010:
-        memcpy(pages[0xfe] + 0x7c0, pages[0] + si_ram, 0x40);
+        memcpy(ram + 0x1fc007c0, ram + si_ram, 0x40);
         set_irqs(0x2); return;
       case 0x4800018: unset_irqs(0x2); return;
     }
@@ -537,9 +497,9 @@ namespace R4300 {
   int64_t read(uint32_t addr) {
     //printf("Reading from %x\n", addr);
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
-    uint8_t *page = pages[(addr >> 21) & 0xff];
+    uint8_t *page = pages[(addr >> 12) & 0x1ffff];
     if ((addr & addr_mask) == 0x1fc007e4) {
-      pages[0][0x1fc007ff] = 0x80;  // Hacky CIC emulation
+      ram[0x1fc007ff] = 0x80;  // Hacky CIC emulation
     }
     if (!page) return mmio_read<T>(addr);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
@@ -553,11 +513,9 @@ namespace R4300 {
 
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
-    if (((addr >> 4) & 0xffff) == 0x44ec)
-      printf("Writing %llx to %x, block: %x\n", val, addr, pc);
     if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
     //broke |= watch_w[addr];
-    uint8_t *page = pages[(addr >> 21) & 0xff];
+    uint8_t *page = pages[(addr >> 12) & 0x1ffff];
     if (!page) return mmio_write<T>(addr, val);
     T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
     switch (sizeof(T)) {
@@ -585,7 +543,7 @@ namespace R4300 {
 
   void timer_update() {
     uint32_t cycles = (compare - count) * 2;
-    Sched::move(timer_fire, cycles);
+    Sched::move(TASK_TIMER, cycles);
   }
 
 #ifdef _WIN32
@@ -598,7 +556,7 @@ namespace R4300 {
   void protect(uint32_t hpage) {
     DWORD old;
     if (prot_pages[hpage].empty()) {
-      VirtualProtect(pages[0] + hpage, 0x1000, PAGE_READONLY, &old);
+      VirtualProtect(ram + hpage, 0x1000, PAGE_READONLY, &old);
     }
     prot_pages[hpage].push_back(pc & addr_mask);
   }
@@ -606,7 +564,7 @@ namespace R4300 {
   void unprotect(uint32_t hpage) {
     DWORD old;
     for (uint32_t addr : prot_pages[hpage]) blocks[addr].code = nullptr;
-    VirtualProtect(pages[0] + hpage, 0x1000, PAGE_READWRITE, &old);
+    VirtualProtect(ram + hpage, 0x1000, PAGE_READWRITE, &old);
     prot_pages[hpage].clear(); modified = true;
   }
   
@@ -614,7 +572,7 @@ namespace R4300 {
     DWORD sig = info->ExceptionRecord->ExceptionCode;
     if (sig != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
     uint8_t *addr = (uint8_t*)info->ExceptionRecord->ExceptionInformation[1];
-    int64_t hpage = addr - pages[0];
+    int64_t hpage = addr - ram;
     if (!(0 <= hpage && hpage <= addr_mask)) exit(1);
     unprotect(hpage & hpage_mask); return EXCEPTION_CONTINUE_EXECUTION;
   }
@@ -632,19 +590,19 @@ namespace R4300 {
 
   void protect(uint32_t hpage) {
     if (prot_pages[hpage].empty())
-      mprotect(pages[0] + hpage, 0x1000, PROT_READ);
+      mprotect(ram + hpage, 0x1000, PROT_READ);
     prot_pages[hpage].push_back(pc & addr_mask);
   }
 
   void unprotect(uint32_t hpage) {
     for (uint32_t addr : prot_pages[hpage]) blocks[addr].code = nullptr;
-    mprotect(pages[0] + hpage, 0x1000, PROT_READ | PROT_WRITE);
+    mprotect(ram + hpage, 0x1000, PROT_READ | PROT_WRITE);
     prot_pages[hpage].clear(); modified = true;
   }
 
   void handle_fault(int sig, siginfo_t *info, void *raw_ctx) {
     if (sig != SIGBUS && sig != SIGSEGV) return;
-    int64_t hpage = (uint8_t*)info->si_addr - pages[0];
+    int64_t hpage = (uint8_t*)info->si_addr - ram;
     if (!(0 <= hpage && hpage <= addr_mask)) exit(1);
     unprotect(hpage & hpage_mask);
   }
@@ -659,12 +617,60 @@ namespace R4300 {
   }
 #endif
 
+  /* === Debugger interface === */
+
+  bool broke, step;
+  robin_hood::unordered_map<uint32_t, bool> breaks;
+
+  // read registers in gdb MIPS order
+  uint64_t read_reg(uint32_t idx) {
+    if (idx < 32) return reg_array[idx];
+    if (idx >= 38) return reg_array[idx - 38 + dev_cop1];
+    switch (idx) {
+      default: printf("Invalid reg %x\n", idx), exit(1);
+      case 32: return reg_array[12 + dev_cop0];
+      case 33: return reg_array[33];
+      case 34: return reg_array[32];
+      case 35: return reg_array[8 + dev_cop0];
+      case 36: return reg_array[13 + dev_cop0];
+      case 37: return pc;
+    }
+  }
+
+  uint64_t read_mem(uint32_t addr) {
+    return read<uint64_t>(addr);
+  }
+ 
+  // create or delete breakpoint
+  void set_break(uint32_t addr, bool active) {
+    breaks[addr] = active;
+  }
+
+  // ignore breakpoint if just stopped
+  bool get_break(uint32_t addr) {
+    if (broke) return broke = false;
+    return broke = step || breaks[addr];
+  }
+
+  const DbgConfig dbg_config = {
+    .read_reg = read_reg,
+    .read_mem = read_mem,
+    .set_break = set_break
+  };
+
+  void init_debug(int port) {
+    Debugger::init(port);
+    step = Debugger::update(&dbg_config);
+  }
+
+  /* === Recompiler interface === */
+
   void update() {
     while (Sched::until >= 0) {
       if (block->code) {
         pc = block->code();
         if (broke) {
-          Debugger::update();
+          step = Debugger::update(&dbg_config);
           blocks.clear();
           memset(block->next_pc, 0, 64);
           memset(block->next, 0, 64);
@@ -685,7 +691,7 @@ namespace R4300 {
         runtime.add(&block->code, &code);
       }
     }
-    Sched::add(update, 0);
+    Sched::add(TASK_R4300, 0);
   }
 
   uint32_t crc32(uint8_t *bytes, uint32_t len) {
@@ -695,29 +701,29 @@ namespace R4300 {
     return crc;
   }
 
-  void init(FILE *file) {
+  void init(const char *filename) {
     // allocate memory, setup change detection
-    pages[0] = alloc_pages(0x20000000);
+    ram = alloc_pages(0x20000000);
     setup_fault_handler();
-    // specially handle SP/DP, DP/MI, VI/AI, PI/RI, and SI ranges
-    for (uint32_t i = 0x1; i < 0x100; ++i) {
-      if (i < 0x20 || i > 0x24) pages[i] = pages[0] + i * (page_mask + 1);
+    for (uint32_t i = 0x0; i < 0x20000; ++i) {
+      if (i >= 0x3f00 && i < 0x4000) continue;
+      if (i >= 0x4002 && i < 0x5000) continue;
+      pages[i] = ram + i * (page_mask + 1);
     }
 
     // read ROM file into memory
-    fseek(file, 0, SEEK_END);
-    long fsize = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    fread(pages[0] + 0x10000000, 1, fsize, file);
-    memcpy(pages[0] + 0x04000000, pages[0] + 0x10000000, 0x40000);
+    FILE *rom = fopen(filename, "r");
+    if (!rom) printf("Can't find rom %s\n", filename), exit(1);
+    fread(ram + 0x10000000, 1, 0x4000000, rom), fclose(rom);
+    memcpy(ram + 0x4000000, ram + 0x10000000, 0x40000);
 
     // read PIF boot rom, setup ram based on CIC
-    FILE *file2 = fopen("../cen64/pifdata.bin", "r");
-    fread(pages[0] + 0x1fc00000, 1, 0x7c0, file2);
-    fclose(file2);
+    FILE *pifrom = fopen("pifdata.bin", "r");
+    if (!pifrom) printf("Can't find pifdata.bin\n"), exit(1);
+    fread(ram + 0x1fc00000, 1, 0x7c0, pifrom), fclose(pifrom);
 
     write<uint32_t>(0xa0000318, 0x800000);  // 8MB RDRAM
-    switch (crc32(pages[0] + 0x04000040, 0xfc0)) {
+    switch (crc32(ram + 0x04000040, 0xfc0)) {
       case 0x583af077: write<uint32_t>(0xbfc007e4, 0x43f3f); break;  // 6101
       case 0x98a02fa9: write<uint32_t>(0xbfc007e4, 0x3f3f); break;   // 6102
       case 0x04e7fe6d: write<uint32_t>(0xbfc007e4, 0x783f); break;   // 6103
@@ -726,22 +732,12 @@ namespace R4300 {
       default: printf("No compatible CIC chip found\n"), exit(1);
     }
 
-    // setup VI
-    pixels = alloc_pages(0x200000);
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
-    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "0");
-    SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_VULKAN, &window, &renderer);
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
-    SDL_RenderClear(renderer);
-    Vulkan::init(window);
-
-    // setup RSP
-    RSP::dmem = pages[0] + 0x04000000;
-    RSP::imem = pages[0] + 0x04001000;
-    rsp_cop0[4] = 0x1, rsp_cop0[11] = 0x80;
-
-    printf("Sched::until is at %llx\n", (uint64_t)&Sched::until);
+    // setup other components
+    vi_init(), RDP::init();
+    RSP::init(ram + 0x04000000);
   }
+
+  template void write<uint32_t, false>(uint32_t addr, int64_t val);
 }
 
 #endif

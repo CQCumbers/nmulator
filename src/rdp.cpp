@@ -1,34 +1,10 @@
-#ifndef RDP_H
-#define RDP_H
-
 #include <vulkan/vulkan.h>
 #include <array>
 #include <vector>
 #include <string.h>
 #include <stdio.h>
-#include "scheduler.h"
+#include "nmulator.h"
 #include "comp.spv"
-#include "vert.spv"
-#include "frag.spv"
-
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_vulkan.h>
-#include <sys/mman.h>
-
-namespace R4300 {
-  extern bool logging_on;
-  extern uint8_t *pages[0x100];
-  void set_irqs(uint32_t mask);
-  template <typename T, bool map>
-  int64_t read(uint32_t addr);
-}
-
-static uint8_t *alloc_pages(uint32_t size) {
-  return reinterpret_cast<uint8_t*>(mmap(
-    nullptr, size, PROT_READ | PROT_WRITE,
-    MAP_ANONYMOUS | MAP_SHARED, 0, 0
-  ));
-}
 
 /* === Shader Structs === */
 
@@ -83,13 +59,9 @@ namespace RDP {
 
 namespace Vulkan {
   VkDevice device = VK_NULL_HANDLE;
-  VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-  VkSemaphore available, finished;
-
+  VkCommandBuffer compute_cmds = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queue_idx = 0;
-  std::vector<VkCommandBuffer> graphics_cmds;
-  VkCommandBuffer compute_cmds = VK_NULL_HANDLE;
 
   constexpr VkDeviceSize align(VkDeviceSize offset) {
     return (offset + 0x1f) & ~0x1f;
@@ -101,7 +73,6 @@ namespace Vulkan {
   const uint32_t group_size = 8, max_cmds = 2048, max_copies = 4096;
   uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0, n_tmems = 0;
-  bool dump_next = false;
 
   const VkDeviceSize cmds_offset = 0;
   const VkDeviceSize cmds_size = max_cmds * sizeof(RDPCommand);
@@ -131,24 +102,13 @@ namespace Vulkan {
   const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint16_t);
   uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
 
-  const VkDeviceSize rdram_offset = align(zbuf_offset + zbuf_size);
-  const VkDeviceSize rdram_size = 320 * 240 * sizeof(uint32_t);
-  uint8_t *rdram_ptr() { return mapped_mem + rdram_offset; }
-
-  const VkDeviceSize total_size = rdram_offset + rdram_size;
+  const VkDeviceSize total_size = zbuf_offset + zbuf_size;
   VkBuffer buffer = VK_NULL_HANDLE;
 
   /* === Vulkan Initialization == */
 
-  void init_instance(SDL_Window *window, VkInstance *instance) {
-    // get required extensions from SDL
-    uint32_t n_exts = 0;
-    SDL_Vulkan_GetInstanceExtensions(window, &n_exts, 0);
-    std::vector<const char*> exts(n_exts);
-    SDL_Vulkan_GetInstanceExtensions(window, &n_exts, exts.data());
-    exts.push_back("VK_KHR_surface"), ++n_exts;
+  void init_instance(VkInstance *instance) {
     const char *layers[] = { "VK_LAYER_KHRONOS_validation" };
-    // create vulkan instance
     const VkApplicationInfo app_info = {
       .pApplicationName = "nmulator RDP",
       .apiVersion = VK_API_VERSION_1_0
@@ -157,8 +117,6 @@ namespace Vulkan {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
       .pApplicationInfo = &app_info,
       .enabledLayerCount = 1, .ppEnabledLayerNames = layers,
-      .enabledExtensionCount = n_exts,
-      .ppEnabledExtensionNames = exts.data()
     };
     vkCreateInstance(&instance_info, 0, instance);
   }
@@ -169,7 +127,6 @@ namespace Vulkan {
     vkEnumeratePhysicalDevices(instance, &n_gpus, 0);
     std::vector<VkPhysicalDevice> gpus(n_gpus);
     vkEnumeratePhysicalDevices(instance, &n_gpus, gpus.data());
-    // TODO: handle seperate compute and graphics queue families
     for (VkPhysicalDevice gpu_ : gpus) {
       // check queue families on each device
       uint32_t n_queues = 0;
@@ -178,18 +135,16 @@ namespace Vulkan {
       vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, queues.data());
       // if queue family supports compute, init virtual device
       for (uint32_t i = 0; i < n_queues; ++i) {
-        if (~queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) continue;
+        if (~queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT) continue;
         const float priority = 1.0;
         const VkDeviceQueueCreateInfo queue_info = {
           .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
           .queueFamilyIndex = (queue_idx = i),
           .queueCount = 1, .pQueuePriorities = &priority
         };
-        const char *exts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
         const VkDeviceCreateInfo device_info = {
           .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
           .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue_info,
-          .enabledExtensionCount = 1, .ppEnabledExtensionNames = exts
         };
         vkCreateDevice((*gpu = gpu_), &device_info, 0, &device);
         vkGetDeviceQueue(device, queue_idx, 0, &queue);
@@ -197,267 +152,6 @@ namespace Vulkan {
       }
     }
     printf("No compatible GPU found\n"), exit(1);
-  }
-
-  void init_swapchain(SDL_Window *window, const VkInstance &instance,
-      const VkPhysicalDevice &gpu, VkSurfaceFormatKHR *fmt, VkExtent2D *extent) {
-    VkSurfaceKHR surface;
-    VkSurfaceCapabilitiesKHR capable;
-    SDL_Vulkan_CreateSurface(window, instance, &surface);
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gpu, surface, &capable);
-    // setup swapchain surface format
-    uint32_t n_formats = 1;;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(gpu, surface, &n_formats, fmt);
-    if (fmt->format == VK_FORMAT_UNDEFINED) fmt->format = VK_FORMAT_B8G8R8A8_UNORM;
-    // setup present mode, window extents
-    VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
-    uint32_t images = 3; int32_t width, height;
-    if (images - 1 < capable.minImageCount - 1) images = capable.minImageCount;
-    if (images - 1 > capable.maxImageCount - 1) images = capable.maxImageCount;
-    SDL_Vulkan_GetDrawableSize(window, &width, &height);
-    extent->width = width, extent->height = height;
-    // create complete swapchain
-    const VkSwapchainCreateInfoKHR swapchain_info = {
-      .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-      .surface = surface, .minImageCount = images,
-      .imageFormat = fmt->format, .imageColorSpace = fmt->colorSpace,
-      .imageExtent = *extent, .imageArrayLayers = 1,
-      .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-      .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-      .preTransform = capable.currentTransform,
-      .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-      .presentMode = mode, .clipped = VK_TRUE
-    };
-    vkCreateSwapchainKHR(device, &swapchain_info, 0, &swapchain);
-  }
-
-  void init_semaphores() {
-    const VkSemaphoreCreateInfo semaphore_info = {
-      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
-    };
-    vkCreateSemaphore(device, &semaphore_info, nullptr, &available);
-    vkCreateSemaphore(device, &semaphore_info, nullptr, &finished);
-  }
-
-  void init_renderpass(const VkSurfaceFormatKHR &fmt, VkRenderPass *pass) {
-    const VkAttachmentDescription attach = {
-      .format = fmt.format, .samples = VK_SAMPLE_COUNT_1_BIT,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-      .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-      .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-      .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-    };
-    const VkAttachmentReference attach_ref = {
-      .attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
-    const VkSubpassDescription subpass = {
-      .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-      .colorAttachmentCount = 1, .pColorAttachments = &attach_ref
-    };
-    const VkRenderPassCreateInfo pass_info = {
-      .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-      .attachmentCount = 1, .pAttachments = &attach,
-      .subpassCount = 1, .pSubpasses = &subpass,
-    };
-    vkCreateRenderPass(device, &pass_info, 0, pass);
-  }
-
-  void init_graphics(const VkExtent2D &extent, const VkRenderPass &pass,
-      VkDescriptorSetLayout *desc_layout, VkPipelineLayout *layout,
-      VkPipeline *pipeline) {
-    // load shader code into module
-    const VkShaderModuleCreateInfo vert_info = {
-      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(vert_code), .pCode = vert_code,
-    };
-    const VkShaderModuleCreateInfo frag_info = {
-      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(frag_code), .pCode = frag_code,
-    };
-    VkShaderModule vert, frag;
-    vkCreateShaderModule(device, &vert_info, 0, &vert);
-    vkCreateShaderModule(device, &frag_info, 0, &frag);
-    // describe needed descriptor set layout for shader
-    const VkDescriptorSetLayoutBinding binding = {
-      .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
-    };
-    const VkDescriptorSetLayoutCreateInfo desc_layout_info = {
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 1, .pBindings = &binding
-    };
-    vkCreateDescriptorSetLayout(device, &desc_layout_info, 0, desc_layout);
-    // create graphics pipeline with shaders
-    const VkPipelineLayoutCreateInfo layout_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1, .pSetLayouts = desc_layout
-    };
-    vkCreatePipelineLayout(device, &layout_info, 0, layout);
-    const VkPipelineShaderStageCreateInfo stage_info[] = {
-      {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vert, .pName = "main"
-      }, {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag, .pName = "main"
-      }
-    };
-    // create empty vertex input, assembly info
-    const VkPipelineVertexInputStateCreateInfo input_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-    };
-    const VkPipelineInputAssemblyStateCreateInfo assembly_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 
-      .primitiveRestartEnable = VK_FALSE
-    };
-    // setup viewport and scissor
-    const VkViewport viewport = {
-      .width = (float)extent.width, .height = (float)extent.height,
-      .minDepth = 0.0f, .maxDepth = 1.0f
-    };
-    const VkRect2D scissor = { .offset = {0, 0}, .extent = extent };
-    const VkPipelineViewportStateCreateInfo viewport_info = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-      .viewportCount = 1, .pViewports = &viewport,
-      .scissorCount = 1, .pScissors = &scissor
-    };
-    // setup fixed function operations
-    const VkPipelineRasterizationStateCreateInfo rasterizer = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-      .depthClampEnable = VK_FALSE, .rasterizerDiscardEnable = VK_FALSE,
-      .polygonMode = VK_POLYGON_MODE_FILL, .lineWidth = 1.0f,
-      .cullMode = VK_CULL_MODE_BACK_BIT, .frontFace = VK_FRONT_FACE_CLOCKWISE,
-      .depthBiasEnable = VK_FALSE
-    };
-    const VkPipelineMultisampleStateCreateInfo multisampling = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-      .sampleShadingEnable = VK_FALSE, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
-    };
-    const VkPipelineColorBlendAttachmentState attach = {
-      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-        | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-      .blendEnable = VK_FALSE
-    };
-    const VkPipelineColorBlendStateCreateInfo blender = {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-      .logicOpEnable = VK_FALSE, .attachmentCount = 1, .pAttachments = &attach
-    };
-    // create graphics pipeline
-    const VkGraphicsPipelineCreateInfo pipeline_info = {
-      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-      .stageCount = 2, .pStages = stage_info,
-      .pVertexInputState = &input_info, .pInputAssemblyState = &assembly_info,
-      .pViewportState = &viewport_info, .pRasterizationState = &rasterizer,
-      .pMultisampleState = &multisampling, .pColorBlendState = &blender,
-      .layout = *layout, .renderPass = pass
-    };
-    vkCreateGraphicsPipelines(device, 0, 1, &pipeline_info, 0, pipeline);
-    vkDestroyShaderModule(device, vert, nullptr);
-    vkDestroyShaderModule(device, frag, nullptr);
-  }
-
-  void init_framebufs(const VkSurfaceFormatKHR &fmt, const VkExtent2D &extent,
-      const VkRenderPass &pass, std::vector<VkFramebuffer> &framebufs) {
-    // retrieve swapchain images
-    uint32_t n_images = 0;
-    vkGetSwapchainImagesKHR(device, swapchain, &n_images, nullptr);
-    std::vector<VkImage> images(n_images); 
-    vkGetSwapchainImagesKHR(device, swapchain, &n_images, images.data());
-    framebufs.resize(n_images);
-    // create view and framebuffer for each image
-    for (uint32_t i = 0; i < n_images; ++i) {
-      VkImageViewCreateInfo view_info = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = images[i], .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = fmt.format, .subresourceRange = {
-          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-          .baseMipLevel = 0, .levelCount = 1,
-          .baseArrayLayer = 0, .layerCount = 1
-        }
-      };
-      VkImageView view;
-      vkCreateImageView(device, &view_info, 0, &view);
-      const VkFramebufferCreateInfo framebuf_info = {
-        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-        .renderPass = pass, .attachmentCount = 1,
-        .pAttachments = &view, .width = extent.width,
-        .height = extent.height, .layers = 1,
-      };
-      vkCreateFramebuffer(device, &framebuf_info, 0, &framebufs[i]);
-    }
-  }
-
-  void init_graphics_desc(const VkDescriptorSetLayout &layout, VkDescriptorSet *descriptors) {
-    // allocate descriptor set from descriptor pool
-    const VkDescriptorPoolSize pool_size = {
-      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1
-    };
-    const VkDescriptorPoolCreateInfo pool_info = {
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &pool_size
-    };
-    VkDescriptorPool pool;
-    vkCreateDescriptorPool(device, &pool_info, 0, &pool);
-    const VkDescriptorSetAllocateInfo descriptors_info = {
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-      .descriptorPool = pool, .descriptorSetCount = 1, .pSetLayouts = &layout
-    };
-    vkAllocateDescriptorSets(device, &descriptors_info, descriptors);
-    // bind buffer to descriptor set
-    const VkDescriptorBufferInfo buffer_info = {
-      .buffer = buffer, .offset = rdram_offset, .range = rdram_size
-    };
-    const VkWriteDescriptorSet write_descriptor = {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = *descriptors, .dstBinding = 0, .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .pBufferInfo = &buffer_info
-    };
-    vkUpdateDescriptorSets(device, 1, &write_descriptor, 0, 0);
-  }
-
-  void record_graphics(const std::vector<VkFramebuffer> &framebufs,
-      const VkExtent2D &extent, const VkRenderPass &pass,
-      const VkPipelineLayout &layout, const VkPipeline &pipeline,
-      const VkDescriptorSet &descriptors) {
-    // allocate command buffers from command pool
-    const VkCommandPoolCreateInfo pool_info = {
-      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-      .queueFamilyIndex = queue_idx
-    };
-    VkCommandPool pool;
-    vkCreateCommandPool(device, &pool_info, 0, &pool);
-    const VkCommandBufferAllocateInfo cmd_info = {
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-      .commandBufferCount = (uint32_t)framebufs.size()
-    };
-    graphics_cmds.resize(framebufs.size());
-    vkAllocateCommandBuffers(device, &cmd_info, graphics_cmds.data());
-    for (uint32_t i = 0; i < framebufs.size(); ++i) {
-      // record draw commands for each framebuf
-      VkCommandBuffer cmds = graphics_cmds[i];
-      const VkCommandBufferBeginInfo begin_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      };
-      vkBeginCommandBuffer(cmds, &begin_info);
-      const VkClearValue clear = { 0.0f, 0.1f, 0.2f, 1.0f };
-      const VkRenderPassBeginInfo pass_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = pass, .framebuffer = framebufs[i],
-        .clearValueCount = 1, .pClearValues = &clear,
-        .renderArea.offset = { .x = 0,.y = 0 },
-        .renderArea.extent = extent
-      };
-      vkCmdBeginRenderPass(cmds, &pass_info, VK_SUBPASS_CONTENTS_INLINE);
-      vkCmdBindPipeline(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-      vkCmdBindDescriptorSets(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &descriptors, 0, 0);
-      vkCmdDraw(cmds, 3, 1, 0, 0);
-      vkCmdEndRenderPass(cmds), vkEndCommandBuffer(cmds);
-    }
   }
 
   void init_compute(VkDescriptorSetLayout *desc_layout,
@@ -597,34 +291,20 @@ namespace Vulkan {
     vkEndCommandBuffer(compute_cmds);
   }
   
-
-  void init(SDL_Window *window) {
+  void init() {
     VkInstance instance;
     VkPhysicalDevice gpu;
-    VkSurfaceFormatKHR fmt;
-    VkExtent2D extent;
     VkDeviceMemory memory;
     
     VkPipelineLayout layout;
     VkDescriptorSetLayout desc_layout;
     VkDescriptorSet descriptors;
     VkPipeline pipeline;
-    VkRenderPass pass;
-    std::vector<VkFramebuffer> framebufs;
 
     // configure GPU, display, and memory
-    init_instance(window, &instance);
+    init_instance(&instance);
     init_device(instance, &gpu);
-    init_swapchain(window, instance, gpu, &fmt, &extent);
-    init_semaphores();
     init_buffer(gpu, &memory);
-
-    // setup graphics pipeline work
-    init_renderpass(fmt, &pass);
-    init_framebufs(fmt, extent, pass, framebufs);
-    init_graphics(extent, pass, &desc_layout, &layout, &pipeline);
-    init_compute_desc(desc_layout, &descriptors);
-    record_graphics(framebufs, extent, pass, layout, pipeline, descriptors);
 
     // setup compute pipeline work
     init_compute(&desc_layout, &layout, &pipeline);
@@ -635,56 +315,9 @@ namespace Vulkan {
     auto ptr = reinterpret_cast<void**>(&mapped_mem);
     vkMapMemory(device, memory, 0, total_size, 0, ptr);
     memset(tiles_ptr(), 0, tiles_size);
-
-    // setup z encoding LUT
-    uint32_t (*zenc)[2] = Vulkan::globals_ptr()->zenc;
-    for (uint8_t i = 0; i < 128; ++i) {
-      uint32_t &shr = zenc[i][0];
-      uint32_t &exp = zenc[i][1];
-      if (i < 0x40) shr = 10, exp = 0;
-      else if (i < 0x60) shr = 9, exp = 1;
-      else if (i < 0x70) shr = 8, exp = 2;
-      else if (i < 0x78) shr = 7, exp = 3;
-      else if (i < 0x7c) shr = 6, exp = 4;
-      else if (i < 0x7e) shr = 5, exp = 5;
-      else if (i < 0x7f) shr = 4, exp = 6;
-      else shr = 4, exp = 7;
-    }
-    // setup z decoding LUT
-    uint32_t (*zdec)[2] = Vulkan::globals_ptr()->zdec;
-    zdec[0][0] = 6, zdec[0][1] = 0x00000;
-    zdec[1][0] = 5, zdec[1][1] = 0x20000;
-    zdec[2][0] = 4, zdec[2][1] = 0x30000;
-    zdec[3][0] = 3, zdec[3][1] = 0x38000;
-    zdec[4][0] = 2, zdec[4][1] = 0x3c000;
-    zdec[5][0] = 1, zdec[5][1] = 0x3e000;
-    zdec[6][0] = 0, zdec[6][1] = 0x3f000;
-    zdec[7][0] = 0, zdec[7][1] = 0x3f800;
   }
 
   /* === Runtime Methods === */
-
-  void run_graphics() {
-    uint32_t idx = 0;
-    vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, available, 0, &idx);
-    VkPipelineStageFlags mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    const VkSubmitInfo submit_info = {
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-      .waitSemaphoreCount = 1, .pWaitSemaphores = &available, 
-      .pWaitDstStageMask = &mask,
-      .commandBufferCount = 1, .pCommandBuffers = &graphics_cmds[idx],
-      .signalSemaphoreCount = 1, .pSignalSemaphores = &finished
-    };
-    vkQueueSubmit(queue, 1, &submit_info, 0);
-    const VkPresentInfoKHR present_info = {
-      .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-      .waitSemaphoreCount = 1, .pWaitSemaphores = &finished,
-      .swapchainCount = 1, .pSwapchains = &swapchain,
-      .pImageIndices = &idx, .pResults = 0
-    };
-    vkQueuePresentKHR(queue, &present_info);
-    vkQueueWaitIdle(queue);
-  }
 
   void run_compute() {
     const VkSubmitInfo submit_info = {
@@ -727,41 +360,7 @@ namespace Vulkan {
     FILE *file = fopen("dump.bin", "w");
     if (!file) printf("error: can't open file\n"), exit(1);
     fwrite(mapped_mem, 1, total_size, file);
-    fclose(file), dump_next = false;
-  }
-
-  void run_buffer() {
-    SDL_Window *window = nullptr;
-    SDL_Renderer *renderer = nullptr;
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
-    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
-    SDL_CreateWindowAndRenderer(640, 480, SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_VULKAN, &window, &renderer);
-    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
-    SDL_RenderClear(renderer);
-    init(window);
-
-    SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA5551,
-        SDL_TEXTUREACCESS_STREAMING, 320, 240);
-
-    FILE *file = fopen("dump.bin", "r");
-    if (!file) printf("error: can't open file\n"), exit(1);
-    fread(mapped_mem, 1, total_size, file);
-    fclose(file);
-
-    run_compute();
-    uint16_t *pixels = (uint16_t*)pixels_ptr();
-    uint16_t *out = (uint16_t*)alloc_pages(320 * 240 * 2);
-    for (uint32_t i = 0; i < 320 * 240; ++i)
-      out[i] = bswap16(pixels[i]);
-    SDL_UpdateTexture(texture, nullptr, out, 320 * 2);
-
-    SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-    SDL_RenderPresent(renderer);
-    while (true) {
-      for (SDL_Event e; SDL_PollEvent(&e);) {
-        if (e.type == SDL_QUIT) exit(0);
-      }
-    }
+    fclose(file), RDP::dump = false;
   }
 
   void render(uint8_t *img, uint32_t img_len, uint8_t *zbuf, uint32_t zbuf_len) {
@@ -778,10 +377,11 @@ namespace Vulkan {
     else memset(zbuf_ptr(), 0xff, zbuf_len);
     memcpy(pixels_ptr(), img, img_len);
 
-    /*if (dump_next && img[1] != 0xff) {
+    /*bool dump = RDP::dump;
+    if (dump && img[1] != 0xff) {
       memset(pixels_ptr(), 0, pixels_size);
       printf("Resetting pixels\n");
-      dump_buffer(), dump_next = true;
+      dump_buffer(), dump = true;
     }*/
 
     run_compute();
@@ -789,32 +389,25 @@ namespace Vulkan {
     if (zbuf) memcpy(zbuf, zbuf_ptr(), zbuf_len);
     memcpy(img, pixels_ptr(), img_len);
     
-    /*if (dump_next && img[1] != 0x0 && img[1] != 0xff) {
-      dump_next = false;
+    /*if (dump && img[1] != 0x0 && img[1] != 0xff) {
+      dump = false;
     }*/
   }
 }
 
 /* === RDP Interface === */
 
-namespace RSP {
-  extern uint64_t reg_array[0x100];
-  extern const uint8_t dev_cop0;
-  template <typename T, bool all>
-  int64_t read(uint32_t addr);
-  extern bool step;
-}
-
 namespace RDP {
-  uint64_t *rsp_cop0 = RSP::reg_array + RSP::dev_cop0;
-  uint64_t &pc_start = rsp_cop0[8], &pc_end = rsp_cop0[9];
-  uint64_t &pc = rsp_cop0[10], &status = rsp_cop0[11];
+  uint64_t &pc_start = RSP::cop0[8], &pc_end = RSP::cop0[9];
+  uint64_t &pc = RSP::cop0[10], &status = RSP::cop0[11];
   uint64_t offset;
 
   uint32_t img_size, img_width, height;
   uint8_t *img_addr, *zbuf_addr;
   uint32_t tex_nibs, tex_width, tex_addr;
   RDPState state;
+
+  bool dump = false;
 
   /* === Helper Functions === */
 
@@ -831,8 +424,8 @@ namespace RDP {
 
   uint8_t opcode(uint64_t addr) {
     uint32_t out = 0;
-    if (status & 0x1) out = RSP::read<uint32_t>(addr);
-    else out = R4300::read<uint32_t, false>(addr);
+    if (status & 0x1) out = read32(RSP::mem + (addr & 0xfff));
+    else out = read32(R4300::ram + (addr & 0x1fffffff));
     return (out >> 24) & 0x3f;
   }
 
@@ -840,14 +433,14 @@ namespace RDP {
   std::array<uint32_t, len> fetch(uint64_t &addr) {
     std::array<uint32_t, len> out;
     for (uint8_t i = 0; i < len; ++i, addr += 4) {
-      if (status & 0x1) out[i] = RSP::read<uint32_t>(addr);
-      else out[i] = R4300::read<uint32_t, false>(addr);
+      if (status & 0x1) out[i] = read32(RSP::mem + (addr & 0xfff));
+      else out[i] = read32(R4300::ram + (addr & 0x1fffffff));
     }
     return out;
   }
 
   void render() {
-    printf("RDP render to %x, %x\n", img_addr - R4300::pages[0], zbuf_addr - R4300::pages[0]);
+    printf("RDP render to %x, %x\n", img_addr - R4300::ram, zbuf_addr - R4300::ram);
     uint32_t img_len = img_width * height * img_size;
     uint32_t zbuf_len = img_width * height * 2;
     Vulkan::render(img_addr, img_len, zbuf_addr, zbuf_len);
@@ -860,7 +453,7 @@ namespace RDP {
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
     img_width = (instr[0] & 0x3ff) + 1;
-    img_addr = R4300::pages[0] + (instr[1] & 0x3ffffff);
+    img_addr = R4300::ram + (instr[1] & 0x3ffffff);
     printf("IMG_ADDR is now %x\n", img_addr);
 
     GlobalData *globals = Vulkan::globals_ptr();
@@ -912,7 +505,7 @@ namespace RDP {
   }
 
   void set_zbuf() {
-    zbuf_addr = R4300::pages[0] + (fetch<2>(pc)[1] & 0x3ffffff);
+    zbuf_addr = R4300::ram + (fetch<2>(pc)[1] & 0x3ffffff);
   }
 
   void set_key_r() {
@@ -975,7 +568,7 @@ namespace RDP {
     uint32_t offset = tex.stl[1] / 4 * tex_width + tex.stl[0] / 4;
     uint32_t len = tex.sth[0] / 4 - tex.stl[0] / 4 + 1, flip = 0;
     offset = offset * tex_nibs / 2, len = len * tex_nibs / 2;
-    uint8_t *ram = R4300::pages[0] + tex_addr + offset;
+    uint8_t *ram = R4300::ram + tex_addr + offset;
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
     const uint32_t tn = tex_nibs;
     // Swap every other 16-bit word on odd rows
@@ -997,7 +590,7 @@ namespace RDP {
     // Copy from texture image to tmem
     uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
     uint32_t len = (sh - sl + 1) * tex_nibs / 2, flip = 0;
-    uint16_t *ram = (uint16_t*)(R4300::pages[0] + tex_addr + offset);
+    uint16_t *ram = (uint16_t*)(R4300::ram + tex_addr + offset);
     uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
     const uint32_t tn = tex_nibs;
     // Swap every other 16-bit word on odd rows
@@ -1020,7 +613,7 @@ namespace RDP {
     uint8_t *mem = Vulkan::tmem_ptr() + (state.tlut = tex.addr);
     uint32_t ram = tex_addr + sl * tex_nibs / 2;
     uint32_t width = (sh - sl + 1) * tex_nibs / 2;
-    memcpy(mem, R4300::pages[0] + ram, width);
+    memcpy(mem, R4300::ram + ram, width);
   }
 
   void shade_triangle(RDPCommand &cmd) {
@@ -1080,8 +673,7 @@ namespace RDP {
       Vulkan::add_rdp_cmd(cmd);
       printf("[RDP] Triangle of type %x\n", type);
       for (uint8_t i = 0; i < 8; ++i) printf("%x ", instr[i]);
-      if (instr[0] == 0xcf800156)
-        Vulkan::dump_next = true;
+      if (instr[0] == 0xcf800156) dump = true;
       printf("\n");
     }
   }
@@ -1166,8 +758,10 @@ namespace RDP {
       if (pc > pc_end) pc = pc_end, offset = pc_end - start;
       if (pc == pc_end) { status |= 0x80; return; }
     }
-    Sched::add(update, 0);
+    Sched::add(TASK_RDP, 0);
+  }
+
+  void init() {
+    Vulkan::init();
   }
 }
-
-#endif
