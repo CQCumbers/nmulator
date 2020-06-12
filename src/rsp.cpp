@@ -2,8 +2,8 @@
 #include <immintrin.h>
 #include "nmulator.h"
 
-#include "mipsjit.h"
 #include <vector>
+#include "robin_hood.h"
 
 //static const bool logging_on = false;
 
@@ -161,13 +161,8 @@ namespace RSP {
         if (skip_compile) continue;
 
         printf("Compiling block at %x, %x != %x\n", pc, hash, block->hash);
-        CodeHolder code; 
-        code.init(runtime.codeInfo());
-        MipsJit<Device::rsp> jit(code);
-        block->len = jit.jit_block();
+        block->len = Mips::compile_rsp(&block->code);
         block->hash = crc32(imem + pc, block->len * 4);
-        runtime.add(&block->code, &code);
-
         backups[pc].push_back(*block);
         printf("Adding new block at %x with hash %x\n", pc, block->hash);
       }
@@ -176,19 +171,30 @@ namespace RSP {
   }
 
   void unhalt();
+
+  template void write<uint8_t, false>(uint32_t addr, uint8_t val);
+  template void write<int8_t, false>(uint32_t addr, int8_t val);
+  template void write<uint16_t, false>(uint32_t addr, uint16_t val);
+  template void write<int16_t, false>(uint32_t addr, int16_t val);
+  template void write<uint32_t, false>(uint32_t addr, uint32_t val);
+  template void write<int32_t, false>(uint32_t addr, int32_t val);
+  template void write<uint64_t, false>(uint32_t addr, uint64_t val);
+
+  template int64_t read<uint8_t, false>(uint32_t addr);
+  template int64_t read<int8_t, false>(uint32_t addr);
+  template int64_t read<uint16_t, false>(uint32_t addr);
+  template int64_t read<int16_t, false>(uint32_t addr);
+  template int64_t read<uint32_t, false>(uint32_t addr);
+  template int64_t read<int32_t, false>(uint32_t addr);
+  template int64_t read<uint64_t, false>(uint32_t addr);
 }
 
 void RSP::unhalt() {
   block = &blocks[pc &= 0xffc];
   uint32_t hash = crc32(imem + pc, block->len * 4);
   if (!block->code || block->hash != hash) {
-    CodeHolder code;
-    code.init(runtime.codeInfo());
-    MipsJit<Device::rsp> jit(code);
-    block->len = jit.jit_block();
+    block->len = Mips::compile_rsp(&block->code);
     block->hash = crc32(imem + pc, block->len * 4);
-    runtime.add(&block->code, &code);
-
     backups[pc].push_back(*block);
   }
   Sched::add(TASK_RSP, 0);

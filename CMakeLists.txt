@@ -15,7 +15,8 @@ add_custom_command(OUTPUT ${SPIRV}
 add_custom_target(shader DEPENDS ${SPIRV})
 
 # Link nmulator against dependencies
-add_executable(nmulator src/main.cpp src/scheduler.cpp src/rdp.cpp src/rsp.cpp src/debugger.cpp)
+add_executable(nmulator src/main.cpp src/r4300.cpp src/rsp.cpp
+    src/rdp.cpp src/scheduler.cpp src/debugger.cpp src/mipsjit.cpp)
 target_include_directories(nmulator PRIVATE ${SDL2_INCLUDE_DIRS})
 string(STRIP ${SDL2_LIBRARIES} SDL2_LIBRARIES)
 target_link_libraries(nmulator PRIVATE Vulkan::Vulkan ${SDL2_LIBRARIES} asmjit)

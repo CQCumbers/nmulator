@@ -1,8 +1,5 @@
-#include "r4300.h"
-
-using namespace asmjit;
-JitRuntime runtime;
-Block empty = {};
+#include <stdlib.h>
+#include "nmulator.h"
 
 int main(int argc, char* argv[]) {
   // initialize system components

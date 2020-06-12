@@ -1,9 +1,5 @@
-#ifndef R4300_H
-#define R4300_H
-
 #include <vector>
 #include "robin_hood.h"
-#include "mipsjit.h"
 
 #include <immintrin.h>
 #include "nmulator.h"
@@ -43,7 +39,7 @@ namespace R4300 {
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val);
 
-  void joy_update(SDL_Event &event);
+  void joy_update(SDL_Event event);
   void update();
 
   /* === MIPS Interface registers === */
@@ -192,39 +188,138 @@ namespace R4300 {
     ai_status |= 0x80000001, ai_update();
   }
 
-  /* === Peripheral & Serial Interface registers === */
+  /* === Peripheral Interface registers === */
 
-  uint32_t pi_status = 0x0, pi_len = 0;
-  uint32_t pi_ram = 0x0, pi_rom = 0x0;
-  bool pi_write = false;
-  int8_t stick_x = 0x0, stick_y = 0x0;
-  uint16_t buttons = 0x0;
-  uint32_t si_ram = 0x0;
-  uint64_t eeprom[0x200], mempack[0x1000];
+  uint32_t pi_status, pi_len;
+  uint32_t pi_ram, pi_rom;
+  bool pi_to_rom;
 
+  // DMA bytes from cartridge to RDRAM, or vice-versa
   void pi_update() {
-    //printf("[PI] DMA from %x to %x, of %x bytes\n", pi_ram, pi_rom, pi_len + 1);
-    if (pi_write) memcpy(ram + pi_ram, ram + pi_rom, pi_len + 1);
-    else memcpy(ram + pi_rom, ram + pi_ram, pi_len + 1);
-    set_irqs(0x10); pi_status &= ~0x1;
+    uint8_t *src = ram + (pi_to_rom ? pi_ram : pi_rom);
+    uint8_t *dst = ram + (pi_to_rom ? pi_rom : pi_ram);
+    memcpy(dst, src, pi_len), set_irqs(0x10), pi_status &= ~0x1;
   }
 
-  void joy_status(uint32_t channel, uint32_t addr) {
-    if (channel == 4) return write<uint32_t>(addr, 0x8000ff);
-    if (channel != 0) return write<uint8_t>(addr - 2, 0x83);
-    write<uint16_t>(addr, 0x0500);  // standard controller type
-    write<uint8_t>(addr + 2, 0x0);  // mempack slot
+  /* === Serial Interface registers === */
+
+  uint64_t mempak[0x1000];
+  uint64_t eeprom[0x200];
+
+  uint16_t buttons;
+  uint8_t joy_x, joy_y;
+  uint32_t si_ram;
+
+  const uint8_t crc8_table[256] = {
+    0x00, 0x85, 0x8f, 0x0a, 0x9b, 0x1e, 0x14, 0x91,
+    0xb3, 0x36, 0x3c, 0xb9, 0x28, 0xad, 0xa7, 0x22,
+    0xe3, 0x66, 0x6c, 0xe9, 0x78, 0xfd, 0xf7, 0x72,
+    0x50, 0xd5, 0xdf, 0x5a, 0xcb, 0x4e, 0x44, 0xc1,
+    0x43, 0xc6, 0xcc, 0x49, 0xd8, 0x5d, 0x57, 0xd2,
+    0xf0, 0x75, 0x7f, 0xfa, 0x6b, 0xee, 0xe4, 0x61,
+    0xa0, 0x25, 0x2f, 0xaa, 0x3b, 0xbe, 0xb4, 0x31,
+    0x13, 0x96, 0x9c, 0x19, 0x88, 0x0d, 0x07, 0x82,
+    0x86, 0x03, 0x09, 0x8c, 0x1d, 0x98, 0x92, 0x17,
+    0x35, 0xb0, 0xba, 0x3f, 0xae, 0x2b, 0x21, 0xa4,
+    0x65, 0xe0, 0xea, 0x6f, 0xfe, 0x7b, 0x71, 0xf4,
+    0xd6, 0x53, 0x59, 0xdc, 0x4d, 0xc8, 0xc2, 0x47,
+    0xc5, 0x40, 0x4a, 0xcf, 0x5e, 0xdb, 0xd1, 0x54,
+    0x76, 0xf3, 0xf9, 0x7c, 0xed, 0x68, 0x62, 0xe7,
+    0x26, 0xa3, 0xa9, 0x2c, 0xbd, 0x38, 0x32, 0xb7,
+    0x95, 0x10, 0x1a, 0x9f, 0x0e, 0x8b, 0x81, 0x04,
+    0x89, 0x0c, 0x06, 0x83, 0x12, 0x97, 0x9d, 0x18,
+    0x3a, 0xbf, 0xb5, 0x30, 0xa1, 0x24, 0x2e, 0xab,
+    0x6a, 0xef, 0xe5, 0x60, 0xf1, 0x74, 0x7e, 0xfb,
+    0xd9, 0x5c, 0x56, 0xd3, 0x42, 0xc7, 0xcd, 0x48,
+    0xca, 0x4f, 0x45, 0xc0, 0x51, 0xd4, 0xde, 0x5b,
+    0x79, 0xfc, 0xf6, 0x73, 0xe2, 0x67, 0x6d, 0xe8,
+    0x29, 0xac, 0xa6, 0x23, 0xb2, 0x37, 0x3d, 0xb8,
+    0x9a, 0x1f, 0x15, 0x90, 0x01, 0x84, 0x8e, 0x0b,
+    0x0f, 0x8a, 0x80, 0x05, 0x94, 0x11, 0x1b, 0x9e,
+    0xbc, 0x39, 0x33, 0xb6, 0x27, 0xa2, 0xa8, 0x2d,
+    0xec, 0x69, 0x63, 0xe6, 0x77, 0xf2, 0xf8, 0x7d,
+    0x5f, 0xda, 0xd0, 0x55, 0xc4, 0x41, 0x4b, 0xce,
+    0x4c, 0xc9, 0xc3, 0x46, 0xd7, 0x52, 0x58, 0xdd,
+    0xff, 0x7a, 0x70, 0xf5, 0x64, 0xe1, 0xeb, 0x6e,
+    0xaf, 0x2a, 0x20, 0xa5, 0x34, 0xb1, 0xbb, 0x3e,
+    0x1c, 0x99, 0x93, 0x16, 0x87, 0x02, 0x08, 0x8d
+  };
+
+  // calculate mempak data crc8, P = 0x85
+  uint8_t crc8(const uint8_t *msg, uint32_t len) {
+    uint8_t crc = 0;
+    for (uint32_t i = 0; i < len; ++i)
+      crc = crc8_table[crc ^ msg[i]];
+    return crc;
   }
 
-  void joy_read(uint32_t channel, uint32_t addr) {
-    if (channel != 0) return write<uint8_t>(addr - 2, 0x84);
-    //printf("[SI] buttons: %x stick: %x\n", buttons, stick_y);
-    write<uint16_t>(addr, buttons);
-    write<int8_t>(addr + 2, stick_x);
-    write<int8_t>(addr + 3, stick_y);
+  // mempak to pifram, len = read length + 1 crc byte
+  void mempak_read(uint32_t pc, uint8_t len) {
+    uint32_t mem = read16(R4300::ram + pc) & ~0x1f;
+    memcpy(R4300::ram + pc + 2, mempak + mem, --len);
+    R4300::ram[pc + 2 + len] = crc8(R4300::ram + pc + 2, len);
   }
 
-  void joy_update(SDL_Event &event) {
+  // pifram to mempak, len = 2 address bytes + write data length
+  void mempak_write(uint32_t pc, uint8_t len) {
+    uint32_t mem = read16(R4300::ram + pc) & ~0x1f;
+    memcpy(mempak + mem, R4300::ram + pc + 2, len - 2);
+    R4300::ram[pc + len] = crc8(R4300::ram + pc + 2, len - 2);
+  }
+
+  // eeprom to pifram, len = read length
+  void eeprom_read(uint32_t pc, uint8_t len) {
+    uint64_t *src = eeprom + R4300::ram[pc];
+    memcpy(R4300::ram + pc + 1, src, len);
+  }
+
+  // pifram to eeprom, len = read length
+  void eeprom_write(uint32_t pc, uint8_t len) {
+    uint64_t *dst = eeprom + R4300::ram[pc];
+    memcpy(dst, R4300::ram + pc + 1, len);
+  }
+
+  // read type of connected controllers
+  void joy_status(uint32_t pc, uint32_t channel) {
+    if (channel == 4) return write32(R4300::ram + pc, 0x8000ff);
+    if (channel != 0) { R4300::ram[pc - 2] = 0x83; return; }
+    write32(R4300::ram + pc, 0x05000000);  // standard with mempak
+  }
+
+  // read inputs from connected controllers
+  void joy_read(uint32_t pc, uint32_t channel) {
+    if (channel != 0) { R4300::ram[pc - 2] = 0x84; return; }
+    write16(R4300::ram + pc, buttons);
+    R4300::ram[pc + 2] = joy_x, R4300::ram[pc + 3] = joy_y;
+  }
+
+  // interpret SI commands in pifram
+  void si_update() {
+    const uint32_t busy = 0x1fc007ff;
+    uint32_t channel = R4300::ram[busy] = 0;
+    for (uint32_t pc = 0x1fc007c0; pc < busy;) {
+      uint8_t t = R4300::ram[pc++];
+      if (t == 0xfe) return;
+      if (t == 0) ++channel, t = 0x80;
+      if (t >> 7) continue;
+      uint8_t r = R4300::ram[pc++];
+      switch (t -= 1, ram[pc++]) {
+        case 0x00: joy_status(pc, channel); break;
+        case 0x01: joy_read(pc, channel); break;
+        case 0x02: mempak_read(pc, r); break;
+        case 0x03: mempak_write(pc, t); break;
+        case 0x04: eeprom_read(pc, r); break;
+        case 0x05: eeprom_write(pc, t); break;
+        case 0xff: joy_status(pc, channel); break;
+      }
+      pc += t + r, ++channel;
+    }
+  }
+
+  bool broke, step;
+
+  // read controller inputs from SDL
+  void joy_update(SDL_Event event) {
     if (event.type == SDL_KEYDOWN) {
       switch (event.key.keysym.sym) {
         case SDLK_x: buttons |= (1 << 15); break;  // A
@@ -241,10 +336,10 @@ namespace R4300 {
         case SDLK_p: buttons |= (1 << 0); break;   // C Right
         case SDLK_a: buttons |= (1 << 5); break;   // Trigger Left
         case SDLK_s: buttons |= (1 << 4); break;   // Trigger Right
-        case SDLK_UP: stick_y = 80; break;         // Stick Up
-        case SDLK_DOWN: stick_y = -80; break;      // Stick Down
-        case SDLK_LEFT: stick_x = -80; break;      // Stick Left
-        case SDLK_RIGHT: stick_x = 80; break ;     // Stick Right
+        case SDLK_UP: joy_y = 80; break;           // Stick Up
+        case SDLK_DOWN: joy_y = -80; break;        // Stick Down
+        case SDLK_LEFT: joy_x = -80; break;        // Stick Left
+        case SDLK_RIGHT: joy_x = 80; break ;       // Stick Right
       }
     } else if (event.type == SDL_KEYUP) {
       switch (event.key.keysym.sym) {
@@ -262,80 +357,13 @@ namespace R4300 {
         case SDLK_p: buttons &= ~(1 << 0); break;   // C Right
         case SDLK_a: buttons &= ~(1 << 5); break;   // Trigger Left
         case SDLK_s: buttons &= ~(1 << 4); break;   // Trigger Right
-        case SDLK_UP: stick_y = 0; break;           // Stick Up
-        case SDLK_DOWN: stick_y = 0; break;         // Stick Down
-        case SDLK_LEFT: stick_x = 0; break;         // Stick Left
-        case SDLK_RIGHT: stick_x = 0; break;        // Stick Right
+        case SDLK_UP: joy_y = 0; break;             // Stick Up
+        case SDLK_DOWN: joy_y = 0; break;           // Stick Down
+        case SDLK_LEFT: joy_x = 0; break;           // Stick Left
+        case SDLK_RIGHT: joy_x = 0; break;          // Stick Right
         case SDLK_q: RDP::dump = true; break;
         case SDLK_w: broke = true; break;
       }
-    }
-  }
-
-  uint8_t mempack_crc(uint8_t len, uint32_t addr) {
-    uint8_t crc = 0;
-    for (uint32_t i = 0; i <= len; ++i) {
-      for (uint8_t mask = 0x80; mask >= 1; mask >>= 1) {
-        uint8_t xor_tap = (crc & 0x80) ? 0x85 : 0x00;
-        uint8_t data = read<uint8_t>(addr + i) & mask;
-        crc = (crc << 1) | (i < 0x20 && data);
-        crc ^= xor_tap;
-      }
-    }
-    return crc;
-  }
-
-  void mempack_read(uint8_t len, uint32_t addr) {
-    uint16_t mem = read<uint16_t>(addr) & ~0x1f;
-    for (uint32_t i = 0; i < len - 1; i += 8) {
-      if (mem + i >= 0x8000) break;
-      write<uint64_t>(addr + 2 + i, mempack[(mem + i) / 8]);
-    }
-    write<uint8_t>(addr + len + 1, mempack_crc(addr + 2, len - 1));
-  }
-
-  void mempack_write(uint8_t len, uint32_t addr) {
-    uint16_t mem = read<uint16_t>(addr) & ~0x1f;
-    for (uint32_t i = 0; i < len - 2; i += 8) {
-      if (mem + i >= 0x8000) break;
-      mempack[(mem + i) / 8] = read<uint64_t>(addr + 2 + i);
-    }
-    write<uint8_t>(addr + len, mempack_crc(addr + 2, len - 2));
-  }
-
-  void eeprom_read(uint8_t len, uint32_t &addr) {
-    uint8_t mem = read<uint8_t>(addr);
-    for (uint32_t i = 0; i < len; i += 8)
-      write<uint64_t>(addr + 1 + i, eeprom[mem + i / 8]);
-  }
-
-  void eeprom_write(uint8_t len, uint32_t addr) {
-    uint8_t mem = read<uint8_t>(addr);
-    for (uint32_t i = 0; i < len - 1; i += 8)
-      eeprom[mem + i / 8] = read<uint64_t>(addr + 1 + i);
-    write<uint8_t>(addr + len, 0);
-  }
-
-  void si_update() {
-    uint32_t busy = 0x1fc007ff;
-    uint32_t pc = 0x1fc007c0, channel = 0;
-    write<uint8_t>(busy, 0x0);
-    while (pc < busy) {
-      uint8_t t = read<uint8_t>(pc++);
-      if (t == 0xfe) return;
-      if (t == 0) ++channel, t = 0x80;
-      if (t >> 7) continue;
-      uint8_t r = read<uint8_t>(pc++);
-      switch (t -= 1, read<uint8_t>(pc++)) {
-        case 0x00: joy_status(channel, pc); break;
-        case 0x01: joy_read(channel, pc); break;
-        case 0x02: mempack_read(r, pc); break;
-        case 0x03: mempack_write(t, pc); break;
-        case 0x04: eeprom_read(r, pc); break;
-        case 0x05: eeprom_write(t, pc); break;
-        case 0xff: joy_status(channel, pc); break;
-      }
-      pc += t + r, ++channel;
     }
   }
 
@@ -447,12 +475,12 @@ namespace R4300 {
       case 0x4600004: pi_rom = val & addr_mask; return;
       case 0x4600008:
         if (pi_status & 0x1) return;
-        pi_len = val, pi_write = false;
+        pi_len = val + 1, pi_to_rom = true;
         Sched::add(TASK_PI, 0);
         pi_status |= 0x1; return;
       case 0x460000c:
         if (pi_status & 0x1) return;
-        pi_len = val, pi_write = true;
+        pi_len = val + 1, pi_to_rom = false;
         Sched::add(TASK_PI, 0);
         pi_status |= 0x1; return;
       case 0x4600010: unset_irqs(0x10); return;
@@ -619,7 +647,7 @@ namespace R4300 {
 
   /* === Debugger interface === */
 
-  bool broke, step;
+  //bool broke, step;
   robin_hood::unordered_map<uint32_t, bool> breaks;
 
   // read registers in gdb MIPS order
@@ -638,7 +666,7 @@ namespace R4300 {
   }
 
   uint64_t read_mem(uint32_t addr) {
-    return read<uint64_t>(addr);
+    return read<uint64_t, true>(addr);
   }
  
   // create or delete breakpoint
@@ -658,7 +686,7 @@ namespace R4300 {
     .set_break = set_break
   };
 
-  void init_debug(int port) {
+  void init_debug(uint32_t port) {
     Debugger::init(port);
     step = Debugger::update(&dbg_config);
   }
@@ -684,11 +712,7 @@ namespace R4300 {
       }
       
       if (!block->code) {
-        CodeHolder code; 
-        code.init(runtime.codeInfo());
-        MipsJit<Device::r4300> jit(code);
-        jit.jit_block();
-        runtime.add(&block->code, &code);
+        Mips::compile_r4300(&block->code);
       }
     }
     Sched::add(TASK_R4300, 0);
@@ -722,13 +746,13 @@ namespace R4300 {
     if (!pifrom) printf("Can't find pifdata.bin\n"), exit(1);
     fread(ram + 0x1fc00000, 1, 0x7c0, pifrom), fclose(pifrom);
 
-    write<uint32_t>(0xa0000318, 0x800000);  // 8MB RDRAM
+    write32(ram + 0x318, 0x800000);  // 8MB RDRAM
     switch (crc32(ram + 0x04000040, 0xfc0)) {
-      case 0x583af077: write<uint32_t>(0xbfc007e4, 0x43f3f); break;  // 6101
-      case 0x98a02fa9: write<uint32_t>(0xbfc007e4, 0x3f3f); break;   // 6102
-      case 0x04e7fe6d: write<uint32_t>(0xbfc007e4, 0x783f); break;   // 6103
-      case 0x035e73e4: write<uint32_t>(0xbfc007e4, 0x913f); break;   // 6105
-      case 0x0f727fb1: write<uint32_t>(0xbfc007e4, 0x853f); break;   // 6106
+      case 0x583af077: write32(ram + 0x1fc007e4, 0x43f3f); break;  // 6101
+      case 0x98a02fa9: write32(ram + 0x1fc007e4, 0x3f3f); break;   // 6102
+      case 0x04e7fe6d: write32(ram + 0x1fc007e4, 0x783f); break;   // 6103
+      case 0x035e73e4: write32(ram + 0x1fc007e4, 0x913f); break;   // 6105
+      case 0x0f727fb1: write32(ram + 0x1fc007e4, 0x853f); break;   // 6106
       default: printf("No compatible CIC chip found\n"), exit(1);
     }
 
@@ -737,7 +761,21 @@ namespace R4300 {
     RSP::init(ram + 0x04000000);
   }
 
-  template void write<uint32_t, false>(uint32_t addr, int64_t val);
-}
+  template void write<uint8_t, true>(uint32_t addr, int64_t val);
+  template void write<int8_t, true>(uint32_t addr, int64_t val);
+  template void write<uint16_t, true>(uint32_t addr, int64_t val);
+  template void write<int16_t, true>(uint32_t addr, int64_t val);
+  template void write<uint32_t, true>(uint32_t addr, int64_t val);
+  template void write<int32_t, true>(uint32_t addr, int64_t val);
+  template void write<uint64_t, true>(uint32_t addr, int64_t val);
 
-#endif
+  template void write<uint32_t, false>(uint32_t addr, int64_t val);
+
+  template int64_t read<uint8_t, true>(uint32_t addr);
+  template int64_t read<int8_t, true>(uint32_t addr);
+  template int64_t read<uint16_t, true>(uint32_t addr);
+  template int64_t read<int16_t, true>(uint32_t addr);
+  template int64_t read<uint32_t, true>(uint32_t addr);
+  template int64_t read<int32_t, true>(uint32_t addr);
+  template int64_t read<uint64_t, true>(uint32_t addr);
+}

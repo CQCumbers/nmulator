@@ -7,18 +7,18 @@
 
 /* === MIPS-to-x64 JIT compiler === */
 
-/*typedef uint64_t (*ReadPtr)(uint32_t addr);
+typedef uint64_t (*ReadPtr)(uint32_t addr);
 typedef void (*WritePtr)(uint32_t addr, uint64_t val);
 typedef uint32_t (*CodePtr)();
 
-struct MipsConfig {
+/*struct MipsConfig {
   ReadPtr read;
   WritePtr write;
   uint64_t *regs;
   uint32_t cop0, cop1, cop2;
   uint8_t *mem;
   uint32_t *pages;
-};
+};*/
 
 struct Block {
   CodePtr code;
@@ -30,13 +30,12 @@ struct Block {
   uint64_t pad[14];
 };
 
-const Block empty;
+extern Block empty;
 
-namespace JitWrapper {
-  void r4300_link(JitConfig *out, Block **block);
-  void rsp_link(JitConfig *out, Block **block);
-  void compile(Block *out, uint32_t pc, const JitConfig *cfg);
-}*/
+namespace Mips {
+  void compile_r4300(CodePtr *ptr);
+  uint32_t compile_rsp(CodePtr *ptr);
+}
 
 /* === Scheduler and debugger === */
 
@@ -66,7 +65,7 @@ struct DbgConfig {
 
 namespace Debugger {
   bool update(const DbgConfig *cfg);
-  void init(int port);
+  void init(uint32_t port);
 }
 
 /* === Hardware components === */
@@ -150,4 +149,12 @@ inline uint32_t read32(uint8_t *bytes) {
 
 inline void write32(uint8_t *bytes, uint32_t val) {
   *(uint32_t*)bytes = bswap32(val);
+}
+
+inline uint16_t read16(uint8_t *bytes) {
+  return bswap16(*(uint16_t*)bytes);
+}
+
+inline void write16(uint8_t *bytes, uint16_t val) {
+  *(uint16_t*)bytes = bswap16(val);
 }

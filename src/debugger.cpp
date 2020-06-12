@@ -170,7 +170,7 @@ namespace Debugger {
   }
 #endif
 
-  void init(int port) {
+  void init(uint32_t port) {
     sockaddr_in server_addr = {}, client_addr = {};
     socklen_t addr_size = sizeof(sockaddr_in);
     server_addr.sin_family = AF_INET;
