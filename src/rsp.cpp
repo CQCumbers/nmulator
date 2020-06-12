@@ -222,6 +222,7 @@ void RSP::dma(uint32_t val, bool to_ram) {
 }
 
 void RSP::init(uint8_t *mem) {
+  // set mem pointer, initial cop0 values
   RSP::mem = mem, imem = mem + 0x1000;
   cop0[4] = 0x1, cop0[11] = 0x80;
 }

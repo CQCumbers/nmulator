@@ -72,15 +72,6 @@ namespace RSP {
 
 template <Device device>
 struct MipsJit {
-  enum class Dir { ll, rl, ra };
-  enum class CC { gt, lt, ge, le, eq, ne };
-  enum class Mul { frac, high, midm, midn, low };
-  enum class LWC2 { lpv, luv, lhv, lfv };
-  enum class Op {
-    add, sub, mul, div, sqrt, abs, mov, neg,
-    and_, or_, xor_, addc, subc
-  };
-
   x86::Assembler as;
   Label end_label, exit_label, exc_label;
   bool cop1_checked;
@@ -365,6 +356,8 @@ struct MipsJit {
 
   /* === Instruction Translations === */
 
+  enum LW_Type { LB, LH, LW, LD, LBU, LHU, LWU };
+
   template <typename T>
   void lw(uint32_t instr) {
     /*if (rt(instr) == 0) return;
@@ -420,10 +413,9 @@ struct MipsJit {
     x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
-  template <typename T, Dir dir>
+  template <typename T, bool right>
   void lwl(uint32_t instr) {
     if (rt(instr) == 0) return;
-    constexpr bool right = (dir != Dir::ll);
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // LWL BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
@@ -459,9 +451,8 @@ struct MipsJit {
     if (sizeof(T) < 8) to_eax(rt(instr)), from_eax(rt(instr));
   }
 
-  template <typename T, Dir dir>
+  template <typename T, bool right>
   void swl(uint32_t instr, uint32_t pc) {
-    constexpr bool right = (dir != Dir::ll);
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SWL BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
@@ -831,7 +822,9 @@ struct MipsJit {
     else as.not_(x86_spilld(rd(instr)));
   }
 
-  template <Dir dir, bool add32>
+  enum SLL_Type { SLL, SRL, SRA };
+
+  template <SLL_Type type, bool add32>
   void dsll(uint32_t instr) {
     if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
@@ -841,24 +834,18 @@ struct MipsJit {
       else as.mov(x86_spilld(rd(instr)), 0);
     } else {
       // DSLL32 RD, RT, IMMEDIATE
-      move(rd(instr), rt(instr));
-      if (rdx) {
-        switch (dir) {
-          case Dir::ll: as.shl(x86::gpq(rdx), sa(instr) + 32 * add32); break;
-          case Dir::rl: as.shr(x86::gpq(rdx), sa(instr) + 32 * add32); break;
-          case Dir::ra: as.sar(x86::gpq(rdx), sa(instr) + 32 * add32); break;
-        }
-      } else {
-        switch (dir) {
-          case Dir::ll: as.shl(x86_spilld(rd(instr)), sa(instr) + 32 * add32); break;
-          case Dir::rl: as.shr(x86_spilld(rd(instr)), sa(instr) + 32 * add32); break;
-          case Dir::ra: as.sar(x86_spilld(rd(instr)), sa(instr) + 32 * add32); break;
-        }
-      }
+      uint32_t rtx = x86_reg(rt(instr));
+      if (rtx) as.mov(x86::rax, x86::gpq(rtx));
+      else as.mov(x86::rax, x86_spilld(rt(instr)));
+      if (type == SLL) as.shl(x86::rax, sa(instr) + 32 * add32);
+      if (type == SRL) as.shr(x86::rax, sa(instr) + 32 * add32);
+      if (type == SRA) as.sar(x86::rax, sa(instr) + 32 * add32);
+      if (rdx) as.mov(x86::gpq(rdx), x86::rax);
+      else as.mov(x86_spilld(rd(instr)), x86::rax);
     }
   }
 
-  template <Dir dir>
+  template <SLL_Type type>
   void sll(uint32_t instr) {
     if (rd(instr) == 0) return;
     if (rt(instr) == 0) {
@@ -869,16 +856,14 @@ struct MipsJit {
     } else {
       // SLL RD, RT, IMMEDIATE
       to_eax(rt(instr));
-      switch (dir) {
-        case Dir::ll: as.shl(x86::eax, sa(instr)); break;
-        case Dir::rl: as.shr(x86::eax, sa(instr)); break;
-        case Dir::ra: as.sar(x86::eax, sa(instr)); break;
-      }
+      if (type == SLL) as.shl(x86::eax, sa(instr));
+      if (type == SRL) as.shr(x86::eax, sa(instr));
+      if (type == SRA) as.sar(x86::eax, sa(instr));
       from_eax(rd(instr));
     }
   }
 
-  template <Dir dir>
+  template <SLL_Type type>
   void sllv(uint32_t instr) {
     if (rd(instr) == 0) return;
     if (rt(instr) == 0) {
@@ -896,16 +881,14 @@ struct MipsJit {
       uint8_t rsx = x86_reg(rs(instr));
       if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
       else as.mov(x86::ecx, x86_spill(rs(instr)));
-      switch (dir) {
-        case Dir::ll: as.shl(x86::eax, x86::cl); break;
-        case Dir::rl: as.shr(x86::eax, x86::cl); break;
-        case Dir::ra: as.sar(x86::eax, x86::cl); break;
-      }
+      if (type == SLL) as.shl(x86::eax, x86::cl);
+      if (type == SRL) as.shr(x86::eax, x86::cl);
+      if (type == SRA) as.sar(x86::eax, x86::cl);
       from_eax(rd(instr));
     }
   }
 
-  template <Dir dir>
+  template <SLL_Type type>
   void dsllv(uint32_t instr) {
     if (rd(instr) == 0) return;
     if (rt(instr) == 0) {
@@ -924,11 +907,9 @@ struct MipsJit {
       uint8_t rsx = x86_reg(rs(instr));
       if (rsx) as.mov(x86::rcx, x86::gpq(rsx));
       else as.mov(x86::rcx, x86_spilld(rs(instr)));
-      switch (dir) {
-        case Dir::ll: as.shl(x86::rax, x86::cl); break;
-        case Dir::rl: as.shr(x86::rax, x86::cl); break;
-        case Dir::ra: as.sar(x86::rax, x86::cl); break;
-      }
+      if (type == SLL) as.shl(x86::rax, x86::cl);
+      if (type == SRL) as.shr(x86::rax, x86::cl);
+      if (type == SRA) as.sar(x86::rax, x86::cl);
       uint32_t rdx = x86_reg(rd(instr));
       if (rdx) as.mov(x86::gpq(rdx), x86::rax);
       else as.mov(x86_spilld(rd(instr)), x86::rax);
@@ -1188,25 +1169,23 @@ struct MipsJit {
     return block_end;
   }
 
-  template <CC cond, bool link>
+  enum BLTZ_Type { BLTZ, BGTZ, BLEZ, BGEZ };
+
+  template <BLTZ_Type type, bool link>
   uint32_t bltz(uint32_t instr, uint32_t pc) {
     if (link) as.mov(x86::eax, pc + 4), from_eax(31);
     if (rs(instr) == 0) {
-      if (cond == CC::lt || cond == CC::gt) return pc;
+      if (type == BLTZ || type == BGTZ) return pc;
       as.mov(x86::edi, pc + (imm(instr) << 2));
       return block_end;
     }
-    uint8_t rsx = x86_reg(rs(instr));
-    if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rs(instr)), 0);
+    compare(rs(instr), 0);
     as.mov(x86::edi, pc + 4);
     as.mov(x86::eax, pc + (imm(instr) << 2));
-    switch (cond) {
-      case CC::lt: as.cmovl(x86::edi, x86::eax); break;
-      case CC::gt: as.cmovg(x86::edi, x86::eax); break;
-      case CC::le: as.cmovle(x86::edi, x86::eax); break;
-      case CC::ge: as.cmovge(x86::edi, x86::eax); break;
-    }
+    if (type == BLTZ) as.cmovl(x86::edi, x86::eax);
+    if (type == BGTZ) as.cmovg(x86::edi, x86::eax);
+    if (type == BLEZ) as.cmovle(x86::edi, x86::eax);
+    if (type == BGEZ) as.cmovge(x86::edi, x86::eax);
     return block_end;
   }
 
@@ -1231,24 +1210,20 @@ struct MipsJit {
     return block_end;
   }
 
-  template <CC cond, bool link>
+  template <BLTZ_Type type, bool link>
   uint32_t bltzl(uint32_t instr, uint32_t pc) {
     if (link) as.mov(x86::eax, pc + 4), from_eax(31);
     if (rs(instr) == 0) {
-      if (cond == CC::lt || cond == CC::gt) return pc + 4;
+      if (type == BLTZ || type == BGTZ) return pc + 4;
       as.mov(x86::edi, pc + (imm(instr) << 2));
       return block_end;
     }
-    uint8_t rsx = x86_reg(rs(instr));
-    if (rsx) as.cmp(x86::gpd(rsx), 0);
-    else as.cmp(x86_spill(rs(instr)), 0);
+    compare(rs(instr), 0);
     as.mov(x86::edi, pc + 4);
-    switch (cond) {
-      case CC::lt: as.jge(end_label); break;
-      case CC::gt: as.jle(end_label); break;
-      case CC::le: as.jg(end_label); break;
-      case CC::ge: as.jl(end_label); break;
-    }
+    if (type == BLTZ) as.jge(end_label);
+    if (type == BGTZ) as.jle(end_label);
+    if (type == BLEZ) as.jg(end_label);
+    if (type == BGEZ) as.jl(end_label);
     as.mov(x86::edi, pc + (imm(instr) << 2));
     return block_end;
   }
@@ -1329,31 +1304,36 @@ struct MipsJit {
     }
   }
 
-  template <Op operation>
+  enum ADD_FMT_Type {
+    ADD_FMT, SUB_FMT, MUL_FMT, DIV_FMT,
+    SQR_FMT, ABS_FMT, MOV_FMT, NEG_FMT
+  };
+
+  template <ADD_FMT_Type type>
   void add_fmt_s(uint32_t instr) {
     uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
     if (rdx) as.movss(x86::xmm0, x86::xmm(rdx));
     else as.movss(x86::xmm0, x86_spill(rd(instr) + dev_cop1));
     uint8_t rtx = x86_reg(rt(instr) + dev_cop1);
-    if (operation == Op::add) {
+    if (type == ADD_FMT) {
       if (rtx) as.addss(x86::xmm0, x86::xmm(rtx));
       else as.addss(x86::xmm0, x86_spill(rt(instr) + dev_cop1));
-    } else if (operation == Op::sub) {
+    } else if (type == SUB_FMT) {
       if (rtx) as.subss(x86::xmm0, x86::xmm(rtx));
       else as.subss(x86::xmm0, x86_spill(rt(instr) + dev_cop1));
-    } else if (operation == Op::mul) {
+    } else if (type == MUL_FMT) {
       if (rtx) as.mulss(x86::xmm0, x86::xmm(rtx));
       else as.mulss(x86::xmm0, x86_spill(rt(instr) + dev_cop1));
-    } else if (operation == Op::div) {
+    } else if (type == DIV_FMT) {
       if (rtx) as.divss(x86::xmm0, x86::xmm(rtx));
       else as.divss(x86::xmm0, x86_spill(rt(instr) + dev_cop1));
-    } else if (operation == Op::sqrt) {
+    } else if (type == SQR_FMT) {
       as.sqrtss(x86::xmm0, x86::xmm0);
-    } else if (operation == Op::abs) {
+    } else if (type == ABS_FMT) {
       as.xorps(x86::xmm1, x86::xmm1);
       as.subss(x86::xmm1, x86::xmm0);
       as.maxss(x86::xmm0, x86::xmm1);
-    } else if (operation == Op::neg) {
+    } else if (type == NEG_FMT) {
       as.xorps(x86::xmm1, x86::xmm1);
       as.subss(x86::xmm1, x86::xmm0);
       as.movss(x86::xmm0, x86::xmm1);
@@ -1363,31 +1343,31 @@ struct MipsJit {
     else as.movss(x86_spill(sa(instr) + dev_cop1), x86::xmm0);
   }
 
-  template <Op operation>
+  template <ADD_FMT_Type type>
   void add_fmt_d(uint32_t instr) {
     uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
     if (rdx) as.movsd(x86::xmm0, x86::xmm(rdx));
     else as.movsd(x86::xmm0, x86_spilld(rd(instr) + dev_cop1));
     uint8_t rtx = x86_reg(rt(instr) + dev_cop1);
-    if (operation == Op::add) {
+    if (type == ADD_FMT) {
       if (rtx) as.addsd(x86::xmm0, x86::xmm(rtx));
       else as.addsd(x86::xmm0, x86_spilld(rt(instr) + dev_cop1));
-    } else if (operation == Op::sub) {
+    } else if (type == SUB_FMT) {
       if (rtx) as.subsd(x86::xmm0, x86::xmm(rtx));
       else as.subsd(x86::xmm0, x86_spilld(rt(instr) + dev_cop1));
-    } else if (operation == Op::mul) {
+    } else if (type == MUL_FMT) {
       if (rtx) as.mulsd(x86::xmm0, x86::xmm(rtx));
       else as.mulsd(x86::xmm0, x86_spilld(rt(instr) + dev_cop1));
-    } else if (operation == Op::div) {
+    } else if (type == DIV_FMT) {
       if (rtx) as.divsd(x86::xmm0, x86::xmm(rtx));
       else as.divsd(x86::xmm0, x86_spilld(rt(instr) + dev_cop1));
-    } else if (operation == Op::sqrt) {
+    } else if (type == SQR_FMT) {
       as.sqrtsd(x86::xmm0, x86::xmm0);
-    } else if (operation == Op::abs) {
+    } else if (type == ABS_FMT) {
       as.xorpd(x86::xmm1, x86::xmm1);
       as.subsd(x86::xmm1, x86::xmm0);
       as.maxsd(x86::xmm0, x86::xmm1);
-    } else if (operation == Op::neg) {
+    } else if (type == NEG_FMT) {
       as.xorpd(x86::xmm1, x86::xmm1);
       as.subsd(x86::xmm1, x86::xmm0);
       as.movsd(x86::xmm0, x86::xmm1);
@@ -1397,12 +1377,12 @@ struct MipsJit {
     else as.movsd(x86_spilld(sa(instr) + dev_cop1), x86::xmm0);
   }
 
-  template <Op operation>
+  template <ADD_FMT_Type type>
   void add_fmt(uint32_t instr) {
     if (rs(instr) == 16)
-      return add_fmt_s<operation>(instr);
+      return add_fmt_s<type>(instr);
     else if (rs(instr) == 17)
-      return add_fmt_d<operation>(instr);
+      return add_fmt_d<type>(instr);
     else invalid(instr);
   }
 
@@ -1558,16 +1538,18 @@ struct MipsJit {
     x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
-  template <bool dword, uint8_t round_mode>
+  enum ROUND_FMT_Type { RN_FMT, RM_FMT, RP_FMT, RZ_FMT };
+
+  template <bool dword, ROUND_FMT_Type type>
   void round_fmt(uint32_t instr) {
     uint8_t rdx = x86_reg(rd(instr) + dev_cop1);
     if (rs(instr) == 16) {
-      if (rdx) as.roundss(x86::xmm0, x86::xmm(rdx), round_mode);
-      else as.roundss(x86::xmm0, x86_spill(rd(instr) + dev_cop1), round_mode);
+      if (rdx) as.roundss(x86::xmm0, x86::xmm(rdx), type);
+      else as.roundss(x86::xmm0, x86_spill(rd(instr) + dev_cop1), type);
       as.cvtss2si(x86::rax, x86::xmm0);
     } else if (rs(instr) == 17) {
-      if (rdx) as.roundsd(x86::xmm0, x86::xmm(rdx), round_mode);
-      else as.roundsd(x86::xmm0, x86_spilld(rd(instr) + dev_cop1), round_mode);
+      if (rdx) as.roundsd(x86::xmm0, x86::xmm(rdx), type);
+      else as.roundsd(x86::xmm0, x86_spilld(rd(instr) + dev_cop1), type);
       as.cvtsd2si(x86::rax, x86::xmm0);
     } else invalid(instr);
     as.mov(x86_spilld(sa(instr) + dev_cop1), (dword ? x86::rax : x86::eax));
@@ -1619,16 +1601,19 @@ struct MipsJit {
     exit(1);
   }
 
-  template <Mul type, bool accumulate, bool sat_sgn = true>
+  enum VMUDN_Type { VMULF, VMULU, VMUDL, VMUDM, VMUDN, VMUDH };
+
+  template <VMUDN_Type type, bool accumulate>
   void vmudn(uint32_t instr) {
+    bool type_frac = (type == VMULF || type == VMULU);
     printf("COP2 Multiply of $%d and $%d to $%d\n", rt(instr), rd(instr), sa(instr));
     // add rounding value
-    if (type == Mul::frac && !accumulate) {
+    if (type_frac && !accumulate) {
       as.pcmpeqd(x86::xmm15, x86::xmm15); as.psllw(x86::xmm15, 15);
       as.pxor(x86::xmm14, x86::xmm14); as.pxor(x86::xmm13, x86::xmm13);
     }
     // save old accumulator values
-    if (accumulate || type == Mul::frac) x86_store_acc();
+    if (accumulate || type_frac) x86_store_acc();
     // move vt into accumulator
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
@@ -1638,18 +1623,18 @@ struct MipsJit {
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
     if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
     else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
-    if (type == Mul::high) {
+    if (type == VMUDH) {
       // multiply signed vt by signed vs
       as.movdqa(x86::xmm13, x86::xmm14);
       as.pmullw(x86::xmm14, x86::xmm0);
       as.pmulhw(x86::xmm13, x86::xmm0);
       as.pxor(x86::xmm15, x86::xmm15);
-    } else if (type == Mul::low) {
+    } else if (type == VMUDL) {
       // multiply unsigned vt by unsigned vs
       as.pmulhuw(x86::xmm15, x86::xmm0);
       as.pxor(x86::xmm14, x86::xmm14);
       as.pxor(x86::xmm13, x86::xmm13);
-    } else if (type == Mul::frac) {
+    } else if (type == VMULF || type == VMULU) {
       printf("Fractional multiply\n");
       // multiply signed vt by signed vs
       as.pmullw(x86::xmm15, x86::xmm0);
@@ -1660,22 +1645,22 @@ struct MipsJit {
       as.por(x86::xmm14, x86::xmm0);
       as.psllw(x86::xmm15, 1); update_acc(false);
       as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
-    } else { // midm or midn
+    } else if (type == VMUDM || type == VMUDN) {
       // save sign of vt, to fix unsigned multiply
       as.movdqa(x86::xmm1, x86::xmm15);
       // multiply unsigned vt by unsigned vs
       as.pmullw(x86::xmm15, x86::xmm0);
       as.pmulhuw(x86::xmm14, x86::xmm0);
       // subtract vs where vt was negative
-      if (type == Mul::midn) as.psraw(x86::xmm1, 15);
+      if (type == VMUDN) as.psraw(x86::xmm1, 15);
       else as.psraw(x86::xmm0, 15);
       as.pand(x86::xmm1, x86::xmm0);
       as.psubw(x86::xmm14, x86::xmm1);
       // sign extend to upper accumulator
       as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
     }
-    if (accumulate && type != Mul::frac) update_acc(type == Mul::high);
-    if (type == Mul::midn || type == Mul::low) {
+    if (accumulate && !type_frac) update_acc(type == VMUDH);
+    if (type == VMUDN || type == VMUDL) {
       // saturate unsigned value
       as.movdqa(x86::xmm0, x86::xmm14); as.psraw(x86::xmm0, 15);
       as.movdqa(x86::xmm1, x86::xmm13); as.psraw(x86::xmm1, 15);
@@ -1687,8 +1672,8 @@ struct MipsJit {
       // saturate signed value
       as.movdqa(x86::xmm0, x86::xmm14); as.movdqa(x86::xmm1, x86::xmm14);
       as.punpcklwd(x86::xmm0, x86::xmm13); as.punpckhwd(x86::xmm1, x86::xmm13);
-      if (sat_sgn) as.packssdw(x86::xmm0, x86::xmm1);
-      else as.packusdw(x86::xmm0, x86::xmm1);
+      if (type == VMULU) as.packusdw(x86::xmm0, x86::xmm1);
+      else as.packssdw(x86::xmm0, x86::xmm1);
     }
     // move accumulator section into vd
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
@@ -1696,7 +1681,9 @@ struct MipsJit {
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm0);
   }
 
-  template <Op operation>
+  enum VADD_Type { VABS, VADD, VADDC, VSUB, VSUBC };
+
+  template <VADD_Type type>
   void vadd(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
@@ -1706,26 +1693,26 @@ struct MipsJit {
     if (rdx) as.movdqa(x86::xmm0, x86::xmm(rtx));
     else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + dev_cop2));
     printf("COP2 ADD of $%d and $%d to $%d\n", rt(instr), rd(instr), sa(instr));
-    if (operation == Op::abs) {
+    if (type == VABS) {
       as.psignw(x86::xmm15, x86::xmm0);
-    } else if (operation == Op::add) {  // doesn't handle VCO upper bits 
+    } else if (type == VADD) {  // doesn't handle VCO upper bits 
       as.movdqa(x86::xmm1, x86::xmm15); as.paddw(x86::xmm1, x86::xmm0);
       as.psubw(x86::xmm1, x86_spillq(0 + dev_cop2c));
       as.psubsw(x86::xmm0, x86_spillq(0 + dev_cop2c));
       as.paddsw(x86::xmm15, x86::xmm0); as.pxor(x86::xmm0, x86::xmm0);
       as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
-    } else if (operation == Op::addc) {
+    } else if (type == VADDC) {
       as.movdqa(x86::xmm1, x86::xmm15); as.paddw(x86::xmm15, x86::xmm0);
       as.paddusw(x86::xmm1, x86::xmm0); as.pcmpeqw(x86::xmm1, x86::xmm15);
       as.pxor(x86::xmm0, x86::xmm0); as.pcmpeqw(x86::xmm0, x86::xmm1);
       as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
-    } else if (operation == Op::sub) {
+    } else if (type == VSUB) {
       as.movdqa(x86::xmm1, x86::xmm0); as.psubw(x86::xmm1, x86::xmm15);
       as.paddw(x86::xmm1, x86_spillq(0 + dev_cop2c));
       as.psubsw(x86::xmm15, x86_spillq(0 + dev_cop2c));
       as.psubsw(x86::xmm0, x86::xmm15); as.movdqa(x86::xmm15, x86::xmm0);
       as.pxor(x86::xmm0, x86::xmm0); as.movdqa(x86_spillq(0 + dev_cop2c), x86::xmm0);
-    } else if (operation == Op::subc) {
+    } else if (type == VSUBC) {
       as.movdqa(x86::xmm1, x86::xmm0); as.psubusw(x86::xmm1, x86::xmm15);
       as.movdqa(x86::xmm2, x86::xmm0); as.pcmpeqw(x86::xmm2, x86::xmm15);
       as.psubw(x86::xmm0, x86::xmm15); as.movdqa(x86::xmm15, x86::xmm0);
@@ -1735,18 +1722,20 @@ struct MipsJit {
     uint8_t sax = x86_reg(sa(instr) * 2 + dev_cop2);
     if (sax) as.movdqa(x86::xmm(sax), x86::xmm15);
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
-    if (operation == Op::add) as.movdqa(x86::xmm15, x86::xmm1);
-    if (operation == Op::sub) as.movdqa(x86::xmm15, x86::xmm1);
+    if (type == VADD) as.movdqa(x86::xmm15, x86::xmm1);
+    if (type == VSUB) as.movdqa(x86::xmm15, x86::xmm1);
   }
 
-  template <Op operation, bool low>
+  enum VMOV_Type { VMOV, VRCP, VRSQ };
+
+  template <VMOV_Type type, bool low>
   void vmov(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), e = rs(instr) & 0x7;
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     elem_spec(rs(instr)), as.pextrw(x86::eax, x86::xmm15, 7 - e);
     printf("COP2 MOV of $%d to $%d\n", rt(instr), sa(instr));
-    if (operation == Op::div || operation == Op::sqrt) {
+    if (type == VRCP || type == VRSQ) {
       printf("VRCP/VRSQ Operation\n");
       if (low) as.or_(x86::eax, x86_spill(12 + dev_cop2c));
       Label after_recip = as.newLabel();
@@ -1759,7 +1748,7 @@ struct MipsJit {
       // calculate index into reciprocal rom, shift result
       as.bsr(x86::ecx, x86::eax); as.xor_(x86::ecx, 0x1f);
       as.shl(x86::eax, x86::cl); as.shr(x86::eax, 22);
-      if (operation == Op::div) as.and_(x86::eax, 0x1ff), as.xor_(x86::ecx, 0x1f);
+      if (type == VRCP) as.and_(x86::eax, 0x1ff), as.xor_(x86::ecx, 0x1f);
       else {
         as.and_(x86::eax, 0x1fe); as.mov(x86::esi, x86::ecx);
         as.and_(x86::esi, 1); as.or_(x86::eax, x86::esi);
@@ -1922,7 +1911,9 @@ struct MipsJit {
     else as.movdqa(x86_spillq(sa(instr) * 2 + dev_cop2), x86::xmm15);
   }
 
-  template <Op operation, bool invert>
+  enum VAND_Type { VAND, VOR, VXOR };
+
+  template <VAND_Type type, bool invert>
   void vand(uint32_t instr) {
     printf("COP2 VAND of $%d and $%d to $%d\n", rt(instr), rd(instr), sa(instr));
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
@@ -1930,13 +1921,13 @@ struct MipsJit {
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + dev_cop2));
     elem_spec(rs(instr));
     uint8_t rdx = x86_reg(rd(instr) * 2 + dev_cop2);
-    if (operation == Op::and_) {
+    if (type == VAND) {
       if (rdx) as.pand(x86::xmm15, x86::xmm(rdx));
       else as.pand(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
-    } else if (operation == Op::or_) {
+    } else if (type == VOR) {
       if (rdx) as.por(x86::xmm15, x86::xmm(rdx));
       else as.por(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
-    } else if (operation == Op::xor_) {
+    } else if (type == VXOR) {
       if (rdx) as.pxor(x86::xmm15, x86::xmm(rdx));
       else as.pxor(x86::xmm15, x86_spillq(rd(instr) * 2 + dev_cop2));
     }
@@ -2157,10 +2148,12 @@ struct MipsJit {
     x86_load_caller(); as.pop(x86::edi);
   }
 
-  template <LWC2 type>
+  enum LPV_Type { LPV, LUV, LHV, LFV };
+
+  template <LPV_Type type>
   void lpv(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    bool packed = (type == LWC2::lpv || type == LWC2::luv);
+    bool packed = (type == LPV || type == LUV);
     int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << (4 - packed);
     printf("LPV of 0x%x + $%d of COP2 $%d\n", off, rs(instr), rt(instr));
     // LPV BASE(RS), RT, OFFSET(IMMEDIATE)
@@ -2183,8 +2176,8 @@ struct MipsJit {
     if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
     if (packed) {
       as.pxor(result, result), as.punpcklbw(result, x86::xmm1);
-      if (type == LWC2::luv) as.psrlw(result, 1);
-    } else if (type == LWC2::lhv) {
+      if (type == LUV) as.psrlw(result, 1);
+    } else if (type == LHV) {
       as.pcmpeqd(result, result), as.psllw(result, 8);
       as.pand(result, x86::xmm1), as.psrlw(result, 1);
     } else {
@@ -2196,10 +2189,10 @@ struct MipsJit {
     if (!rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm0);
   }
 
-  template <LWC2 type>
+  template <LPV_Type type>
   void spv(uint32_t instr) {
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    bool packed = (type == LWC2::lpv || type == LWC2::luv);
+    bool packed = (type == LPV || type == LUV);
     int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << (4 - packed);
     printf("SPV of 0x%x + $%d of COP2 $%d\n", off, rs(instr), rt(instr));
     // SPV BASE(RS), RT, OFFSET(IMMEDIATE)
@@ -2211,12 +2204,12 @@ struct MipsJit {
     }
     if (rtx) as.movdqa(x86::xmm0, x86::xmm(rtx));
     else as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
-    as.psrlw(x86::xmm0, 8 - (type != LWC2::lpv));
+    as.psrlw(x86::xmm0, 8 - (type != LPV));
     as.packuswb(x86::xmm0, x86::xmm1);
     as.pextrq(x86::rsi, x86::xmm0, sa(instr) != 0);
     if (packed) x86_call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
     else {
-      uint8_t stride = (type == LWC2::lfv ? 4 : 2);
+      uint8_t stride = (type == LFV ? 4 : 2);
       as.add(x86::edi, 16 - stride);
       for (uint8_t i = 0; i < 16; i += stride) {
         as.push(x86::edi), as.push(x86::rsi);
@@ -2236,10 +2229,10 @@ struct MipsJit {
       case 0x3: ldv<uint64_t>(instr); break;
       case 0x4: lqv<false>(instr); break;
       case 0x5: lqv<true>(instr); break;
-      case 0x6: lpv<LWC2::lpv>(instr); break;
-      case 0x7: lpv<LWC2::luv>(instr); break;
-      case 0x8: lpv<LWC2::lhv>(instr); break;
-      case 0x9: lpv<LWC2::lfv>(instr); break;
+      case 0x6: lpv<LPV>(instr); break;
+      case 0x7: lpv<LUV>(instr); break;
+      case 0x8: lpv<LHV>(instr); break;
+      case 0x9: lpv<LFV>(instr); break;
       case 0xb: printf("COP2 instruction LTV\n"); break;
       default: invalid(instr); break;
     }
@@ -2253,10 +2246,10 @@ struct MipsJit {
       case 0x3: sdv<uint64_t>(instr); break;
       case 0x4: sqv<false>(instr); break;
       case 0x5: sqv<true>(instr); break;
-      case 0x6: spv<LWC2::lpv>(instr); break;
-      case 0x7: spv<LWC2::luv>(instr); break;
-      case 0x8: spv<LWC2::lhv>(instr); break;
-      case 0x9: spv<LWC2::lfv>(instr); break;
+      case 0x6: spv<LPV>(instr); break;
+      case 0x7: spv<LUV>(instr); break;
+      case 0x8: spv<LHV>(instr); break;
+      case 0x9: spv<LFV>(instr); break;
       case 0xb: printf("COP2 instruction STV\n"); break;
       default: invalid(instr); break;
     }
@@ -2267,12 +2260,12 @@ struct MipsJit {
   uint32_t special(uint32_t instr, uint32_t pc) {
     uint32_t next_pc = pc + 4;
     switch (instr & 0x3f) {
-      case 0x00: sll<Dir::ll>(instr); break;
-      case 0x02: sll<Dir::rl>(instr); break;
-      case 0x03: sll<Dir::ra>(instr); break;
-      case 0x04: sllv<Dir::ll>(instr); break;
-      case 0x06: sllv<Dir::rl>(instr); break;
-      case 0x07: sllv<Dir::ra>(instr); break;
+      case 0x00: sll<SLL>(instr); break;
+      case 0x02: sll<SRL>(instr); break;
+      case 0x03: sll<SRA>(instr); break;
+      case 0x04: sllv<SLL>(instr); break;
+      case 0x06: sllv<SRL>(instr); break;
+      case 0x07: sllv<SRA>(instr); break;
       case 0x08: next_pc = jr(instr); break;
       case 0x09: next_pc = jalr(instr, pc); break;
       case 0x0d: next_pc = break_(instr, pc); break;
@@ -2281,9 +2274,9 @@ struct MipsJit {
       case 0x11: mthi<hi>(instr);  break;
       case 0x12: mfhi<lo>(instr);  break;
       case 0x13: mthi<lo>(instr);  break;
-      case 0x14: dsllv<Dir::ll>(instr); break;
-      case 0x16: dsllv<Dir::rl>(instr); break;
-      case 0x17: dsllv<Dir::ra>(instr); break;
+      case 0x14: dsllv<SLL>(instr); break;
+      case 0x16: dsllv<SRL>(instr); break;
+      case 0x17: dsllv<SRA>(instr); break;
       case 0x18: mult<true>(instr); break;
       case 0x19: mult<false>(instr); break;
       case 0x1a: div<true>(instr); break;
@@ -2308,12 +2301,12 @@ struct MipsJit {
       case 0x2f: dsubu(instr); break;
       case 0x30: case 0x31: case 0x32: case 0x33:
       case 0x34: case 0x36: printf("TRAP\n"); break;
-      case 0x38: dsll<Dir::ll, false>(instr); break;
-      case 0x3a: dsll<Dir::rl, false>(instr); break;
-      case 0x3b: dsll<Dir::ra, false>(instr); break;
-      case 0x3c: dsll<Dir::ll, true>(instr); break;
-      case 0x3e: dsll<Dir::rl, true>(instr); break;
-      case 0x3f: dsll<Dir::ra, true>(instr); break;
+      case 0x38: dsll<SLL, false>(instr); break;
+      case 0x3a: dsll<SRL, false>(instr); break;
+      case 0x3b: dsll<SRA, false>(instr); break;
+      case 0x3c: dsll<SLL, true>(instr); break;
+      case 0x3e: dsll<SRL, true>(instr); break;
+      case 0x3f: dsll<SRA, true>(instr); break;
       default: invalid(instr); break;
     }
     return next_pc;
@@ -2322,14 +2315,14 @@ struct MipsJit {
   uint32_t regimm(uint32_t instr, uint32_t pc) {
     uint32_t next_pc = pc + 4;
     switch ((instr >> 16) & 0x1f) {
-      case 0x00: next_pc = bltz<CC::lt, false>(instr, pc); break;
-      case 0x01: next_pc = bltz<CC::ge, false>(instr, pc); break;
-      case 0x02: next_pc = bltzl<CC::lt, false>(instr, pc); break;
-      case 0x03: next_pc = bltzl<CC::ge, false>(instr, pc); break;
-      case 0x10: next_pc = bltz<CC::lt, true>(instr, pc); break;
-      case 0x11: next_pc = bltz<CC::ge, true>(instr, pc); break;
-      case 0x12: next_pc = bltzl<CC::lt, true>(instr, pc); break;
-      case 0x13: next_pc = bltzl<CC::ge, true>(instr, pc); break;
+      case 0x00: next_pc = bltz<BLTZ, false>(instr, pc); break;
+      case 0x01: next_pc = bltz<BGEZ, false>(instr, pc); break;
+      case 0x02: next_pc = bltzl<BLTZ, false>(instr, pc); break;
+      case 0x03: next_pc = bltzl<BGEZ, false>(instr, pc); break;
+      case 0x10: next_pc = bltz<BLTZ, true>(instr, pc); break;
+      case 0x11: next_pc = bltz<BGEZ, true>(instr, pc); break;
+      case 0x12: next_pc = bltzl<BLTZ, true>(instr, pc); break;
+      case 0x13: next_pc = bltzl<BGEZ, true>(instr, pc); break;
       default: invalid(instr); break;
     }
     return next_pc;
@@ -2399,22 +2392,22 @@ struct MipsJit {
         break;
       case 0x2: // COP1/2
         switch (instr & 0x3f) {
-          case 0x00: add_fmt<Op::add>(instr); break;
-          case 0x01: add_fmt<Op::sub>(instr); break;
-          case 0x02: add_fmt<Op::mul>(instr); break;
-          case 0x03: add_fmt<Op::div>(instr); break;
-          case 0x04: add_fmt<Op::sqrt>(instr); break;
-          case 0x05: add_fmt<Op::abs>(instr); break;
-          case 0x06: add_fmt<Op::mov>(instr); break;
-          case 0x07: add_fmt<Op::neg>(instr); break;
-          case 0x08: round_fmt<true, 0>(instr); break;
-          case 0x09: round_fmt<true, 3>(instr); break;
-          case 0x0a: round_fmt<true, 2>(instr); break;
-          case 0x0b: round_fmt<true, 1>(instr); break;
-          case 0x0c: round_fmt<true, 0>(instr); break;
-          case 0x0d: round_fmt<true, 3>(instr); break;
-          case 0x0e: round_fmt<true, 2>(instr); break;
-          case 0x0f: round_fmt<true, 1>(instr); break;
+          case 0x00: add_fmt<ADD_FMT>(instr); break;
+          case 0x01: add_fmt<SUB_FMT>(instr); break;
+          case 0x02: add_fmt<MUL_FMT>(instr); break;
+          case 0x03: add_fmt<DIV_FMT>(instr); break;
+          case 0x04: add_fmt<SQR_FMT>(instr); break;
+          case 0x05: add_fmt<ABS_FMT>(instr); break;
+          case 0x06: add_fmt<MOV_FMT>(instr); break;
+          case 0x07: add_fmt<NEG_FMT>(instr); break;
+          case 0x08: round_fmt<true, RN_FMT>(instr); break;
+          case 0x09: round_fmt<true, RZ_FMT>(instr); break;
+          case 0x0a: round_fmt<true, RP_FMT>(instr); break;
+          case 0x0b: round_fmt<true, RM_FMT>(instr); break;
+          case 0x0c: round_fmt<true, RN_FMT>(instr); break;
+          case 0x0d: round_fmt<true, RZ_FMT>(instr); break;
+          case 0x0e: round_fmt<true, RP_FMT>(instr); break;
+          case 0x0f: round_fmt<true, RM_FMT>(instr); break;
           case 0x20: cvt_s_fmt(instr); break;
           case 0x21: cvt_d_fmt(instr); break;
           case 0x24: cvt_w_fmt<false>(instr); break;
@@ -2447,23 +2440,23 @@ struct MipsJit {
         break;
       case 0x2: case 0x3: // COP2/2
         switch (instr & 0x3f) {
-          case 0x00: vmudn<Mul::frac, false, true>(instr); break; // VMULF
-          case 0x01: vmudn<Mul::frac, false, false>(instr); break; // VMULU (buggy)
-          case 0x04: vmudn<Mul::low, false>(instr); break; // VMUDL
-          case 0x05: vmudn<Mul::midm, false>(instr); break; // VMUDM
-          case 0x06: vmudn<Mul::midn, false>(instr); break; // VMUDN
-          case 0x07: vmudn<Mul::high, false>(instr); break; // VMUDH
-          case 0x08: vmudn<Mul::frac, true, true>(instr); break; // VMACF
-          case 0x09: vmudn<Mul::frac, true, false>(instr); break; // VMACU (buggy)
-          case 0x0c: vmudn<Mul::low, true>(instr); break; // VMADL
-          case 0x0d: vmudn<Mul::midm, true>(instr); break; // VMADM
-          case 0x0e: vmudn<Mul::midn, true>(instr); break; // VMADN
-          case 0x0f: vmudn<Mul::high, true>(instr); break; // VMADH
-          case 0x10: vadd<Op::add>(instr); break;
-          case 0x11: vadd<Op::sub>(instr); break;
-          case 0x13: vadd<Op::abs>(instr); break;
-          case 0x14: vadd<Op::addc>(instr); break;
-          case 0x15: vadd<Op::subc>(instr); break;
+          case 0x00: vmudn<VMULF, false>(instr); break;
+          case 0x01: vmudn<VMULU, false>(instr); break;
+          case 0x04: vmudn<VMUDL, false>(instr); break;
+          case 0x05: vmudn<VMUDM, false>(instr); break;
+          case 0x06: vmudn<VMUDN, false>(instr); break;
+          case 0x07: vmudn<VMUDH, false>(instr); break;
+          case 0x08: vmudn<VMULF, true>(instr); break;
+          case 0x09: vmudn<VMULU, true>(instr); break;
+          case 0x0c: vmudn<VMUDL, true>(instr); break;
+          case 0x0d: vmudn<VMUDM, true>(instr); break;
+          case 0x0e: vmudn<VMUDN, true>(instr); break;
+          case 0x0f: vmudn<VMUDH, true>(instr); break;
+          case 0x10: vadd<VADD>(instr); break;
+          case 0x11: vadd<VSUB>(instr); break;
+          case 0x13: vadd<VABS>(instr); break;
+          case 0x14: vadd<VADDC>(instr); break;
+          case 0x15: vadd<VSUBC>(instr); break;
           case 0x1d: vsar(instr); break;
           case 0x20: veq<false, false>(instr); break;
           case 0x21: veq<true, false>(instr); break;
@@ -2473,19 +2466,19 @@ struct MipsJit {
           case 0x25: vch<false>(instr); break;
           case 0x26: vch<true>(instr); break;
           case 0x27: vmrg(instr); break;
-          case 0x28: vand<Op::and_, false>(instr); break;
-          case 0x29: vand<Op::and_, true>(instr); break;
-          case 0x2a: vand<Op::or_, false>(instr); break;
-          case 0x2b: vand<Op::or_, true>(instr); break;
-          case 0x2c: vand<Op::xor_, false>(instr); break;
-          case 0x2d: vand<Op::xor_, true>(instr); break;
-          case 0x30: vmov<Op::div, false>(instr); break;  // VRCP
-          case 0x31: vmov<Op::div, true>(instr); break;   // VRCPL
-          case 0x32: vmov<Op::mov, false>(instr); break;  // VRCPH
-          case 0x33: vmov<Op::mov, true>(instr); break;   // VMOV
-          case 0x34: vmov<Op::sqrt, false>(instr); break; // VRSQ
-          case 0x35: vmov<Op::sqrt, true>(instr); break;  // VRSQL
-          case 0x36: vmov<Op::mov, false>(instr); break;  // VRSQH
+          case 0x28: vand<VAND, false>(instr); break;
+          case 0x29: vand<VAND, true>(instr); break;
+          case 0x2a: vand<VOR, false>(instr); break;
+          case 0x2b: vand<VOR, true>(instr); break;
+          case 0x2c: vand<VXOR, false>(instr); break;
+          case 0x2d: vand<VXOR, true>(instr); break;
+          case 0x30: vmov<VRCP, false>(instr); break;  // VRCP
+          case 0x31: vmov<VRCP, true>(instr); break;   // VRCPL
+          case 0x32: vmov<VMOV, false>(instr); break;  // VRCPH
+          case 0x33: vmov<VMOV, true>(instr); break;   // VMOV
+          case 0x34: vmov<VRSQ, false>(instr); break;  // VRSQ
+          case 0x35: vmov<VRSQ, true>(instr); break;   // VRSQL
+          case 0x36: vmov<VMOV, false>(instr); break;  // VRSQH
           default: printf("COP2 instruction %x\n", instr); break;
         }
         break;
@@ -2523,8 +2516,8 @@ struct MipsJit {
         case 0x03: next_pc = jal(instr, pc); break;
         case 0x04: next_pc = beq(instr, pc); break;
         case 0x05: next_pc = bne(instr, pc); break;
-        case 0x06: next_pc = bltz<CC::le, false>(instr, pc); break;
-        case 0x07: next_pc = bltz<CC::gt, false>(instr, pc); break;
+        case 0x06: next_pc = bltz<BLEZ, false>(instr, pc); break;
+        case 0x07: next_pc = bltz<BGTZ, false>(instr, pc); break;
         case 0x08: addiu(instr); break; // ADDI
         case 0x09: addiu(instr); break;
         case 0x0a: slti(instr); break;
@@ -2538,27 +2531,27 @@ struct MipsJit {
         case 0x12: next_pc = cop2(instr, pc); break;
         case 0x14: next_pc = beql(instr, pc); break;
         case 0x15: next_pc = bnel(instr, pc); break;
-        case 0x16: next_pc = bltzl<CC::le, false>(instr, pc); break;
-        case 0x17: next_pc = bltzl<CC::gt, false>(instr, pc); break;
+        case 0x16: next_pc = bltzl<BLEZ, false>(instr, pc); break;
+        case 0x17: next_pc = bltzl<BGTZ, false>(instr, pc); break;
         case 0x18: daddiu(instr); break; // DADDI
         case 0x19: daddiu(instr); break;
-        case 0x1a: lwl<uint64_t, Dir::ll>(instr); break;
-        case 0x1b: lwl<uint64_t, Dir::rl>(instr); break;
+        case 0x1a: lwl<uint64_t, false>(instr); break;
+        case 0x1b: lwl<uint64_t, true>(instr); break;
         case 0x20: lw<int8_t>(instr); break;
         case 0x21: lw<int16_t>(instr); break;
-        case 0x22: lwl<int32_t, Dir::ll>(instr); break;
+        case 0x22: lwl<int32_t, false>(instr); break;
         case 0x23: lw<int32_t>(instr); break;
         case 0x24: lw<uint8_t>(instr); break;
         case 0x25: lw<uint16_t>(instr); break;
-        case 0x26: lwl<int32_t, Dir::rl>(instr); break;
+        case 0x26: lwl<int32_t, true>(instr); break;
         case 0x27: lw<uint32_t>(instr); break;
         case 0x28: sw<uint8_t>(instr, pc); break;
         case 0x29: sw<uint16_t>(instr, pc); break;
-        case 0x2a: swl<uint32_t, Dir::ll>(instr, pc); break;
+        case 0x2a: swl<uint32_t, false>(instr, pc); break;
         case 0x2b: sw<uint32_t>(instr, pc); break;
-        case 0x2c: swl<uint64_t, Dir::ll>(instr, pc); break;
-        case 0x2d: swl<uint64_t, Dir::rl>(instr, pc); break;
-        case 0x2e: swl<uint32_t, Dir::rl>(instr, pc); break;
+        case 0x2c: swl<uint64_t, false>(instr, pc); break;
+        case 0x2d: swl<uint64_t, true>(instr, pc); break;
+        case 0x2e: swl<uint32_t, true>(instr, pc); break;
         case 0x2f: printf("CACHE instruction %x\n", instr); break;
         case 0x30: lw<int32_t>(instr); break; // LL
         case 0x31: lwc1<int32_t>(instr); break;
