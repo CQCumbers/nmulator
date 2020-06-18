@@ -44,10 +44,6 @@ namespace RSP {
   extern Block blocks[0x1000];
 
   uint32_t fetch(uint32_t addr);
-  template <typename T, bool all=false>
-  void write(uint32_t addr, T val);
-  template <typename T, bool all=false>
-  int64_t read(uint32_t addr);
   void print_state();
 }
 
@@ -63,6 +59,7 @@ struct MipsJit {
   static constexpr uint8_t dev_cop0 = (is_rsp ? 0x20 : 0x22);
   static constexpr uint8_t dev_cop1 = 0x42, dev_cop2 = 0x40;
   static constexpr uint8_t dev_cop2c = 0x86;
+  static constexpr uint8_t dev_pool = 148;
   static constexpr uint32_t hpage_mask = 0x1ffff000;
 
   MipsJit(CodeHolder &code) : as(&code) {}
@@ -228,7 +225,7 @@ struct MipsJit {
       as.mov(x86_spilld(dst), x86::rax);
     }
   }
-  
+
   void compare(uint8_t reg1, uint8_t reg2) {
     // 32 bit register to register
     uint8_t reg1x = x86_reg(reg1), reg2x = x86_reg(reg2);
@@ -250,23 +247,8 @@ struct MipsJit {
   }
 
   void elem_spec(uint8_t e) {
-    // creates scalars from xmm15, according to element specifier
-    uint64_t base; uint8_t offset;
-    switch (__builtin_clz(e & 0xf) - 28) {
-      case 0: base = 0x0e0e0e0e0e0e0e0e; offset = (e & 0x7) * 2; break;
-      case 1: base = 0x0e0e0e0e06060606; offset = (e & 0x3) * 2; break;
-      case 2: base = 0x0e0e0a0a06060202; offset = (e & 0x1) * 2; break;
-      default: return;
-    }
-    as.mov(x86::rax, base); as.movq(x86::xmm0, x86::rax);
-    if (offset) {
-      as.pxor(x86::xmm2, x86::xmm2);
-      as.mov(x86::eax, offset); as.movq(x86::xmm1, x86::rax);
-      as.pshufb(x86::xmm1, x86::xmm2); as.psubb(x86::xmm0, x86::xmm1);
-    }
-    as.pcmpeqd(x86::xmm2, x86::xmm2);
-    as.movdqa(x86::xmm1, x86::xmm0); as.psubb(x86::xmm1, x86::xmm2);
-    as.punpcklbw(x86::xmm0, x86::xmm1); as.pshufb(x86::xmm15, x86::xmm0);
+    e &= 0xf; if (e <= 1) return; // element scalars from xmm15
+    as.pshufb(x86::xmm15, x86_spillq((10 + e) * 2 + dev_pool));
   }
 
   void update_acc(bool high) {
@@ -340,39 +322,71 @@ struct MipsJit {
   //enum LW_Type { LB, LH, LW, LD, LBU, LHU, LWU };
 
   template <typename T>
-  void lw(uint32_t instr) {
-    /*if (rt(instr) == 0) return;
-    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
-    auto src = rsx ? x86::gpd(rsx) : x86_spill(rs(instr));
-    auto dst = rtx ? x86::gpq(rtx) : x86::rax;
-    if (is_rsp) {
-      as.mov(x86::eax, 0xfff), as.and_(x86::eax, src);
-    } else {
-      as.mov(x86::eax, src), as.shr(x86::eax, 12);
-      as.mov(x86::rax, x86::qword_ptr(x86::rdi, x86::rax, 3));
-      as.test(x86::rax, x86::rax), as.je(miss_label);
-      as.mov(x86::ecx, 0xfff), as.and_(x86::ecx, src);
-    }
-    as.mov(x86::rax, (uint64_t)cfg.mem);
-    if (type == LB) {
-      as.movsx(dst, x86::byte_ptr(x86::rax, x86::rcx));
-    } else if (type == LBU) {
-      as.movzx(dst, x86::byte_ptr(x86::rax, x86::rcx));
-    } else if (type == LH) {
-      as.movbe(x86::ax, x86::word_ptr(x86::rax, x86::rcx));
-      as.movsx(dst, x86::ax);
-    } else if (type == LHU) {
-      as.movbe(x86::ax, x86::word_ptr(x86::rax, x86::rcx));
-      as.movzx(dst, x86::ax);
-    } else if (type == LW) {
+  inline void x86_read() {
+    as.mov(x86::rax, (uint64_t)RSP::mem);
+    if (sizeof(T) == 8) {
+      as.movbe(x86::rax, x86::qword_ptr(x86::rax, x86::rcx));
+    } else if (sizeof(T) == 4) {
       as.movbe(x86::eax, x86::dword_ptr(x86::rax, x86::rcx));
-      as.movsxd(dst, x86::eax);
-    } else if (type == LWU) {
-      as.movbe(dst, x86::dword_ptr(x86::rax, x86::rcx));
-    } else if (type == LD) {
-      as.movbe(dst, x86::qword_ptr(x86::rax, x86::rcx));
+    } else if (sizeof(T) == 2) {
+      as.movbe(x86::ax, x86::word_ptr(x86::rax, x86::rcx));
+      as.movzx(x86::eax, x86::ax);
+    } else if (sizeof(T) == 1) {
+      as.movzx(x86::eax, x86::byte_ptr(x86::rax, x86::rcx));
     }
-    if (!rtx) as.mov(x86_spill(rt(instr)), dst);*/
+  }
+
+  template <typename T>
+  inline void x86_read_s() {
+    as.mov(x86::rax, (uint64_t)RSP::mem);
+    if (sizeof(T) == 8) {
+      as.movbe(x86::rax, x86::qword_ptr(x86::rax, x86::rcx));
+    } else if (sizeof(T) == 4) {
+      as.movbe(x86::eax, x86::dword_ptr(x86::rax, x86::rcx));
+      as.movsxd(x86::rax, x86::eax);
+    } else if (sizeof(T) == 2) {
+      as.movbe(x86::ax, x86::word_ptr(x86::rax, x86::rcx));
+      as.movsx(x86::eax, x86::ax);
+    } else if (sizeof(T) == 1) {
+      as.movsx(x86::rax, x86::byte_ptr(x86::rax, x86::rcx));
+    }
+  }
+
+  template <typename T>
+  inline void x86_write() {
+    as.mov(x86::rax, (uint64_t)RSP::mem);
+    if (sizeof(T) == 8) {
+      as.movbe(x86::qword_ptr(x86::rax, x86::rcx), x86::rsi);
+    } else if (sizeof(T) == 4) {
+      as.movbe(x86::dword_ptr(x86::rax, x86::rcx), x86::esi);
+    } else if (sizeof(T) == 2) {
+      as.movbe(x86::word_ptr(x86::rax, x86::rcx), x86::si);
+    } else if (sizeof(T) == 1) {
+      as.mov(x86::dword_ptr(x86::rax, x86::rcx), x86::sil);
+    }
+  }
+
+  template <typename T>
+  void lw(uint32_t instr) {
+    if (is_rsp) {
+      if (rt(instr) == 0) return;
+      // calculate load address
+      uint8_t rsx = x86_reg(rs(instr));
+      if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+      else as.mov(x86::ecx, x86_spill(rs(instr)));
+      as.add(x86::ecx, imm(instr)), as.and_(x86::ecx, 0xfff);
+      // mov eax, ecx; shr eax, 12;
+      // add ecx, [rbp + rax * 4 + dev_pages]
+      // bt ecx, 31; jnz miss_handler
+      // load byte-swapped data from address
+      constexpr bool sign = T(-1) < T(0);
+      sign ? x86_read_s<T>() : x86_read<T>();
+      // move data into register
+      uint8_t rtx = x86_reg(rt(instr));
+      if (rtx) as.mov(x86::gpq(rtx), x86::rax);
+      else as.mov(x86_spilld(rt(instr)), x86::rax);
+      return;
+    }
 
     if (rt(instr) == 0) return;
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
@@ -383,8 +397,7 @@ struct MipsJit {
       as.mov(x86::eax, x86_spill(rs(instr)));
       as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
     }
-    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
+    x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     x86_load_caller(); as.pop(x86::edi);
     if (rtx) as.mov(x86::gpq(rtx), x86::rax);
     else as.mov(x86_spilld(rt(instr)), x86::rax);
@@ -392,6 +405,19 @@ struct MipsJit {
 
   template <typename T>
   void sw(uint32_t instr, uint32_t pc) {
+    if (is_rsp) {
+      // calculate store address
+      uint8_t rsx = x86_reg(rs(instr));
+      if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+      else as.mov(x86::ecx, x86_spill(rs(instr)));
+      as.add(x86::ecx, imm(instr)), as.and_(x86::ecx, 0xfff);
+      // store byte-swapped register
+      uint8_t rtx = x86_reg(rt(instr));
+      if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
+      else as.mov(x86::rsi, x86_spilld(rt(instr)));
+      x86_write<T>(); return;
+    }
+
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SW BASE(RS), RT, OFFSET(IMMEDIATE)
     as.push(x86::edi); x86_store_caller();
@@ -402,13 +428,32 @@ struct MipsJit {
     }
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
     else as.mov(x86::rsi, x86_spilld(rt(instr)));
-    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::write<T>));
-    else x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
+    x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
     x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
   template <typename T, bool right>
   void lwl(uint32_t instr) {
+    /*if (rt(instr) == 0) return;
+    printf("RSP LWL\n");
+    // calculate load address
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    as.add(x86::ecx, imm(instr)), as.and_(x86::ecx, 0xfff);
+    // load byte-swapped data from address
+    constexpr bool sign = T(-1) < T(0);
+    sign ? x86_read_s<T>() : x86_read<T>();
+    as.and_(x86::ecx, (uint8_t)sizeof(T) - 1);
+    uint8_t rtx = x86_reg(rt(instr));
+    // mask according to alignment
+    if (rtx) as.xor_(x86::rax, x86::gpq(rtx));
+    else as.xor_(x86::rax, x86_spilld(rt(instr)));
+    uint32_t mask = dev_pool * 8 + (1 + right) * 16 - sizeof(T);
+    as.and_(x86::rax, x86::qword_ptr(x86::rbp, x86::rcx, 0, mask));
+    if (rtx) as.xor_(x86::gpq(rtx), x86::rax);
+    else as.xor_(x86_spilld(rt(instr)), x86::rax);*/
+
     if (rt(instr) == 0) return;
     uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // LWL BASE(RS), RT, OFFSET(IMMEDIATE)
@@ -425,8 +470,7 @@ struct MipsJit {
     as.shl(x86::ecx, 3); as.shl(x86::rax, x86::cl);
     // read unaligned data from memory
     as.push(x86::rax);
-    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
+    x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     as.pop(x86::rcx);
     // apply mask depending on direction
     if (right) {
@@ -462,8 +506,7 @@ struct MipsJit {
     as.shl(x86::ecx, 3); as.shl(x86::rax, x86::cl);
     // read previous data from memory
     as.push(x86::edi); as.push(x86::rax);
-    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    else x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
+    x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
     as.pop(x86::rcx); as.pop(x86::edi);
     // apply mask depending on direction
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
@@ -475,8 +518,7 @@ struct MipsJit {
     as.and_(x86::rsi, x86::rcx); as.not_(x86::rcx);
     as.and_(x86::rax, x86::rcx); as.or_(x86::rsi, x86::rax);
     // write masked data to memory
-    if (is_rsp) x86_call(reinterpret_cast<uint64_t>(RSP::write<T>));
-    else x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
+    x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
     x86_load_caller(); as.pop(x86::edi); check_watch(pc);
   }
 
@@ -519,7 +561,7 @@ struct MipsJit {
   void addu(uint32_t instr) {
     if (rd(instr) == 0) return;
     if (rs(instr) == 0 && rt(instr) == 0) {
-      // ADD RD, $0, $0 
+      // ADD RD, $0, $0
       uint8_t rdx = x86_reg(rd(instr));
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spilld(rd(instr)), 0);
@@ -545,7 +587,7 @@ struct MipsJit {
     if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
     if (rs(instr) == 0 && rt(instr) == 0) {
-      // DADD RD, $0, $0 
+      // DADD RD, $0, $0
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spilld(rd(instr)), 0);
     } else if (rs(instr) == 0) {
@@ -587,7 +629,7 @@ struct MipsJit {
   void subu(uint32_t instr) {
     if (rd(instr) == 0) return;
     if (rs(instr) == 0 && rt(instr) == 0) {
-      // SUB RD, $0, $0 
+      // SUB RD, $0, $0
       uint8_t rdx = x86_reg(rd(instr));
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spilld(rd(instr)), 0);
@@ -614,7 +656,7 @@ struct MipsJit {
     if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
     if (rs(instr) == 0 && rt(instr) == 0) {
-      // DSUB RD, $0, $0 
+      // DSUB RD, $0, $0
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spilld(rd(instr)), 0);
     } else if (rs(instr) == 0) {
@@ -656,7 +698,7 @@ struct MipsJit {
     if (rd(instr) == 0) return;
     uint8_t rdx = x86_reg(rd(instr));
     if (rs(instr) == 0 && rt(instr) == 0) {
-      // OR RD, $0, $0 
+      // OR RD, $0, $0
       if (rdx) as.xor_(x86::gpd(rdx), x86::gpd(rdx));
       else as.mov(x86_spilld(rd(instr)), 0);
     } else if (rs(instr) == 0 || rt(instr) == rs(instr)) {
@@ -1689,7 +1731,7 @@ struct MipsJit {
     printf("COP2 ADD of $%d and $%d to $%d\n", rt(instr), rd(instr), sa(instr));
     if (type == VABS) {
       as.psignw(x86::xmm15, x86::xmm0);
-    } else if (type == VADD) {  // doesn't handle VCO upper bits 
+    } else if (type == VADD) {  // doesn't handle VCO upper bits
       as.movdqa(x86::xmm1, x86::xmm15); as.paddw(x86::xmm1, x86::xmm0);
       as.psubw(x86::xmm1, x86_spillq(0 + dev_cop2c));
       as.psubsw(x86::xmm0, x86_spillq(0 + dev_cop2c));
@@ -1997,222 +2039,160 @@ struct MipsJit {
     }
   }
 
-  template <typename T>
-  void ldv(uint32_t instr) {
-    // only handles T-bit aligned elements
-    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    uint8_t zeros = __builtin_ctz(sizeof(T));
-    int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << zeros;
-    printf("LDV of 0x%x + $%d of COP2 $%d\n", off, rs(instr), rt(instr));
-    // LDV BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), off));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
-    }
-    x86_call(reinterpret_cast<uint64_t>(RSP::read<T>));
-    x86_load_caller(); as.pop(x86::edi);
-    auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
-    if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
-    uint8_t offset = (sa(instr) >> 1) & (sizeof(T) - 1);
-    if (offset) as.palignr(result, result, 16 - offset);
-    switch (sizeof(T)) {
-      case 1: as.pinsrb(result, x86::rax, 0xf - (sa(instr) >> 1)); break;
-      case 2: as.pinsrw(result, x86::rax, 0x7 - (sa(instr) >> 2)); break;
-      case 4: as.pinsrd(result, x86::rax, 0x3 - (sa(instr) >> 3)); break;
-      case 8: as.pinsrq(result, x86::rax, 0x1 - (sa(instr) >> 4)); break;
-    }
-    if (offset) as.palignr(result, result, offset);
-    if (!rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm0);
-  }
-
-  template <typename T>
-  void sdv(uint32_t instr) {
-    // only handles T-bit aligned elements
-    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    uint8_t zeros = __builtin_ctz(sizeof(T));
-    int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << zeros;
-    printf("SDV of 0x%x + $%d of COP2 $%d\n", off, rs(instr), rt(instr));
-    // SDV BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), off));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
-    }
-    auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
-    if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
-    uint8_t offset = (sa(instr) >> 1) & (sizeof(T) - 1);
-    if (offset) as.palignr(result, result, 16 - offset);
-    switch (sizeof(T)) {
-      case 1: as.pextrb(x86::rsi, result, 0xf - (sa(instr) >> 1)); break;
-      case 2: as.pextrw(x86::rsi, result, 0x7 - (sa(instr) >> 2)); break;
-      case 4: as.pextrd(x86::rsi, result, 0x3 - (sa(instr) >> 3)); break;
-      case 8: as.pextrq(x86::rsi, result, 0x1 - (sa(instr) >> 4)); break;
-    }
-    if (offset) as.palignr(result, result, offset);
-    x86_call(reinterpret_cast<uint64_t>(RSP::write<T>));
-    x86_load_caller(); as.pop(x86::edi);
-  }
-
   inline int32_t sext(uint32_t val, uint32_t bits=32) {
     if (bits >= 32) return val;
     uint32_t mask = (1 << bits) - 1, sign = 1 << (bits - 1);
     return ((val & mask) ^ sign) - sign;
   }
 
+  template <typename T>
+  void ldv(uint32_t instr) {
+    uint8_t rsx = x86_reg(rs(instr));
+    int32_t off = sext(instr, 7) << __builtin_ctz(sizeof(T));
+    // LDV BASE(RS), RT, OFFSET(IMMEDIATE)
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
+    x86_read<T>();
+    // align old register values
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
+    auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
+    if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
+    uint8_t elem = (sa(instr) >> 1) & (sizeof(T) - 1);
+    if (elem) as.palignr(result, result, 16 - elem);
+    // load new register values
+    if (sizeof(T) == 1) as.pinsrb(result, x86::rax, 0xf - (sa(instr) >> 1));
+    if (sizeof(T) == 2) as.pinsrw(result, x86::rax, 0x7 - (sa(instr) >> 2));
+    if (sizeof(T) == 4) as.pinsrd(result, x86::rax, 0x3 - (sa(instr) >> 3));
+    if (sizeof(T) == 8) as.pinsrq(result, x86::rax, 0x1 - (sa(instr) >> 4));
+    if (elem) as.palignr(result, result, elem);
+    if (!rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm0);
+  }
+
+  template <typename T>
+  void sdv(uint32_t instr) {
+    uint8_t rsx = x86_reg(rs(instr));
+    int32_t off = sext(instr, 7) << __builtin_ctz(sizeof(T));
+    // SDV BASE(RS), RT, OFFSET(IMMEDIATE)
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
+    // align old register values
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
+    auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
+    if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
+    uint8_t elem = (sa(instr) >> 1) & (sizeof(T) - 1);
+    if (elem) as.palignr(result, result, 16 - elem);
+    // load new register values
+    if (sizeof(T) == 1) as.pextrb(x86::rsi, result, 0xf - (sa(instr) >> 1));
+    if (sizeof(T) == 2) as.pextrw(x86::rsi, result, 0x7 - (sa(instr) >> 2));
+    if (sizeof(T) == 4) as.pextrd(x86::rsi, result, 0x3 - (sa(instr) >> 3));
+    if (sizeof(T) == 8) as.pextrq(x86::rsi, result, 0x1 - (sa(instr) >> 4));
+    if (elem) as.palignr(result, result, elem);
+    x86_write<T>();
+  }
+
   template <bool right>
   void lqv(uint32_t instr) {
-    // compute base address
-    /*uint8_t rsx = x86_reg(rs(instr));
-    if (!rsx) as.mov(x86::ecx, x86_spill(rs(instr)));
-    auto base = rsx ? x86::gpd(rsx) : x86::ecx;
-    // load data from offset
-    int32_t off = sext(inst, 7) - (right * 16);
-    as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rdi, base, off));
-    uint32_t constant = pool + lqv + elem - right * 16;
-    as.pshufb(x86::xmm0, x86::dqword_ptr(x86::rbp, constant));
-    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);*/
-
-    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << 4;
-    printf("LQV of 0x%x + $%d of COP2 $%d\n", off, rs(instr), rt(instr));
-    // LQV BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), off));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
-    }
-    // load possibly unaligned data from memory
-    if (right) as.sub(x86::edi, 0x8);
-    as.push(x86::edi); x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
-    as.pop(x86::edi); as.mov(x86::ecx, x86::edi); as.and_(x86::ecx, 0xf);
-    Label after = as.newLabel(); as.cmp(x86::ecx, 0x8); as.jae(after);
-    as.push(x86::ecx); as.mov(x86_spilld(rt(instr) * 2 + !right + dev_cop2), x86::rax);
-    right ? as.sub(x86::edi, 0x8) : as.add(x86::edi, 0x8);
-    x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
-    as.pop(x86::ecx); as.bind(after); as.shl(x86::ecx, 3);
-    // compute mask for loaded data
-    as.xor_(x86::edx, x86::edx); as.not_(x86::rdx); as.shl(x86::rdx, x86::cl);
-    if (right) as.not_(x86::rdx), as.sub(x86::ecx, 0x8 << 3);
-    as.and_(x86::rax, x86::rdx); as.not_(x86::rdx);
-    // apply mask to appropriate half of register
-    as.shr(x86::ecx, 3); as.and_(x86::ecx, 0x8); as.add(x86::rbp, x86::rcx);
-    as.and_(x86_spilld(rt(instr) * 2 + dev_cop2), x86::rdx);
-    as.or_(x86_spilld(rt(instr) * 2 + dev_cop2), x86::rax);
-    as.sub(x86::rbp, x86::rcx); x86_load_caller(); as.pop(x86::edi);
-    if (rtx) as.movdqa(x86::xmm(rtx), x86_spillq(rt(instr) * 2 + dev_cop2));
+    // compute load address
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    int32_t off = (sext(instr, 7) - right) * 16;
+    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
+    // load byte-swapped data from address
+    as.mov(x86::rax, (uint64_t)RSP::mem);
+    as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rax, x86::rcx));
+    as.pshufb(x86::xmm1, x86_spillq(dev_pool));
+    // mask loaded data based on alignment
+    as.and_(x86::ecx, 0xf), as.neg(x86::rcx);
+    uint32_t mask = dev_pool * 8 + (2 + right) * 16;
+    as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rbp, x86::rcx, 0, mask));
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
+    // merge with old register values (assumes e=0)
+    if (rtx) as.pblendvb(x86::xmm1, x86::xmm(rtx));
+    else as.pblendvb(x86::xmm1, x86_spillq(rt(instr) * 2 + dev_cop2));
+    if (rtx) as.movdqa(x86::xmm(rtx), x86::xmm1);
+    else as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm1);
   }
 
   template <bool right>
   void sqv(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
-    int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << 4;
-    printf("SQV of 0x%x + $%d of COP2 $%d\n", off, rs(instr), rt(instr));
-    // SQV BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), off));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
-    }
-    if (right) as.sub(x86::edi, 0x8);
-    if (rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm(rtx));
-    as.mov(x86::ecx, x86::edi); as.and_(x86::ecx, 0xf); as.push(x86::ecx);
-    Label after = as.newLabel(); as.cmp(x86::ecx, 0x8); as.jae(after);
-    // write unmasked half of register, if applicable
-    as.mov(x86::rsi, x86_spilld(rt(instr) * 2 + !right + dev_cop2));
-    as.push(x86::edi); x86_call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
-    as.pop(x86::edi);
-    right ? as.sub(x86::edi, 0x8) : as.add(x86::edi, 0x8); as.bind(after);
-    as.push(x86::edi); x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
-    // compute mask for half of register
-    as.pop(x86::edi); as.pop(x86::ecx); as.shl(x86::ecx, 3);
-    as.xor_(x86::edx, x86::edx); as.not_(x86::rdx); as.shl(x86::rdx, x86::cl);
-    if (right) as.not_(x86::rdx), as.sub(x86::ecx, 0x8 << 3);
-    // calculate address for masked half of register
-    as.shr(x86::ecx, 3); as.and_(x86::ecx, 0x8); as.add(x86::rbp, x86::rcx);
-    as.mov(x86::rsi, x86_spilld(rt(instr) * 2 + dev_cop2));
-    // apply mask to loaded data
-    as.sub(x86::rbp, x86::rcx); as.and_(x86::rsi, x86::rdx); as.not_(x86::rdx);
-    as.and_(x86::rax, x86::rdx); as.or_(x86::rsi, x86::rax);
-    x86_call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
-    x86_load_caller(); as.pop(x86::edi);
+    // compute store address
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    int32_t off = (sext(instr, 7) - right) * 16;
+    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
+    as.mov(x86::esi, x86::ecx), as.and_(x86::ecx, 0xf);
+    // load data from address
+    as.mov(x86::rax, (uint64_t)RSP::mem);
+    as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rax, x86::rsi));
+    // mask loaded data based on alignment
+    uint32_t mask = dev_pool * 8 + (1 + right) * 16;
+    as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rbp, x86::rcx, 0, mask));
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
+    // merge with byte-swapped register values (assumes e=0)
+    if (rtx) as.movdqa(x86::xmm2, x86::xmm(rtx));
+    else as.movdqa(x86::xmm2, x86_spillq(rt(instr) * 2 + dev_cop2));
+    as.pshufb(x86::xmm2, x86_spillq(dev_pool));
+    as.pblendvb(x86::xmm1, x86::xmm2);
+    as.movdqu(x86::dqword_ptr(x86::rax, x86::rsi), x86::xmm1);
   }
 
   enum LPV_Type { LPV, LUV, LHV, LFV };
 
   template <LPV_Type type>
   void lpv(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
+    // compute load address
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
     bool packed = (type == LPV || type == LUV);
-    int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << (4 - packed);
-    printf("LPV of 0x%x + $%d of COP2 $%d\n", off, rs(instr), rt(instr));
-    // LPV BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), off));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
-    }
-    if (!packed) as.push(x86::edi);
-    x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
-    as.pinsrq(x86::xmm1, x86::rax, (packed ? 0 : 1));
-    if (!packed) {
-      as.pop(x86::edi), as.add(x86::edi, 8);
-      x86_call(reinterpret_cast<uint64_t>(RSP::read<uint64_t>));
-      as.pinsrq(x86::xmm1, x86::rax, 0);
-    }
-    x86_load_caller(); as.pop(x86::edi);
+    int32_t off = sext(instr, 7) * (packed ? 8 : 16);
+    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
+    // load data from address
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
-    if (!rtx) as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
-    if (packed) {
-      as.pxor(result, result), as.punpcklbw(result, x86::xmm1);
-      if (type == LUV) as.psrlw(result, 1);
-    } else if (type == LHV) {
-      as.pcmpeqd(result, result), as.psllw(result, 8);
-      as.pand(result, x86::xmm1), as.psrlw(result, 1);
-    } else {
-      constexpr uint64_t lfv_mask = 0x0fff0bff07ff03ff;
-      as.mov(x86::rax, lfv_mask), as.pcmpeqd(result, result);
-      as.pinsrq(result, x86::rax, sa(instr) != 0);
-      as.pshufb(x86::xmm1, result); as.movdqa(result, x86::xmm1);
+    bool upper = (type == LFV && (sa(instr) >> 4));
+    if (type == LFV) {
+      if (rtx) as.pextrq(x86::rdx, x86::xmm(rtx), upper);
+      else as.mov(x86::rdx, x86_spilld(rt(instr) * 2 + dev_cop2 + upper));
     }
+    as.mov(x86::rax, (uint64_t)RSP::mem);
+    as.movdqu(result, x86::dqword_ptr(x86::rax, x86::rcx));
+    // shuffle into correct lanes
+    uint32_t mask = type + (type == LPV || upper);
+    as.pshufb(result, x86_spillq((3 + mask) * 2 + dev_pool));
+    if (type != LPV) as.psrlw(result, 1);
+    // merge old register if LFV (assumes e=0/8)
+    if (type == LFV) as.pinsrq(result, x86::rdx, upper);
     if (!rtx) as.movdqa(x86_spillq(rt(instr) * 2 + dev_cop2), x86::xmm0);
   }
 
   template <LPV_Type type>
   void spv(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2), rsx = x86_reg(rs(instr));
+    // compute store address
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
     bool packed = (type == LPV || type == LUV);
-    int32_t off = instr & 0x7f; off = ((off ^ 0x40) - 0x40) << (4 - packed);
-    printf("SPV of 0x%x + $%d of COP2 $%d\n", off, rs(instr), rt(instr));
-    // SPV BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), off));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, off));
-    }
-    if (rtx) as.movdqa(x86::xmm0, x86::xmm(rtx));
-    else as.movdqa(x86::xmm0, x86_spillq(rt(instr) * 2 + dev_cop2));
-    as.psrlw(x86::xmm0, 8 - (type != LPV));
-    as.packuswb(x86::xmm0, x86::xmm1);
-    as.pextrq(x86::rsi, x86::xmm0, sa(instr) != 0);
-    if (packed) x86_call(reinterpret_cast<uint64_t>(RSP::write<uint64_t>));
-    else {
-      uint8_t stride = (type == LFV ? 4 : 2);
-      as.add(x86::edi, 16 - stride);
-      for (uint8_t i = 0; i < 16; i += stride) {
-        as.push(x86::edi), as.push(x86::rsi);
-        x86_call(reinterpret_cast<uint64_t>(RSP::write<uint8_t>));
-        as.pop(x86::rsi), as.pop(x86::edi);
-        as.sub(x86::edi, stride), as.shr(x86::rsi, 8);
-      }
-    }
-    x86_load_caller(); as.pop(x86::edi);
+    int32_t off = sext(instr, 7) * (packed ? 8 : 16);
+    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
+    // load data from address
+    as.mov(x86::rax, (uint64_t)RSP::mem);
+    as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rax, x86::rcx));
+    // mask loaded data based on type
+    bool upper = (type == LFV && (sa(instr) >> 4));
+    uint32_t mask = type + (type == LPV || upper);
+    as.movdqu(x86::xmm0, x86_spillq((7 + mask) * 2 + dev_pool));
+    uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
+    // shuffle into correct lanes
+    if (rtx) as.movdqa(x86::xmm2, x86::xmm(rtx));
+    else as.movdqa(x86::xmm2, x86_spillq(rt(instr) * 2 + dev_cop2));
+    if (type != LPV) as.psllw(x86::xmm2, 1);
+    as.pshufb(x86::xmm2, x86::xmm0), as.pblendvb(x86::xmm2, x86::xmm1);
+    as.movdqu(x86::dqword_ptr(x86::rax, x86::rcx), x86::xmm2);
   }
 
   void lwc2(uint32_t instr) {
@@ -2412,7 +2392,7 @@ struct MipsJit {
           case 0x38: case 0x3a: case 0x3c: case 0x3e:
           case 0x39: case 0x3b: case 0x3d: case 0x3f:
             c_fmt(instr); break;
-          default: invalid(instr); break; 
+          default: invalid(instr); break;
         }
         break;
       default: invalid(instr); break;
@@ -2574,7 +2554,7 @@ struct MipsJit {
       as.cmp(x86::qword_ptr(x86::rbp, x86::rax, 3, pages), 0);
       as.je(miss_label);*/
       // no need for checks at all with RSP, as no MMIO or TLB
-      
+
       as.add(x86_spill(9 + dev_cop0), cycles / 2);
       Label cont_label = as.newLabel();
       // check cause and status registers
@@ -2634,12 +2614,13 @@ struct MipsJit {
   }
 };
 
-void Mips::compile_r4300(CodePtr *ptr) {
-  CodeHolder code; 
+uint32_t Mips::compile_r4300(CodePtr *ptr) {
+  CodeHolder code;
   code.init(runtime.codeInfo());
   MipsJit<Device::r4300> jit(code);
-  jit.jit_block();
+  uint32_t len = jit.jit_block();
   runtime.add(ptr, &code);
+  return len;
 }
 
 uint32_t Mips::compile_rsp(CodePtr *ptr) {
@@ -2649,4 +2630,44 @@ uint32_t Mips::compile_rsp(CodePtr *ptr) {
   uint32_t len = jit.jit_block();
   runtime.add(ptr, &code);
   return len;
+}
+
+static const uint16_t pool[26 * 8] = {
+  // unaligned load/store
+  0x0e0f, 0x0c0d, 0x0a0b, 0x0809, 0x0607, 0x0405, 0x0203, 0x0001,
+  0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+  // packed load
+  0x07ff, 0x06ff, 0x05ff, 0x04ff, 0x03ff, 0x02ff, 0x01ff, 0x00ff,
+  0x0eff, 0x0cff, 0x0aff, 0x08ff, 0x06ff, 0x04ff, 0x02ff, 0x00ff,
+  0xffff, 0xffff, 0xffff, 0xffff, 0x0cff, 0x08ff, 0x04ff, 0x00ff,
+  0x0cff, 0x08ff, 0x04ff, 0x00ff, 0xffff, 0xffff, 0xffff, 0xffff,
+  // packed store
+  0x0d0f, 0x090b, 0x0507, 0x0103, 0xffff, 0xffff, 0xffff, 0xffff,
+  0xff0f, 0xff0d, 0xff0b, 0xff09, 0xff07, 0xff05, 0xff03, 0xff01,
+  0xff0f, 0xffff, 0xff0d, 0xffff, 0xff0b, 0xffff, 0xff09, 0xffff,
+  0xff07, 0xffff, 0xff05, 0xffff, 0xff03, 0xffff, 0xff01, 0xffff,
+  // scalar quarter
+  0x0302, 0x0302, 0x0706, 0x0706, 0x0b0a, 0x0b0a, 0x0f0e, 0x0f0e,
+  0x0100, 0x0100, 0x0504, 0x0504, 0x0908, 0x0908, 0x0d0c, 0x0d0c,
+  // scalar half
+  0x0706, 0x0706, 0x0706, 0x0706, 0x0f0e, 0x0f0e, 0x0f0e, 0x0f0e,
+  0x0504, 0x0504, 0x0504, 0x0504, 0x0d0c, 0x0d0c, 0x0d0c, 0x0d0c,
+  0x0302, 0x0302, 0x0302, 0x0302, 0x0b0a, 0x0b0a, 0x0b0a, 0x0b0a,
+  0x0100, 0x0100, 0x0100, 0x0100, 0x0908, 0x0908, 0x0908, 0x0908,
+  // scalar whole
+  0x0f0e, 0x0f0e, 0x0f0e, 0x0f0e, 0x0f0e, 0x0f0e, 0x0f0e, 0x0f0e,
+  0x0d0c, 0x0d0c, 0x0d0c, 0x0d0c, 0x0d0c, 0x0d0c, 0x0d0c, 0x0d0c,
+  0x0b0a, 0x0b0a, 0x0b0a, 0x0b0a, 0x0b0a, 0x0b0a, 0x0b0a, 0x0b0a,
+  0x0908, 0x0908, 0x0908, 0x0908, 0x0908, 0x0908, 0x0908, 0x0908,
+  0x0706, 0x0706, 0x0706, 0x0706, 0x0706, 0x0706, 0x0706, 0x0706,
+  0x0504, 0x0504, 0x0504, 0x0504, 0x0504, 0x0504, 0x0504, 0x0504,
+  0x0302, 0x0302, 0x0302, 0x0302, 0x0302, 0x0302, 0x0302, 0x0302,
+  0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
+};
+
+// eventually, pass cfg* instead of uint64_t*
+void Mips::init_pool(uint64_t *pool_ptr) {
+  memcpy(pool_ptr, pool, sizeof(pool));
 }

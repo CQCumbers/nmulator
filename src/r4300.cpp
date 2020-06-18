@@ -73,7 +73,9 @@ namespace R4300 {
   SDL_Texture *texture = nullptr;
   uint8_t *pixels = nullptr;
 
-  robin_hood::unordered_map<uint32_t, Block> blocks;
+  //robin_hood::unordered_map<uint32_t, Block> blocks;
+  Block blocks[addr_mask + 1];
+  robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
 
   void vi_init() {
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
@@ -693,13 +695,21 @@ namespace R4300 {
 
   /* === Recompiler interface === */
 
+  uint32_t crc32(uint8_t *bytes, uint32_t len) {
+    uint32_t crc = 0, *msg = (uint32_t*)bytes;
+    for (uint32_t i = 0; i < len / 4; ++i)
+      crc = _mm_crc32_u32(crc, msg[i]);
+    return crc;
+  }
+
   void update() {
     while (Sched::until >= 0) {
       if (block->code) {
         pc = block->code();
         if (broke) {
           step = Debugger::update(&dbg_config);
-          blocks.clear();
+          memset(blocks, 0, sizeof(blocks));
+          //blocks.clear();
           memset(block->next_pc, 0, 64);
           memset(block->next, 0, 64);
         }
@@ -712,17 +722,34 @@ namespace R4300 {
       }
       
       if (!block->code) {
-        Mips::compile_r4300(&block->code);
+        bool skip_compile = false;
+        for (auto &backup : backups[pc]) {
+          uint32_t hash = crc32(ram + (pc & addr_mask), backup.len * 4);
+          /*if (backup.hash == hash) {
+            printf("Reusing block at %x with hash %x\n", pc, hash);
+            for (uint32_t i = 0; i < backup.len * 4; i += 4)
+              printf("%x ", read32(ram + ((pc + i) & addr_mask)));
+            printf("\n");
+
+            block->code = backup.code;
+            block->len = backup.len;
+            block->hash = backup.hash;
+            skip_compile = true; break;
+          }*/
+        }
+        if (skip_compile) continue;
+
+        block->len = Mips::compile_r4300(&block->code);
+        block->hash = crc32(ram + (pc & addr_mask), block->len * 4);
+        backups[pc].push_back(*block);
+
+        /*printf("Adding block at %x with hash %x\n", pc, block->hash);
+        for (uint32_t i = 0; i < block->len * 4; i += 4)
+          printf("%x ", read32(ram + ((pc + i) & addr_mask)));
+        printf("\n");*/
       }
     }
     Sched::add(TASK_R4300, 0);
-  }
-
-  uint32_t crc32(uint8_t *bytes, uint32_t len) {
-    uint32_t crc = 0, *msg = (uint32_t*)bytes;
-    for (uint32_t i = 0; i < len / 4; ++i)
-      crc = _mm_crc32_u32(crc, msg[i]);
-    return crc;
   }
 
   void init(const char *filename) {

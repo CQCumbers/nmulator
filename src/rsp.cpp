@@ -19,40 +19,13 @@ namespace RSP { uint8_t *mem, *imem; }
 namespace RSP {
   const uint32_t addr_mask = 0xfff;
   bool step = false, moved = false;
-
-  template <typename T, bool all>
-  int64_t read(uint32_t addr) {
-    const uint32_t mask = (all ? 0x1fff : addr_mask);
-    T *ptr = reinterpret_cast<T*>(mem + (addr & mask));
-    switch (sizeof(T)) {
-      case 1: return *ptr;
-      case 2: return static_cast<T>(bswap16(*ptr));
-      case 4: return static_cast<T>(bswap32(*ptr));
-      case 8: return static_cast<T>(bswap64(*ptr));
-    }
-  }
-
   bool hash_dirty = true;
 
-  template <typename T, bool all>
-  void write(uint32_t addr, T val) {
-    const uint32_t mask = 0x1fff; //(all ? 0x1fff : addr_mask);
-    if ((addr & mask) >= 0x1000 && !all) return;
-    if ((addr & mask) >= 0x1000 && all) hash_dirty = true;
-    T *ptr = reinterpret_cast<T*>(mem + (addr & mask));
-    switch (sizeof(T)) {
-      case 1: *ptr = val; return;
-      case 2: *ptr = bswap16(val); return;
-      case 4: *ptr = bswap32(val); return;
-      case 8: *ptr = bswap64(val); return;
-    }
-  }
-  
   uint32_t fetch(uint32_t addr) {
     return read32(imem + (addr & addr_mask));
   }
 
-  uint64_t reg_array[256];
+  uint64_t reg_array[200];
   uint64_t *const cop0 = reg_array + 32;
 
   const uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
@@ -128,12 +101,12 @@ namespace RSP {
     printf("\n- d50: ");
     for (uint8_t i = 0; i < 16; ++i)
       printf("%llx ", read<uint8_t>(0xd50 + i));*/
-    for (uint32_t i = 0xf0; i < 0x100; i += 0x10) {
+    /*for (uint32_t i = 0x00; i < 0x100; i += 0x10) {
       printf("\n- %x: ", i);
       for (uint8_t j = 0; j < 16; ++j)
-        printf("%llx ", read<uint8_t>(i + j));
+        printf("%llx ", read<uint8_t, false>(i + j));
     }
-    printf("\n---\n");
+    printf("\n---\n");*/
   }
 
   void update() {
@@ -160,33 +133,17 @@ namespace RSP {
         }
         if (skip_compile) continue;
 
-        printf("Compiling block at %x, %x != %x\n", pc, hash, block->hash);
+        //printf("Compiling block at %x, %x != %x\n", pc, hash, block->hash);
         block->len = Mips::compile_rsp(&block->code);
         block->hash = crc32(imem + pc, block->len * 4);
         backups[pc].push_back(*block);
-        printf("Adding new block at %x with hash %x\n", pc, block->hash);
+        //printf("Adding new block at %x with hash %x\n", pc, block->hash);
       }
     }
     Sched::add(TASK_RSP, 0);
   }
 
   void unhalt();
-
-  template void write<uint8_t, false>(uint32_t addr, uint8_t val);
-  template void write<int8_t, false>(uint32_t addr, int8_t val);
-  template void write<uint16_t, false>(uint32_t addr, uint16_t val);
-  template void write<int16_t, false>(uint32_t addr, int16_t val);
-  template void write<uint32_t, false>(uint32_t addr, uint32_t val);
-  template void write<int32_t, false>(uint32_t addr, int32_t val);
-  template void write<uint64_t, false>(uint32_t addr, uint64_t val);
-
-  template int64_t read<uint8_t, false>(uint32_t addr);
-  template int64_t read<int8_t, false>(uint32_t addr);
-  template int64_t read<uint16_t, false>(uint32_t addr);
-  template int64_t read<int16_t, false>(uint32_t addr);
-  template int64_t read<uint32_t, false>(uint32_t addr);
-  template int64_t read<int32_t, false>(uint32_t addr);
-  template int64_t read<uint64_t, false>(uint32_t addr);
 }
 
 void RSP::unhalt() {
@@ -231,4 +188,5 @@ void RSP::init(uint8_t *mem) {
   // set mem pointer, initial cop0 values
   RSP::mem = mem, imem = mem + 0x1000;
   cop0[4] = 0x1, cop0[11] = 0x80;
+  Mips::init_pool(reg_array + 148);
 }

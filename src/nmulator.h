@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define printf(fmt, ...) (0)
+//#define printf(fmt, ...) (0)
 
 /* === MIPS-to-x64 JIT compiler === */
 
@@ -33,8 +33,9 @@ struct Block {
 extern Block empty;
 
 namespace Mips {
-  void compile_r4300(CodePtr *ptr);
+  uint32_t compile_r4300(CodePtr *ptr);
   uint32_t compile_rsp(CodePtr *ptr);
+  void init_pool(uint64_t *pool);
 }
 
 /* === Scheduler and debugger === */
