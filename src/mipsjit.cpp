@@ -14,6 +14,7 @@ namespace R4300 {
 
   extern uint32_t pc;
   extern uint64_t reg_array[0x63];
+  extern uint32_t pages[0x100000];
 
   extern bool broke, moved, tlb_miss;
 
@@ -59,7 +60,7 @@ struct MipsJit {
   static constexpr uint8_t dev_cop0 = (is_rsp ? 0x20 : 0x22);
   static constexpr uint8_t dev_cop1 = 0x42, dev_cop2 = 0x40;
   static constexpr uint8_t dev_cop2c = 0x86;
-  static constexpr uint8_t dev_pool = 148;
+  static constexpr uint8_t dev_pool = (is_rsp ? 148 : 99);
   static constexpr uint32_t hpage_mask = 0x1ffff000;
 
   MipsJit(CodeHolder &code) : as(&code) {}
@@ -286,13 +287,10 @@ struct MipsJit {
       if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
       return block_end;
     } else {
-      //if (!R4300::moved) { R4300::moved = true; return next_pc; }
-      //if (!R4300::breaks[pc] && !R4300::broke) return next_pc;
       if (!R4300::get_break(pc)) return next_pc;
       if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
       return block_end;
     }
-    //return next_pc;
   }
 
   /*void check_watch(uint32_t pc) {
@@ -321,9 +319,33 @@ struct MipsJit {
 
   //enum LW_Type { LB, LH, LW, LD, LBU, LHU, LWU };
 
+  inline void x86_paddr(Label miss) {
+    as.mov(x86::edx, x86::ecx), as.shr(x86::edx, 12);
+    as.mov(x86::rax, (uint64_t)R4300::pages);
+    auto off = x86::dword_ptr(x86::rax, x86::rdx, 2);
+    as.sub(x86::ecx, off), as.js(miss);
+  }
+
+  inline void x86_paddr_miss(Label miss, uint64_t call) {
+    Label after = as.newLabel();
+    as.jmp(after), as.bind(miss);
+    as.add(x86::ecx, x86::dword_ptr(x86::rax, x86::rdx, 2));
+    //as.call(write_thunk), as.bind(after);
+    as.push(x86::rdi), x86_store_caller();
+    as.mov(x86::edi, x86::ecx), x86_call(call);
+    x86_load_caller(), as.pop(x86::rdi);
+    as.bind(after);
+  }
+
   template <typename T>
   inline void x86_read() {
-    as.mov(x86::rax, (uint64_t)RSP::mem);
+    // translate virtual address
+    Label miss = as.newLabel();
+    if (is_rsp) as.and_(x86::ecx, 0xfff);
+    else x86_paddr(miss);
+    // loads unsigned rax from paddr ecx
+    if (is_rsp) as.mov(x86::rax, (uint64_t)RSP::mem);
+    else as.mov(x86::rax, (uint64_t)R4300::ram);
     if (sizeof(T) == 8) {
       as.movbe(x86::rax, x86::qword_ptr(x86::rax, x86::rcx));
     } else if (sizeof(T) == 4) {
@@ -334,11 +356,20 @@ struct MipsJit {
     } else if (sizeof(T) == 1) {
       as.movzx(x86::eax, x86::byte_ptr(x86::rax, x86::rcx));
     }
+    // translation miss handler (arg0 ecx)
+    uint64_t func = (uint64_t)R4300::read<T, true>;
+    if (!is_rsp) x86_paddr_miss(miss, func);
   }
 
   template <typename T>
   inline void x86_read_s() {
-    as.mov(x86::rax, (uint64_t)RSP::mem);
+    // translate virtual address
+    Label miss = as.newLabel();
+    if (is_rsp) as.and_(x86::ecx, 0xfff);
+    else x86_paddr(miss);
+    // loads signed rax from paddr ecx
+    if (is_rsp) as.mov(x86::rax, (uint64_t)RSP::mem);
+    else as.mov(x86::rax, (uint64_t)R4300::ram);
     if (sizeof(T) == 8) {
       as.movbe(x86::rax, x86::qword_ptr(x86::rax, x86::rcx));
     } else if (sizeof(T) == 4) {
@@ -346,15 +377,24 @@ struct MipsJit {
       as.movsxd(x86::rax, x86::eax);
     } else if (sizeof(T) == 2) {
       as.movbe(x86::ax, x86::word_ptr(x86::rax, x86::rcx));
-      as.movsx(x86::eax, x86::ax);
+      as.movsx(x86::rax, x86::ax);
     } else if (sizeof(T) == 1) {
       as.movsx(x86::rax, x86::byte_ptr(x86::rax, x86::rcx));
     }
+    // translation miss handler (arg0 ecx)
+    uint64_t func = (uint64_t)R4300::read<T, true>;
+    if (!is_rsp) x86_paddr_miss(miss, func);
   }
 
-  template <typename T>
+  template <typename T, bool phys=false>
   inline void x86_write() {
-    as.mov(x86::rax, (uint64_t)RSP::mem);
+    // translate virtual address
+    Label miss = as.newLabel();
+    if (is_rsp) as.and_(x86::ecx, 0xfff);
+    else if (!phys) x86_paddr(miss);
+    // writes rsi to paddr ecx
+    if (is_rsp) as.mov(x86::rax, (uint64_t)RSP::mem);
+    else as.mov(x86::rax, (uint64_t)R4300::ram);
     if (sizeof(T) == 8) {
       as.movbe(x86::qword_ptr(x86::rax, x86::rcx), x86::rsi);
     } else if (sizeof(T) == 4) {
@@ -362,164 +402,93 @@ struct MipsJit {
     } else if (sizeof(T) == 2) {
       as.movbe(x86::word_ptr(x86::rax, x86::rcx), x86::si);
     } else if (sizeof(T) == 1) {
-      as.mov(x86::dword_ptr(x86::rax, x86::rcx), x86::sil);
+      as.mov(x86::byte_ptr(x86::rax, x86::rcx), x86::sil);
     }
+    // translation miss handler (arg0 ecx, arg1 esi)
+    uint64_t func = (uint64_t)R4300::write<T, true>;
+    if (!is_rsp && !phys) x86_paddr_miss(miss, func);
   }
 
   template <typename T>
   void lw(uint32_t instr) {
-    if (is_rsp) {
-      if (rt(instr) == 0) return;
-      // calculate load address
-      uint8_t rsx = x86_reg(rs(instr));
-      if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
-      else as.mov(x86::ecx, x86_spill(rs(instr)));
-      as.add(x86::ecx, imm(instr)), as.and_(x86::ecx, 0xfff);
-      // mov eax, ecx; shr eax, 12;
-      // add ecx, [rbp + rax * 4 + dev_pages]
-      // bt ecx, 31; jnz miss_handler
-      // load byte-swapped data from address
-      constexpr bool sign = T(-1) < T(0);
-      sign ? x86_read_s<T>() : x86_read<T>();
-      // move data into register
-      uint8_t rtx = x86_reg(rt(instr));
-      if (rtx) as.mov(x86::gpq(rtx), x86::rax);
-      else as.mov(x86_spilld(rt(instr)), x86::rax);
-      return;
-    }
-
     if (rt(instr) == 0) return;
-    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // LW BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
-    }
-    x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
-    x86_load_caller(); as.pop(x86::edi);
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    as.add(x86::ecx, imm(instr));
+    // load byte-swapped data from address
+    constexpr bool sign = T(-1) < T(0);
+    sign ? x86_read_s<T>() : x86_read<T>();
+    // move data into register
+    uint8_t rtx = x86_reg(rt(instr));
     if (rtx) as.mov(x86::gpq(rtx), x86::rax);
     else as.mov(x86_spilld(rt(instr)), x86::rax);
   }
 
   template <typename T>
   void sw(uint32_t instr, uint32_t pc) {
-    if (is_rsp) {
-      // calculate store address
-      uint8_t rsx = x86_reg(rs(instr));
-      if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
-      else as.mov(x86::ecx, x86_spill(rs(instr)));
-      as.add(x86::ecx, imm(instr)), as.and_(x86::ecx, 0xfff);
-      // store byte-swapped register
-      uint8_t rtx = x86_reg(rt(instr));
-      if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
-      else as.mov(x86::rsi, x86_spilld(rt(instr)));
-      x86_write<T>(); return;
-    }
-
-    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SW BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
-    }
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    as.add(x86::ecx, imm(instr));
+    // store byte-swapped register
+    uint8_t rtx = x86_reg(rt(instr));
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
     else as.mov(x86::rsi, x86_spilld(rt(instr)));
-    x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
-    x86_load_caller(); as.pop(x86::edi); check_watch(pc);
+    x86_write<T>();
   }
 
   template <typename T, bool right>
   void lwl(uint32_t instr) {
-    /*if (rt(instr) == 0) return;
-    printf("RSP LWL\n");
-    // calculate load address
+    if (rt(instr) == 0) return;
+    // LWL BASE(RS), RT, OFFSET(IMMEDIATE)
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
-    as.add(x86::ecx, imm(instr)), as.and_(x86::ecx, 0xfff);
+    int32_t off = right * ((int32_t)sizeof(T) - 1);
+    as.add(x86::ecx, imm(instr) - off);
     // load byte-swapped data from address
     constexpr bool sign = T(-1) < T(0);
     sign ? x86_read_s<T>() : x86_read<T>();
+    if (right) as.dec(x86::ecx);
     as.and_(x86::ecx, (uint8_t)sizeof(T) - 1);
+    right ? as.not_(x86::rcx) : as.neg(x86::rcx);
     uint8_t rtx = x86_reg(rt(instr));
     // mask according to alignment
     if (rtx) as.xor_(x86::rax, x86::gpq(rtx));
     else as.xor_(x86::rax, x86_spilld(rt(instr)));
-    uint32_t mask = dev_pool * 8 + (1 + right) * 16 - sizeof(T);
+    uint32_t mask = dev_pool * 8 + (3 - right) * 16;
     as.and_(x86::rax, x86::qword_ptr(x86::rbp, x86::rcx, 0, mask));
     if (rtx) as.xor_(x86::gpq(rtx), x86::rax);
-    else as.xor_(x86_spilld(rt(instr)), x86::rax);*/
-
-    if (rt(instr) == 0) return;
-    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
-    // LWL BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
-    }
-    // compute mask for loaded data
-    as.mov(x86::ecx, x86::edi); as.and_(x86::ecx, Imm(sizeof(T) - 1));
-    as.xor_(x86::eax, x86::eax); as.not_(x86::rax);
-    if (right) as.sub(x86::edi, Imm(sizeof(T) - 1)), as.add(x86::ecx, 1);
-    as.shl(x86::ecx, 3); as.shl(x86::rax, x86::cl);
-    // read unaligned data from memory
-    as.push(x86::rax);
-    x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
-    as.pop(x86::rcx);
-    // apply mask depending on direction
-    if (right) {
-      as.mov(x86::rdx, x86::rcx); as.not_(x86::rcx);
-      as.cmp(x86::rcx, 0); as.cmove(x86::rcx, x86::rdx);
-    }
-    as.and_(x86::rax, x86::rcx); as.not_(x86::rcx);
-    x86_load_caller(); as.pop(x86::edi);
-    if (rtx) {
-      as.and_(x86::gpq(rtx), x86::rcx);
-      as.or_(x86::gpq(rtx), x86::rax);
-    } else {
-      as.and_(x86_spilld(rt(instr)), x86::rcx);
-      as.or_(x86_spilld(rt(instr)), x86::rax);
-    }
+    else as.xor_(x86_spilld(rt(instr)), x86::rax);
     if (sizeof(T) < 8) to_eax(rt(instr)), from_eax(rt(instr));
   }
 
   template <typename T, bool right>
   void swl(uint32_t instr, uint32_t pc) {
-    uint8_t rtx = x86_reg(rt(instr)), rsx = x86_reg(rs(instr));
     // SWL BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
-    }
-    // compute mask for loaded data
-    as.mov(x86::ecx, x86::edi); as.and_(x86::ecx, Imm(sizeof(T) - 1));
-    as.xor_(x86::eax, x86::eax); as.not_(x86::rax);
-    if (right) as.sub(x86::edi, Imm(sizeof(T) - 1)), as.add(x86::ecx, 1);
-    as.shl(x86::ecx, 3); as.shl(x86::rax, x86::cl);
-    // read previous data from memory
-    as.push(x86::edi); as.push(x86::rax);
-    x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
-    as.pop(x86::rcx); as.pop(x86::edi);
-    // apply mask depending on direction
-    if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
-    else as.mov(x86::rsi, x86_spilld(rt(instr)));
-    if (right) {
-      as.mov(x86::rdx, x86::rcx); as.not_(x86::rcx);
-      as.cmp(x86::rcx, 0); as.cmove(x86::rcx, x86::rdx);
-    }
-    as.and_(x86::rsi, x86::rcx); as.not_(x86::rcx);
-    as.and_(x86::rax, x86::rcx); as.or_(x86::rsi, x86::rax);
-    // write masked data to memory
-    x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
-    x86_load_caller(); as.pop(x86::edi); check_watch(pc);
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    int32_t off = right * ((int32_t)sizeof(T) - 1);
+    as.add(x86::ecx, imm(instr) - off), as.mov(x86::esi, x86::ecx);
+    // load byte-swapped data from address
+    constexpr bool sign = T(-1) < T(0);
+    sign ? x86_read_s<T>() : x86_read<T>();
+    if (right) as.dec(x86::esi);
+    as.and_(x86::esi, (uint8_t)sizeof(T) - 1);
+    right ? as.not_(x86::rsi) : as.neg(x86::rsi);
+    uint8_t rtx = x86_reg(rt(instr));
+    // mask according to alignment
+    if (rtx) as.xor_(x86::rax, x86::gpq(rtx));
+    else as.xor_(x86::rax, x86_spilld(rt(instr)));
+    uint32_t mask = dev_pool * 8 + (2 + right) * 16;
+    as.and_(x86::rax, x86::qword_ptr(x86::rbp, x86::rsi, 0, mask));
+    if (rtx) as.xor_(x86::rax, x86::gpq(rtx));
+    else as.xor_(x86::rax, x86_spilld(rt(instr)));
+    as.mov(x86::rsi, x86::rax), x86_write<T, true>();
   }
 
   void lui(uint32_t instr) {
@@ -1321,8 +1290,8 @@ struct MipsJit {
   void mtc0(uint32_t instr) {
     if (is_rsp) {
       as.push(x86::edi); x86_store_caller();
-      if (rd(instr) & 0x8) as.mov(x86::edi, 0x4100000 + (rd(instr) & 0x7) * 4);
-      else as.mov(x86::edi, 0x4040000 + (rd(instr) & 0x7) * 4);
+      if (rd(instr) & 0x8) as.mov(x86::edi, 0xa4100000 + (rd(instr) & 0x7) * 4);
+      else as.mov(x86::edi, 0xa4040000 + (rd(instr) & 0x7) * 4);
       uint32_t rtx = x86_reg(rt(instr));
       if (rtx) as.mov(x86::esi, x86::gpd(rtx));
       else as.mov(x86::esi, x86_spill(rt(instr)));
@@ -2052,8 +2021,7 @@ struct MipsJit {
     // LDV BASE(RS), RT, OFFSET(IMMEDIATE)
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
-    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
-    x86_read<T>();
+    as.add(x86::ecx, off), x86_read<T>();
     // align old register values
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
@@ -2076,7 +2044,7 @@ struct MipsJit {
     // SDV BASE(RS), RT, OFFSET(IMMEDIATE)
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
-    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
+    as.add(x86::ecx, off);
     // align old register values
     uint8_t rtx = x86_reg(rt(instr) * 2 + dev_cop2);
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);

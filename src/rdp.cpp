@@ -440,7 +440,7 @@ namespace RDP {
   }
 
   void render() {
-    printf("RDP render to %x, %x\n", img_addr - R4300::ram, zbuf_addr - R4300::ram);
+    //printf("RDP render to %x, %x\n", img_addr - R4300::ram, zbuf_addr - R4300::ram);
     uint32_t img_len = img_width * height * img_size;
     uint32_t zbuf_len = img_width * height * 2;
     Vulkan::render(img_addr, img_len, zbuf_addr, zbuf_len);
@@ -454,7 +454,7 @@ namespace RDP {
     img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
     img_width = (instr[0] & 0x3ff) + 1;
     img_addr = R4300::ram + (instr[1] & 0x3ffffff);
-    printf("IMG_ADDR is now %x\n", img_addr);
+    //printf("IMG_ADDR is now %x\n", img_addr);
 
     GlobalData *globals = Vulkan::globals_ptr();
     globals->width = img_width, globals->size = img_size;
@@ -537,7 +537,7 @@ namespace RDP {
     tex.width = ((instr[0] >> 9) & 0xff) << 3;
     tex.addr = (instr[0] & 0x1ff) << 3, tex.pal = (instr[1] >> 20) & 0xf;
     tex.shift[0] = instr[1] & 0x3ff, tex.shift[1] = (instr[1] >> 10) & 0x3ff;
-    printf("set_tile with format = %x, size = %x, shift=%x\n", tex.format, tex.size, tex.shift[0]);
+    //printf("set_tile with format = %x, size = %x, shift=%x\n", tex.format, tex.size, tex.shift[0]);
   }
 
   void set_tile_size() {
@@ -671,10 +671,10 @@ namespace RDP {
     if (type & 0x1) zbuf_triangle(cmd);
     if (pc <= pc_end) {
       Vulkan::add_rdp_cmd(cmd);
-      printf("[RDP] Triangle of type %x\n", type);
+      /*printf("[RDP] Triangle of type %x\n", type);
       for (uint8_t i = 0; i < 8; ++i) printf("%x ", instr[i]);
       if (instr[0] == 0xcf800156) dump = true;
-      printf("\n");
+      printf("\n");*/
     }
   }
 

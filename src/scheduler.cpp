@@ -15,6 +15,7 @@ static const task_t tasks[] = {
   R4300::vi_update,
   R4300::ai_update,
   R4300::pi_update,
+  R4300::cic_update,
   R4300::timer_fire
 };
 

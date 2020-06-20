@@ -16,7 +16,10 @@
 #endif
 
 namespace R4300 {
-  uint8_t *pages[0x20000];
+  // page = vaddr - paddr, for simpler translation,
+  // and easy contiguous pages. paddr high bit set
+  // will cause fallback to slowmem
+  uint32_t pages[0x100000];
   uint8_t *ram = nullptr;
 
   uint32_t tlb[0x20][4];
@@ -25,7 +28,7 @@ namespace R4300 {
 
   bool tlb_miss = false;
   uint32_t pc = 0xbfc00000; //0xa4000040;
-  uint64_t reg_array[0x63] = {0};
+  uint64_t reg_array[0x63 + 52] = {0};
   constexpr uint8_t hi = 0x20, lo = 0x21;
   constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
 
@@ -369,6 +372,11 @@ namespace R4300 {
     }
   }
 
+  // hack to pass PIF bootrom
+  void cic_update() {
+    ram[0x1fc007ff] |= 0x80;
+  }
+
   /* === Reading and Writing === */
 
   template <typename T>
@@ -526,13 +534,10 @@ namespace R4300 {
   template <typename T, bool map>
   int64_t read(uint32_t addr) {
     //printf("Reading from %x\n", addr);
-    if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
-    uint8_t *page = pages[(addr >> 12) & 0x1ffff];
-    if ((addr & addr_mask) == 0x1fc007e4) {
-      ram[0x1fc007ff] = 0x80;  // Hacky CIC emulation
-    }
-    if (!page) return mmio_read<T>(addr);
-    T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
+    if (map && addr >> 30 != 0x2) addr = tlb_map(addr) | 0x80000000;
+    addr = addr - pages[addr >> 12];
+    if (addr & 0x80000000) return mmio_read<T>(addr);
+    T *ptr = reinterpret_cast<T*>(ram + addr);
     switch (sizeof(T)) {
       case 1: return *ptr;
       case 2: return static_cast<T>(bswap16(*ptr));
@@ -543,11 +548,11 @@ namespace R4300 {
 
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
-    if (map && addr >> 30 != 0x2) addr = tlb_map(addr);
+    if (map && addr >> 30 != 0x2) addr = tlb_map(addr) | 0x80000000;
     //broke |= watch_w[addr];
-    uint8_t *page = pages[(addr >> 12) & 0x1ffff];
-    if (!page) return mmio_write<T>(addr, val);
-    T *ptr = reinterpret_cast<T*>(page + (addr & page_mask));
+    addr = addr - pages[addr >> 12];
+    if (addr & 0x80000000) return mmio_write<T>(addr, val);
+    T *ptr = reinterpret_cast<T*>(ram + addr);
     switch (sizeof(T)) {
       case 1: *ptr = val; return;
       case 2: *ptr = bswap16(val); return;
@@ -668,7 +673,7 @@ namespace R4300 {
   }
 
   uint64_t read_mem(uint32_t addr) {
-    return read<uint64_t, true>(addr);
+    return read<uint64_t, false>(addr);
   }
  
   // create or delete breakpoint
@@ -690,7 +695,7 @@ namespace R4300 {
 
   void init_debug(uint32_t port) {
     Debugger::init(port);
-    step = Debugger::update(&dbg_config);
+    broke = step = Debugger::update(&dbg_config);
   }
 
   /* === Recompiler interface === */
@@ -708,8 +713,12 @@ namespace R4300 {
         pc = block->code();
         if (broke) {
           step = Debugger::update(&dbg_config);
-          memset(blocks, 0, sizeof(blocks));
+          //memset(blocks, 0, sizeof(blocks));
           //blocks.clear();
+          /*printf("PC: %x\n", pc);
+          for (uint32_t i = 0; i < 32; ++i)
+            printf("r%d: %llx\n", i, reg_array[i]);
+          printf("---\n");*/
           memset(block->next_pc, 0, 64);
           memset(block->next, 0, 64);
         }
@@ -743,8 +752,8 @@ namespace R4300 {
         block->hash = crc32(ram + (pc & addr_mask), block->len * 4);
         backups[pc].push_back(*block);
 
-        /*printf("Adding block at %x with hash %x\n", pc, block->hash);
-        for (uint32_t i = 0; i < block->len * 4; i += 4)
+        printf("Adding block at %x with hash %x\n", pc, block->hash);
+        /*for (uint32_t i = 0; i < block->len * 4; i += 4)
           printf("%x ", read32(ram + ((pc + i) & addr_mask)));
         printf("\n");*/
       }
@@ -756,10 +765,14 @@ namespace R4300 {
     // allocate memory, setup change detection
     ram = alloc_pages(0x20000000);
     setup_fault_handler();
+    for (uint32_t i = 0x0; i < 0x80000; ++i)
+      pages[i] = 0x80000000;  // unmapped
     for (uint32_t i = 0x0; i < 0x20000; ++i) {
       if (i >= 0x3f00 && i < 0x4000) continue;
       if (i >= 0x4002 && i < 0x5000) continue;
-      pages[i] = ram + i * (page_mask + 1);
+      // map non-TLB non-MMIO segments
+      pages[0x80000 + i] = 0x80000000;
+      pages[0xa0000 + i] = 0xa0000000;
     }
 
     // read ROM file into memory
@@ -784,6 +797,7 @@ namespace R4300 {
     }
 
     // setup other components
+    Mips::init_pool(reg_array + 99);
     vi_init(), RDP::init();
     RSP::init(ram + 0x04000000);
   }
