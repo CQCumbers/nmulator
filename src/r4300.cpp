@@ -535,6 +535,7 @@ namespace R4300 {
 
   uint32_t fetch(uint32_t addr) {
     addr = addr - pages[addr >> 12];
+    if (addr >> 31) printf("Invalid fetch of %x\n", addr);
     return read32(ram + addr);
   }
 
@@ -549,9 +550,12 @@ namespace R4300 {
     cause |= 0x8000, cause &= ~0xff;
   }
 
-  void timer_update() {
-    uint32_t cycles = (compare - count) * 2;
-    Sched::move(TASK_TIMER, cycles);
+  void mtc0(uint32_t idx, uint64_t val) {
+    cop0[idx &= 0x1f] = val;
+    if (idx != 9 && idx != 11) return;
+    if (idx == 11) cop0[13] &= ~0x8000;
+    uint32_t cycles = cop0[11] - cop0[9];
+    Sched::move(TASK_TIMER, cycles * 2);
   }
 
 #ifdef _WIN32
@@ -689,8 +693,8 @@ namespace R4300 {
           step = Debugger::update(&dbg_config);
           //memset(blocks, 0, sizeof(blocks));
           //blocks.clear();
-          //printf("PC: %x\n", pc);
-          /*for (uint32_t i = 0; i < 32; ++i)
+          /*printf("PC: %x\n", pc);
+          for (uint32_t i = 0; i < 32; ++i)
             printf("r%d: %llx\n", i, reg_array[i]);
           printf("---\n");*/
           memset(block->next_pc, 0, 64);
@@ -722,6 +726,7 @@ namespace R4300 {
         }
         if (skip_compile) continue;
 
+        protect(pc & hpage_mask);
         block->len = Mips::compile_r4300(&block->code);
         block->hash = crc32(ram + (pc & addr_mask), block->len * 4);
         backups[pc].push_back(*block);

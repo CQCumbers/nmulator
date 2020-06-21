@@ -9,23 +9,17 @@ JitRuntime runtime;
 Block empty;
 
 namespace R4300 {
-  extern uint32_t mi_irqs;
-  extern bool logging_on;
-
   extern uint32_t pc;
   extern uint64_t reg_array[0x63];
   extern uint32_t pages[0x100000];
-
-  extern bool broke, moved, tlb_miss;
-
   extern uint32_t tlb[0x20][4];
+
   extern Block *block;
 
   int64_t mmio_read(uint32_t addr);
   void mmio_write(uint32_t addr, uint32_t val);
   uint32_t fetch(uint32_t addr);
-  void protect(uint32_t hpage);
-  void timer_update();
+  void mtc0(uint32_t idx, uint64_t val);
 
   bool get_break(uint32_t addr);
   void tlb_write(uint32_t idx);
@@ -33,15 +27,15 @@ namespace R4300 {
 
 namespace RSP {
   extern bool step, moved;
-  extern uint64_t reg_array[0x100];
   extern uint32_t pc;
-  extern uint8_t *dmem;
+  extern uint64_t reg_array[0x100];
   extern uint8_t *imem;
   extern Block *block;
 
   extern Block blocks[0x1000];
 
   uint32_t fetch(uint32_t addr);
+  void mtc0(uint32_t idx, uint64_t val);
   void print_state();
 }
 
@@ -284,32 +278,11 @@ struct MipsJit {
       if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
       return block_end;
     } else {
-      if (!R4300::get_break(pc)) return next_pc;
+      bool page_end = (next_pc & 0xfff) == 0xffc; // end on 4k bounds
+      if (!R4300::get_break(pc) || page_end) return next_pc;
       if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
       return block_end;
     }
-  }
-
-  /*void check_watch(uint32_t pc) {
-    if (is_rsp || R4300::watch_w.empty() || pc == block_end) return;
-    as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::broke));
-    as.cmp(x86::dword_ptr(x86::rax), 1), as.mov(x86::ecx, pc);
-    as.cmove(x86::edi, x86::ecx), as.je(exit_label);
-  }*/
-
-  void check_watch(uint32_t pc, bool invalidate=false) {
-    if (is_rsp || pc == block_end) return;
-    /*Label cont = as.newLabel();
-    as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::tlb_miss));
-    as.cmp(x86::dword_ptr(x86::rax), 1), as.jne(cont);
-    as.and_(x86_spill(13 + dev_cop0), ~0xff);
-    as.or_(x86_spill(13 + dev_cop0), 0x8), as.mov(x86::dword_ptr(x86::rax), 0);
-    if (invalidate) {
-      as.mov(x86::rax, reinterpret_cast<uint64_t>(R4300::block));
-      as.mov(x86::byte_ptr(x86::rax, 28), 0);
-    }
-    as.mov(x86_spill(14 + dev_cop0), pc - 4), as.mov(x86::edi, 0x80000000);
-    as.jmp(exc_label), as.bind(cont);*/
   }
 
   /* === Instruction Translations === */
@@ -324,14 +297,14 @@ struct MipsJit {
   }
 
   // fallback to MMIO or jump to TLB miss thunk
-  inline void x86_paddr_miss(Label miss, uint64_t call) {
+  inline void x86_paddr_miss(Label miss, uint64_t func) {
     Label after = as.newLabel();
     as.jmp(after), as.bind(miss);
     //as.bt(x86::ecx, 30), as.jc(tlb_exc);
     //as.call(write_thunk), as.bind(after);
     as.add(x86::ecx, x86::dword_ptr(x86::rax, x86::rdx, 2));
     as.push(x86::rdi), x86_store_caller();
-    as.mov(x86::edi, x86::ecx), x86_call(call);
+    as.mov(x86::edi, x86::ecx), x86_call(func);
     x86_load_caller(), as.pop(x86::rdi);
     as.bind(after);
   }
@@ -1282,25 +1255,17 @@ struct MipsJit {
   }
 
   void mtc0(uint32_t instr) {
-    if (is_rsp) {
-      as.push(x86::edi); x86_store_caller();
-      if (rd(instr) & 0x8) as.mov(x86::edi, 0xa4100000 + (rd(instr) & 0x7) * 4);
-      else as.mov(x86::edi, 0xa4040000 + (rd(instr) & 0x7) * 4);
+    // read register value parameter
+    if (rt(instr) != 0) {
       uint32_t rtx = x86_reg(rt(instr));
-      if (rtx) as.mov(x86::esi, x86::gpd(rtx));
-      else as.mov(x86::esi, x86_spill(rt(instr)));
-      x86_call(reinterpret_cast<uint64_t>(R4300::mmio_write));
-      x86_load_caller(); as.pop(x86::edi); return;
-    } else if (rd(instr) == 11) {
-      as.and_(x86_spill(13 + dev_cop0), ~0x8000);
-    }
-    if (rt(instr) == 0) as.mov(x86_spilld(rd(instr) + dev_cop0), 0);
-    else move(rd(instr) + dev_cop0, rt(instr));
-    if (!is_rsp && (rd(instr) == 9 || rd(instr) == 11)) {
-      as.push(x86::edi), x86_store_caller();
-      x86_call(reinterpret_cast<uint64_t>(R4300::timer_update));
-      x86_load_caller(), as.pop(x86::edi);
-    }
+      if (rtx) as.movsxd(x86::rsi, x86::gpd(rtx));
+      else as.movsxd(x86::rsi, x86_spill(rt(instr)));
+    } else as.xor_(x86::esi, x86::esi);
+    // pass cop0 index to callback
+    as.push(x86::edi), x86_store_caller();
+    uint64_t func = (uint64_t)(is_rsp ? RSP::mtc0 : R4300::mtc0);
+    as.mov(x86::edi, rd(instr)), x86_call(func);
+    x86_load_caller(), as.pop(x86::edi);
   }
 
   enum ADD_FMT_Type {
@@ -2428,16 +2393,8 @@ struct MipsJit {
     uint32_t cycles = 0, pc = (is_rsp ? RSP::pc : R4300::pc);
     end_label = as.newLabel(), exit_label = as.newLabel();
     cop1_checked = false, exc_label = as.newLabel();
-    //check_watch(pc + 4, true);
-    uint32_t hpage = block_end;
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = is_rsp ? RSP::fetch(pc) : R4300::fetch(pc);
-      if (!is_rsp && R4300::tlb_miss) {
-        as.mov(x86_spill(14 + dev_cop0), pc);
-        as.mov(x86::edi, 0x80000000); break;
-      }
-      uint32_t pg = pc & hpage_mask;
-      if (!is_rsp && pg != hpage) R4300::protect(hpage = pg);
       //if (is_rsp) printf("RSP PC: %x, instr: %x\n", pc & 0xfff, instr);
       //if (!is_rsp) printf("R4300 PC: %x\n", pc);
       pc = check_breaks(pc, next_pc), next_pc += 4;
@@ -2530,13 +2487,17 @@ struct MipsJit {
 
     // check still_top (no intervening events)
     as.mov(x86::rax, reinterpret_cast<uint64_t>(&Sched::until));
-    as.sub(x86::qword_ptr(x86::rax), is_rsp ? cycles * 2 : cycles);
-    as.cmp(x86::qword_ptr(x86::rax), 0), as.jl(exit_label);
+    uint32_t time = is_rsp ? cycles * 2 : cycles;
+    as.sub(x86::qword_ptr(x86::rax), time), as.jl(exit_label);
 
     // check next_pc matches and block valid
     constexpr uint8_t hlen = 8, hash = 12;
     constexpr uint8_t next = 16, npc = 80;
     if (is_rsp) as.and_(x86::edi, 0xffc);
+    // convert edi vaddr to paddr
+
+    //as.mov(x86::rax, (uint64_t)(is_rsp ? RSP::lut : R4300::lut));
+    //as.jmp(x86::dword_ptr(x86::rax, x86::rdi, 1));
 
     if (!is_rsp) {
       as.mov(x86::rax, reinterpret_cast<uint64_t>(R4300::block));

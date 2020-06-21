@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-//#define printf(fmt, ...) (0)
+#define printf(fmt, ...) (0)
 
 /* === MIPS-to-x64 JIT compiler === */
 
@@ -15,7 +15,8 @@ typedef uint32_t (*CodePtr)();
   ReadPtr read;
   WritePtr write;
   uint64_t *regs;
-  uint32_t cop0, cop1, cop2;
+  uint32_t cop0, cop1;
+  uint32_t cop2, pool;
   uint8_t *mem;
   uint32_t *pages;
 };*/

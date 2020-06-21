@@ -42,6 +42,21 @@ namespace RSP {
     return (reg_array[4 + dev_cop0] & 0x42) == 0x42;
   }
 
+  void mtc0(uint32_t idx, uint64_t val) {
+    switch (idx &= 0x1f) {
+      default: cop0[idx] = val;
+      case 0: cop0[0] = val & 0x1fff; return;
+      case 1: cop0[1] = val & 0xffffff; return;
+      case 2: dma(val, false); return;
+      case 3: dma(val, true); return;
+      case 4: set_status(val); return;
+      case 8: cop0[10] = cop0[8] = val; return;
+      case 9: Sched::add(TASK_RDP, 0), cop0[9] = val; return;
+      case 11: cop0[11] &= ~pext(val >> 0, 0x7);
+        cop0[11] |= pext(val >> 1, 0x7); return;
+    }
+  }
+
   void print_state() {
     /*for (uint8_t i = 1; i < 32; ++i)
       printf("Reg $%d: %llx\n", i, reg_array[i]);*/
