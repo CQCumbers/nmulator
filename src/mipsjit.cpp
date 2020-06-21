@@ -21,18 +21,13 @@ namespace R4300 {
   extern uint32_t tlb[0x20][4];
   extern Block *block;
 
-  template <typename T, bool map=false>
-  int64_t read(uint32_t addr);
-  template <typename T, bool map=false>
-  void write(uint32_t addr, int64_t val);
-  template <typename T>
+  int64_t mmio_read(uint32_t addr);
   void mmio_write(uint32_t addr, uint32_t val);
   uint32_t fetch(uint32_t addr);
   void protect(uint32_t hpage);
   void timer_update();
 
   bool get_break(uint32_t addr);
-
   void tlb_write(uint32_t idx);
 }
 
@@ -328,11 +323,13 @@ struct MipsJit {
     as.sub(x86::ecx, off), as.js(miss);
   }
 
+  // fallback to MMIO or jump to TLB miss thunk
   inline void x86_paddr_miss(Label miss, uint64_t call) {
     Label after = as.newLabel();
     as.jmp(after), as.bind(miss);
-    as.add(x86::ecx, x86::dword_ptr(x86::rax, x86::rdx, 2));
+    //as.bt(x86::ecx, 30), as.jc(tlb_exc);
     //as.call(write_thunk), as.bind(after);
+    as.add(x86::ecx, x86::dword_ptr(x86::rax, x86::rdx, 2));
     as.push(x86::rdi), x86_store_caller();
     as.mov(x86::edi, x86::ecx), x86_call(call);
     x86_load_caller(), as.pop(x86::rdi);
@@ -359,7 +356,7 @@ struct MipsJit {
       as.movzx(x86::eax, x86::byte_ptr(x86::rax, x86::rcx));
     }
     // translation miss handler (arg0 ecx)
-    uint64_t func = (uint64_t)R4300::read<T, true>;
+    uint64_t func = (uint64_t)R4300::mmio_read;
     if (!is_rsp) x86_paddr_miss(miss, func);
   }
 
@@ -384,7 +381,7 @@ struct MipsJit {
       as.movsx(x86::rax, x86::byte_ptr(x86::rax, x86::rcx));
     }
     // translation miss handler (arg0 ecx)
-    uint64_t func = (uint64_t)R4300::read<T, true>;
+    uint64_t func = (uint64_t)R4300::mmio_read;
     if (!is_rsp) x86_paddr_miss(miss, func);
   }
 
@@ -407,7 +404,7 @@ struct MipsJit {
       as.mov(x86::byte_ptr(x86::rax, x86::rcx), x86::sil);
     }
     // translation miss handler (arg0 ecx, arg1 esi)
-    uint64_t func = (uint64_t)R4300::write<T, true>;
+    uint64_t func = (uint64_t)R4300::mmio_write;
     if (!is_rsp && !phys) x86_paddr_miss(miss, func);
   }
 
@@ -1292,7 +1289,7 @@ struct MipsJit {
       uint32_t rtx = x86_reg(rt(instr));
       if (rtx) as.mov(x86::esi, x86::gpd(rtx));
       else as.mov(x86::esi, x86_spill(rt(instr)));
-      x86_call(reinterpret_cast<uint64_t>(R4300::write<uint32_t, false>));
+      x86_call(reinterpret_cast<uint64_t>(R4300::mmio_write));
       x86_load_caller(); as.pop(x86::edi); return;
     } else if (rd(instr) == 11) {
       as.and_(x86_spill(13 + dev_cop0), ~0x8000);

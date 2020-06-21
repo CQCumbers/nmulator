@@ -34,11 +34,6 @@ namespace R4300 {
   uint64_t &status = reg_array[12 + dev_cop0];
   uint64_t &cause = reg_array[13 + dev_cop0];
 
-  template <typename T, bool map>
-  int64_t read(uint32_t addr);
-  template <typename T, bool map>
-  void write(uint32_t addr, int64_t val);
-
   void joy_update(SDL_Event event);
   void update();
 
@@ -376,7 +371,6 @@ namespace R4300 {
 
   /* === Reading and Writing === */
 
-  template <typename T>
   int64_t mmio_read(uint32_t addr) {
     switch (addr & addr_mask) {
       default: /*printf("[MMIO] read from %x\n", addr);*/ return 0;
@@ -419,7 +413,6 @@ namespace R4300 {
     }
   }
 
-  template <typename T>
   void mmio_write(uint32_t addr, uint32_t val) {
     switch (addr & addr_mask) {
       default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
@@ -540,36 +533,9 @@ namespace R4300 {
       pages[pg] = (i < len ? d1 : d2) << 12;
   }
 
-  template <typename T, bool map>
-  int64_t read(uint32_t addr) {
-    //printf("Reading from %x\n", addr);
-    addr = addr - pages[addr >> 12];
-    if (addr & 0x80000000) return mmio_read<T>(addr);
-    T *ptr = reinterpret_cast<T*>(ram + addr);
-    switch (sizeof(T)) {
-      case 1: return *ptr;
-      case 2: return static_cast<T>(bswap16(*ptr));
-      case 4: return static_cast<T>(bswap32(*ptr));
-      case 8: return static_cast<T>(bswap64(*ptr));
-    }
-  }
-
-  template <typename T, bool map>
-  void write(uint32_t addr, int64_t val) {
-    //broke |= watch_w[addr];
-    addr = addr - pages[addr >> 12];
-    if (addr & 0x80000000) return mmio_write<T>(addr, val);
-    T *ptr = reinterpret_cast<T*>(ram + addr);
-    switch (sizeof(T)) {
-      case 1: *ptr = val; return;
-      case 2: *ptr = bswap16(val); return;
-      case 4: *ptr = bswap32(val); return;
-      case 8: *ptr = bswap64(val); return;
-    }
-  }
-
   uint32_t fetch(uint32_t addr) {
-    return read<uint32_t, true>(addr);
+    addr = addr - pages[addr >> 12];
+    return read32(ram + addr);
   }
 
   /* === Actual CPU Functions === */
@@ -680,7 +646,8 @@ namespace R4300 {
   }
 
   uint64_t read_mem(uint32_t addr) {
-    return read<uint64_t, false>(addr);
+    addr = addr - pages[addr >> 12];
+    return bswap64(*(uint64_t*)(ram + addr));
   }
  
   // create or delete breakpoint
@@ -812,22 +779,4 @@ namespace R4300 {
     vi_init(), RDP::init();
     RSP::init(ram + 0x04000000);
   }
-
-  template void write<uint8_t, true>(uint32_t addr, int64_t val);
-  template void write<int8_t, true>(uint32_t addr, int64_t val);
-  template void write<uint16_t, true>(uint32_t addr, int64_t val);
-  template void write<int16_t, true>(uint32_t addr, int64_t val);
-  template void write<uint32_t, true>(uint32_t addr, int64_t val);
-  template void write<int32_t, true>(uint32_t addr, int64_t val);
-  template void write<uint64_t, true>(uint32_t addr, int64_t val);
-
-  template void write<uint32_t, false>(uint32_t addr, int64_t val);
-
-  template int64_t read<uint8_t, true>(uint32_t addr);
-  template int64_t read<int8_t, true>(uint32_t addr);
-  template int64_t read<uint16_t, true>(uint32_t addr);
-  template int64_t read<int16_t, true>(uint32_t addr);
-  template int64_t read<uint32_t, true>(uint32_t addr);
-  template int64_t read<int32_t, true>(uint32_t addr);
-  template int64_t read<uint64_t, true>(uint32_t addr);
 }
