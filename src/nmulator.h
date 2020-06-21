@@ -47,6 +47,7 @@ enum Task {
   TASK_VI,
   TASK_AI,
   TASK_PI,
+  TASK_CIC,
   TASK_TIMER
 };
 
@@ -75,6 +76,7 @@ namespace R4300 {
   void vi_update();
   void ai_update();
   void pi_update();
+  void cic_update();
   void timer_fire();
   void update();
 

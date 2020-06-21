@@ -32,6 +32,8 @@ namespace R4300 {
   void timer_update();
 
   bool get_break(uint32_t addr);
+
+  void tlb_write(uint32_t idx);
 }
 
 namespace RSP {
@@ -1253,15 +1255,10 @@ struct MipsJit {
 
   template <bool rand>
   void tlbwi() {
-    // mask, entryhi, entrylo0, entrylo1
-    constexpr uint8_t entry_reg[4] = {5, 10, 2, 3};
-    as.mov(x86::rsi, reinterpret_cast<uint64_t>(&R4300::tlb));
-    as.mov(x86::eax, x86_spill(rand + dev_cop0));
-    as.shl(x86::eax, 4), as.add(x86::rsi, x86::rax);
-    for (uint8_t i = 0; i < 4; ++i) {
-      as.mov(x86::eax, x86_spill(entry_reg[i] + dev_cop0));
-      as.mov(x86::dword_ptr(x86::rsi, i * 4), x86::eax);
-    }
+    as.push(x86::rdi), x86_store_caller();
+    as.mov(x86::edi, x86_spill(rand + dev_cop0));
+    x86_call((uint64_t)R4300::tlb_write);
+    x86_load_caller(), as.pop(x86::rdi);
   }
 
   void tlbp() {
@@ -1497,16 +1494,15 @@ struct MipsJit {
 
   template <typename T>
   void lwc1(uint32_t instr) {
+    // LW BASE(RS), RT, OFFSET(IMMEDIATE)
     uint8_t rsx = x86_reg(rs(instr));
-    // LWC1 BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
-    }
-    x86_call(reinterpret_cast<uint64_t>(R4300::read<T, true>));
-    x86_load_caller(); as.pop(x86::edi);
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    as.add(x86::ecx, imm(instr));
+    // load byte-swapped data from address
+    constexpr bool sign = T(-1) < T(0);
+    sign ? x86_read_s<T>() : x86_read<T>();
+    // move data into register
     bool fr = R4300::reg_array[12 + dev_cop0] & 0x4000000;
     if (sizeof(T) < 8 && !fr) {
       uint8_t rtx = x86_reg((rt(instr) & ~0x1) + dev_cop1);
@@ -1521,14 +1517,12 @@ struct MipsJit {
 
   template <typename T>
   void swc1(uint32_t instr, uint32_t pc) {
+    // SW BASE(RS), RT, OFFSET(IMMEDIATE)
     uint8_t rsx = x86_reg(rs(instr));
-    // SWC1 BASE(RS), RT, OFFSET(IMMEDIATE)
-    as.push(x86::edi); x86_store_caller();
-    if (rsx) as.lea(x86::edi, x86::dword_ptr(x86::gpd(rsx), imm(instr)));
-    else {
-      as.mov(x86::eax, x86_spill(rs(instr)));
-      as.lea(x86::edi, x86::dword_ptr(x86::eax, imm(instr)));
-    }
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    as.add(x86::ecx, imm(instr));
+    // store byte-swapped register
     bool fr = R4300::reg_array[12 + dev_cop0] & 0x4000000;
     if (sizeof(T) < 8 && !fr) {
       uint8_t rtx = x86_reg((rt(instr) & ~0x1) + dev_cop1);
@@ -1539,8 +1533,7 @@ struct MipsJit {
       if (rtx) as.movsd(x86_spilld(rt(instr) + dev_cop1), x86::xmm(rtx));
       as.mov(x86::rsi, x86_spilld(rt(instr) + dev_cop1));
     }
-    x86_call(reinterpret_cast<uint64_t>(R4300::write<T, true>));
-    x86_load_caller(); as.pop(x86::edi); check_watch(pc);
+    x86_write<T>();
   }
 
   enum ROUND_FMT_Type { RN_FMT, RM_FMT, RP_FMT, RZ_FMT };

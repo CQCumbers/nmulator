@@ -16,9 +16,6 @@
 #endif
 
 namespace R4300 {
-  // page = vaddr - paddr, for simpler translation,
-  // and easy contiguous pages. paddr high bit set
-  // will cause fallback to slowmem
   uint32_t pages[0x100000];
   uint8_t *ram = nullptr;
 
@@ -507,21 +504,6 @@ namespace R4300 {
   }
 
   uint32_t tlb_map(uint32_t addr) {
-    // assumes all global, valid, and dirty
-    printf("COP0 2: %llx, 3: %llx\n", reg_array[2 + dev_cop0], reg_array[3 + dev_cop0]);
-    printf("Checking TLB for addr: %x\n", addr);
-    for (uint32_t i = 0; i < 32; ++i) {
-      uint32_t mask = ~(tlb[i][0] | 0x1fff);
-      printf("TLB[%x] with mask: %x, vaddr: %x, paddr0: %x, paddr1: %x\n",
-        i, mask, tlb[i][1] & mask, (tlb[i][2] << 6) & mask, (tlb[i][3] << 6) & mask);
-      if ((addr & mask) == (tlb[i][1] & mask)) {
-        mask = (mask >> 1) | 0x80000000;
-        bool odd = (addr & -mask) != 0;
-        uint32_t page = tlb[i][2 + odd] << 6;
-        return (page & mask) | (addr & ~mask);
-      }
-    }
-    tlb_miss = true;
     // load COP0 context, bad_vaddr, entry_hi
     uint64_t &ctx = reg_array[4 + dev_cop0];
     ctx &= ~0x7ffff0, ctx |= (addr >> 9) & 0x7ffff0;
@@ -531,10 +513,36 @@ namespace R4300 {
     return addr;
   }
 
+  // set bits 19/18 for physical pages with MMIO
+  uint32_t mmio_bit(uint32_t pg, uint32_t len) {
+    if (pg >= 0x3f00 && pg < 0x4000) pg |= 0xc0000;
+    if (pg >= 0x4002 && pg < 0x5000) pg |= 0xc0000;
+    return pg & ~(len - 1);  // align page address
+  }
+
+  uint64_t *const cop0 = reg_array + dev_cop0;
+
+  void tlb_write(uint32_t idx) {
+    uint32_t pg = (tlb[idx][1] >> 12) & ~1;
+    uint32_t len = (tlb[idx][0] >> 13) + 1;
+    // unmap previous page in slot
+    for (uint32_t i = 0; pg < len * 2; ++i, ++pg)
+      pages[pg] = ((pg >> 18) - 0x2) << 30;
+    // calculate physical address diff
+    pg = cop0[10] >> 12, len = (cop0[5] >> 13) + 1;
+    uint32_t d1 = (pg &= ~1) - mmio_bit(cop0[2] >> 6, len);
+    uint32_t d2 = (pg + len) - mmio_bit(cop0[3] >> 6, len);
+    // map new page in slot
+    const uint8_t entry[4] = {5, 10, 2, 3};
+    for (uint8_t i = 0; i < 4; ++i)
+      tlb[idx][i] = (uint32_t)cop0[entry[i]];
+    for (uint32_t i = 0; i < len * 2; ++i, ++pg)
+      pages[pg] = (i < len ? d1 : d2) << 12;
+  }
+
   template <typename T, bool map>
   int64_t read(uint32_t addr) {
     //printf("Reading from %x\n", addr);
-    if (map && addr >> 30 != 0x2) addr = tlb_map(addr) | 0x80000000;
     addr = addr - pages[addr >> 12];
     if (addr & 0x80000000) return mmio_read<T>(addr);
     T *ptr = reinterpret_cast<T*>(ram + addr);
@@ -548,7 +556,6 @@ namespace R4300 {
 
   template <typename T, bool map>
   void write(uint32_t addr, int64_t val) {
-    if (map && addr >> 30 != 0x2) addr = tlb_map(addr) | 0x80000000;
     //broke |= watch_w[addr];
     addr = addr - pages[addr >> 12];
     if (addr & 0x80000000) return mmio_write<T>(addr, val);
@@ -715,8 +722,8 @@ namespace R4300 {
           step = Debugger::update(&dbg_config);
           //memset(blocks, 0, sizeof(blocks));
           //blocks.clear();
-          /*printf("PC: %x\n", pc);
-          for (uint32_t i = 0; i < 32; ++i)
+          //printf("PC: %x\n", pc);
+          /*for (uint32_t i = 0; i < 32; ++i)
             printf("r%d: %llx\n", i, reg_array[i]);
           printf("---\n");*/
           memset(block->next_pc, 0, 64);
@@ -752,7 +759,7 @@ namespace R4300 {
         block->hash = crc32(ram + (pc & addr_mask), block->len * 4);
         backups[pc].push_back(*block);
 
-        printf("Adding block at %x with hash %x\n", pc, block->hash);
+        //printf("Adding block at %x with hash %x\n", pc, block->hash);
         /*for (uint32_t i = 0; i < block->len * 4; i += 4)
           printf("%x ", read32(ram + ((pc + i) & addr_mask)));
         printf("\n");*/
@@ -765,14 +772,18 @@ namespace R4300 {
     // allocate memory, setup change detection
     ram = alloc_pages(0x20000000);
     setup_fault_handler();
-    for (uint32_t i = 0x0; i < 0x80000; ++i)
-      pages[i] = 0x80000000;  // unmapped
-    for (uint32_t i = 0x0; i < 0x20000; ++i) {
-      if (i >= 0x3f00 && i < 0x4000) continue;
-      if (i >= 0x4002 && i < 0x5000) continue;
-      // map non-TLB non-MMIO segments
-      pages[0x80000 + i] = 0x80000000;
-      pages[0xa0000 + i] = 0xa0000000;
+
+    // (paddr >> 18) == 3 for unmapped regions
+    // (paddr >> 18) == 2 for MMIO regions
+    // page[vaddr >> 12] = vaddr - paddr
+    for (uint32_t pg = 0; pg < 0x80000; ++pg)
+      pages[pg] = ((pg >> 18) - 0x2) << 30;
+    for (uint32_t pg = 0xc0000; pg < 0xe0000; ++pg)
+      pages[pg] = ((pg >> 18) - 0x2) << 30;
+    for (uint32_t pg = 0; pg < 0x20000; ++pg) {
+      uint32_t v1 = 0x80000 + pg, v2 = 0xa0000 + pg;
+      pages[v1] = (v1 - mmio_bit(pg, 1)) << 12;
+      pages[v2] = (v2 - mmio_bit(pg, 1)) << 12;
     }
 
     // read ROM file into memory
