@@ -13,6 +13,7 @@ namespace R4300 {
   extern uint64_t reg_array[0x63];
   extern uint32_t pages[0x100000];
   extern uint32_t tlb[0x20][4];
+  extern CodePtr lookup[0x20000000 / 4];
 
   extern Block *block;
 
@@ -1227,7 +1228,7 @@ struct MipsJit {
   void tlbwi() {
     as.push(x86::rdi), x86_store_caller();
     as.mov(x86::edi, x86_spill(rand + dev_cop0));
-    x86_call((uint64_t)R4300::tlb_write);
+    as.and_(x86::edi, 0x1f), x86_call((uint64_t)R4300::tlb_write);
     x86_load_caller(), as.pop(x86::rdi);
   }
 
@@ -2493,19 +2494,19 @@ struct MipsJit {
     // check next_pc matches and block valid
     constexpr uint8_t hlen = 8, hash = 12;
     constexpr uint8_t next = 16, npc = 80;
-    if (is_rsp) as.and_(x86::edi, 0xffc);
-    // convert edi vaddr to paddr
-
-    //as.mov(x86::rax, (uint64_t)(is_rsp ? RSP::lut : R4300::lut));
-    //as.jmp(x86::dword_ptr(x86::rax, x86::rdi, 1));
 
     if (!is_rsp) {
-      as.mov(x86::rax, reinterpret_cast<uint64_t>(R4300::block));
-      as.mov(x86::ecx, x86::edi), as.and_(x86::ecx, 0x1c);
-      as.cmp(x86::rdi, x86::qword_ptr(x86::rax, x86::rcx, 1, npc));
-      as.jne(exit_label);
-      as.mov(x86::rsi, x86::qword_ptr(x86::rax, x86::rcx, 1, next));
+      // translate to physical address
+      as.mov(x86::esi, x86::edi);
+      as.mov(x86::ecx, x86::edi), as.shr(x86::ecx, 12);
+      as.mov(x86::rax, (uint64_t)R4300::pages);
+      auto off = x86::dword_ptr(x86::rax, x86::rcx, 2);
+      as.sub(x86::esi, off);
+      // get function pointer from table
+      as.mov(x86::rax, (uint64_t)R4300::lookup);
+      as.lea(x86::rsi, x86::qword_ptr(x86::rax, x86::rsi, 1));
     } else {
+      as.and_(x86::edi, 0xffc);
       as.mov(x86::rax, reinterpret_cast<uint64_t>(RSP::blocks));
       as.mov(x86::ecx, x86::edi), as.shl(x86::ecx, 7);
       as.lea(x86::rsi, x86::qword_ptr(x86::rax, x86::rcx));
@@ -2521,8 +2522,8 @@ struct MipsJit {
     as.cmp(x86::rdx, 0), as.je(exit_label);
 
     if (is_rsp) as.mov(x86::rax, reinterpret_cast<uint64_t>(&RSP::block));
-    else as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::block));
-    as.mov(x86::qword_ptr(x86::rax), x86::rsi);
+    //else as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::block));
+    if (is_rsp) as.mov(x86::qword_ptr(x86::rax), x86::rsi);
     as.add(x86::rdx, is_rsp ? 94 : 67); as.jmp(x86::rdx);
 
     as.bind(exit_label);

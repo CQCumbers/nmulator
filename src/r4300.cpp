@@ -69,7 +69,7 @@ namespace R4300 {
   uint8_t *pixels = nullptr;
 
   //robin_hood::unordered_map<uint32_t, Block> blocks;
-  Block blocks[addr_mask + 1];
+  //Block blocks[addr_mask + 1];
   robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
 
   void vi_init() {
@@ -519,18 +519,23 @@ namespace R4300 {
     uint32_t pg = (tlb[idx][1] >> 12) & ~1;
     uint32_t len = (tlb[idx][0] >> 13) + 1;
     // unmap previous page in slot
-    for (uint32_t i = 0; pg < len * 2; ++i, ++pg)
+    for (uint32_t i = 0; i < len * 2; ++i, ++pg) {
+      if ((pg >> 18) == 0x2) break;
       pages[pg] = ((pg >> 18) - 0x2) << 30;
+    }
     // calculate physical address diff
-    pg = cop0[10] >> 12, len = (cop0[5] >> 13) + 1;
+    pg = (uint32_t)cop0[10] >> 12;
+    len = ((uint32_t)cop0[5] >> 13) + 1;
     uint32_t d1 = (pg &= ~1) - mmio_bit(cop0[2] >> 6, len);
     uint32_t d2 = (pg + len) - mmio_bit(cop0[3] >> 6, len);
     // map new page in slot
     const uint8_t entry[4] = {5, 10, 2, 3};
     for (uint8_t i = 0; i < 4; ++i)
       tlb[idx][i] = (uint32_t)cop0[entry[i]];
-    for (uint32_t i = 0; i < len * 2; ++i, ++pg)
+    for (uint32_t i = 0; i < len * 2; ++i, ++pg) {
+      if ((pg >> 18) == 0x2) break;
       pages[pg] = (i < len ? d1 : d2) << 12;
+    }
   }
 
   uint32_t fetch(uint32_t addr) {
@@ -544,7 +549,7 @@ namespace R4300 {
   //robin_hood::unordered_node_map<uint32_t, Block> blocks;
   robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
   const uint32_t hpage_mask = addr_mask & ~0xfff;
-  bool modified = false; Block *block = &empty;
+  Block *block = &empty;
 
   void timer_fire() {
     cause |= 0x8000, cause &= ~0xff;
@@ -558,6 +563,8 @@ namespace R4300 {
     Sched::move(TASK_TIMER, cycles * 2);
   }
 
+  CodePtr lookup[0x20000000 / 4];
+
 #ifdef _WIN32
   uint8_t *alloc_pages(uint32_t size) {
     return reinterpret_cast<uint8_t*>(VirtualAlloc(
@@ -567,17 +574,17 @@ namespace R4300 {
 
   void protect(uint32_t hpage) {
     DWORD old;
-    if (prot_pages[hpage].empty()) {
+    if (prot_pages[hpage].empty())
       VirtualProtect(ram + hpage, 0x1000, PAGE_READONLY, &old);
-    }
-    prot_pages[hpage].push_back(pc & addr_mask);
+    uint32_t ppc = pc - pages[pc >> 12];
+    prot_pages[hpage].push_back(ppc / 4);
   }
 
   void unprotect(uint32_t hpage) {
     DWORD old;
-    for (uint32_t addr : prot_pages[hpage]) blocks[addr].code = nullptr;
+    for (uint32_t addr : prot_pages[hpage]) lookup[addr] = nullptr;
     VirtualProtect(ram + hpage, 0x1000, PAGE_READWRITE, &old);
-    prot_pages[hpage].clear(); modified = true;
+    prot_pages[hpage].clear();
   }
   
   LONG WINAPI handle_fault(_EXCEPTION_POINTERS *info) {
@@ -603,13 +610,14 @@ namespace R4300 {
   void protect(uint32_t hpage) {
     if (prot_pages[hpage].empty())
       mprotect(ram + hpage, 0x1000, PROT_READ);
-    prot_pages[hpage].push_back(pc & addr_mask);
+    uint32_t ppc = pc - pages[pc >> 12];
+    prot_pages[hpage].push_back(ppc / 4);
   }
 
   void unprotect(uint32_t hpage) {
-    for (uint32_t addr : prot_pages[hpage]) blocks[addr].code = nullptr;
+    for (uint32_t addr : prot_pages[hpage]) lookup[addr] = nullptr;
     mprotect(ram + hpage, 0x1000, PROT_READ | PROT_WRITE);
-    prot_pages[hpage].clear(); modified = true;
+    prot_pages[hpage].clear();
   }
 
   void handle_fault(int sig, siginfo_t *info, void *raw_ctx) {
@@ -687,54 +695,16 @@ namespace R4300 {
 
   void update() {
     while (Sched::until >= 0) {
-      if (block->code) {
-        pc = block->code();
-        if (broke) {
-          step = Debugger::update(&dbg_config);
-          //memset(blocks, 0, sizeof(blocks));
-          //blocks.clear();
-          /*printf("PC: %x\n", pc);
-          for (uint32_t i = 0; i < 32; ++i)
-            printf("r%d: %llx\n", i, reg_array[i]);
-          printf("---\n");*/
-          memset(block->next_pc, 0, 64);
-          memset(block->next, 0, 64);
-        }
-        uint8_t line = (pc >> 2) & 0x7;
-        if (block->next_pc[line] != pc) {
-          block->next_pc[line] = pc;
-          block->next[line] = &blocks[pc & addr_mask];
-        }
-        block = block->next[line];
-      }
-      
-      if (!block->code) {
-        bool skip_compile = false;
-        for (auto &backup : backups[pc]) {
-          uint32_t hash = crc32(ram + (pc & addr_mask), backup.len * 4);
-          /*if (backup.hash == hash) {
-            printf("Reusing block at %x with hash %x\n", pc, hash);
-            for (uint32_t i = 0; i < backup.len * 4; i += 4)
-              printf("%x ", read32(ram + ((pc + i) & addr_mask)));
-            printf("\n");
-
-            block->code = backup.code;
-            block->len = backup.len;
-            block->hash = backup.hash;
-            skip_compile = true; break;
-          }*/
-        }
-        if (skip_compile) continue;
-
-        protect(pc & hpage_mask);
-        block->len = Mips::compile_r4300(&block->code);
-        block->hash = crc32(ram + (pc & addr_mask), block->len * 4);
-        backups[pc].push_back(*block);
-
-        //printf("Adding block at %x with hash %x\n", pc, block->hash);
-        /*for (uint32_t i = 0; i < block->len * 4; i += 4)
-          printf("%x ", read32(ram + ((pc + i) & addr_mask)));
-        printf("\n");*/
+      uint32_t ppc = pc - pages[pc >> 12];
+      CodePtr code = lookup[ppc / 4];
+      if (code) {
+        pc = code();
+        if (!broke) continue;
+        step = Debugger::update(&dbg_config);
+        memset(lookup, 0, sizeof(lookup));
+      } else {
+        protect(ppc & hpage_mask);
+        Mips::compile_r4300(lookup + ppc / 4);
       }
     }
     Sched::add(TASK_R4300, 0);
