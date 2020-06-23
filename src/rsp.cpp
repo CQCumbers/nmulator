@@ -5,8 +5,6 @@
 #include <vector>
 #include "robin_hood.h"
 
-//static const bool logging_on = false;
-
 static uint32_t crc32(uint8_t *bytes, uint32_t len) {
   uint32_t crc = 0, *msg = (uint32_t*)bytes;
   for (uint32_t i = 0; i < len / 4; ++i)
@@ -21,8 +19,12 @@ namespace RSP {
   bool step = false, moved = false;
   bool hash_dirty = true;
 
+  CodePtr lookup[0x1000 / 4];
+  uint8_t code_mask[0x1000];
+
   uint32_t fetch(uint32_t addr) {
-    return read32(imem + (addr & addr_mask));
+    write32(code_mask + addr, 0xffffffff);
+    return read32(imem + addr);
   }
 
   uint64_t reg_array[200];
@@ -30,9 +32,7 @@ namespace RSP {
 
   const uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
   robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
-  Block blocks[0x1000];
-  uint32_t pc = 0x0; Block *block = &empty;
-  //uint32_t hashes[32];
+  uint32_t pc = 0x0;
 
   inline bool halted() {
     return reg_array[4 + dev_cop0] & 0x1;
@@ -57,124 +57,57 @@ namespace RSP {
     }
   }
 
-  void print_state() {
-    /*for (uint8_t i = 1; i < 32; ++i)
-      printf("Reg $%d: %llx\n", i, reg_array[i]);*/
-    printf("PC_START: %llx\n", reg_array[0x28]);
-    printf("PC_END: %llx\n", reg_array[0x29]);
-    printf("PC_CURRENT: %llx\n", reg_array[0x2a]);
-    /*printf("- ACC: "8;
-    for (uint8_t i = 0; i < 24; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 32 * 2]))[23 - i]);
-    printf("\n- VCO: ");
-    for (uint8_t i = 0; i < 16; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x86 + 0 * 4]))[15 - i]);
-    printf("\n- R30: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 30 * 2]))[7 - i]);
-    printf("\n- R22: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 22 * 2]))[7 - i]);
-    printf("\n- R19: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 19 * 2]))[7 - i]);
-    printf("\n- R18: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 18 * 2]))[7 - i]);
-    printf("\n- R15: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 15 * 2]))[7 - i]);
-    printf("\n- R14: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 14 * 2]))[7 - i]);
-    printf("\n- R8: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 8 * 2]))[7 - i]);
-    printf("\n- R5: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 5 * 2]))[7 - i]);
-    printf("\n- R3: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 3 * 2]))[7 - i]);
-    printf("\n- R0: ");
-    for (uint8_t i = 0; i < 8; ++i)
-      printf("%hx ", ((uint16_t*)(&reg_array[0x40 + 0 * 2]))[7 - i]);
-    //printf("\n- $25: %llx $23: %llx $14: %llx $29: %llx $2: %llx\n- ce0: ",
-    //    reg_array[25], reg_array[23], reg_array[14], reg_array[29], reg_array[2]);
-    printf("\n- ce0: ");
-    for (uint8_t i = 0; i < 32; ++i)
-      printf("%llx ", read<uint8_t>(0xce0 + i));
-    printf("\n- 360: ");
-    for (uint8_t i = 0; i < 16; ++i)
-      printf("%llx ", read<uint8_t>(0x360 + i));
-    printf("\n- 430: ");
-    for (uint8_t i = 0; i < 16; ++i)
-      printf("%llx ", read<uint8_t>(0x430 + i));
-    printf("\n- d10: ");
-    for (uint8_t i = 0; i < 16; ++i)
-      printf("%llx ", read<uint8_t>(0xd10 + i));
-    printf("\n- d50: ");
-    for (uint8_t i = 0; i < 16; ++i)
-      printf("%llx ", read<uint8_t>(0xd50 + i));*/
-    /*for (uint32_t i = 0x00; i < 0x100; i += 0x10) {
-      printf("\n- %x: ", i);
-      for (uint8_t j = 0; j < 16; ++j)
-        printf("%llx ", read<uint8_t, false>(i + j));
+  void unprotect(uint32_t addr, uint8_t *src, uint32_t len) {
+    // memcmp src and dst, at only bitmasked addresses
+    for (uint32_t i = 0; i < len; i += 8) {
+      uint64_t new_ = *(uint64_t*)(src + i);
+      uint64_t old_ = *(uint64_t*)(mem + addr + i);
+      uint64_t mask = *(uint64_t*)(code_mask + ((addr + i) & 0xfff));
+      if ((old_ ^ new_) & mask) {
+        uint32_t pg = (addr + i) & 0xf80;
+        memset(code_mask + pg, 0, 0x80);
+        memset(lookup + pg / 4, 0, 0x100);
+        // reuse old code_mask and lookup,
+        // instead of resetting, if possible
+        i = (i & 0xf80) | 0x78;
+      }
     }
-    printf("\n---\n");*/
   }
 
   void update() {
     while (Sched::until >= 0) {
-      if (block->code) {
-        pc = block->code() & 0xffc, moved = false;
+      if (halted()) return;
+      CodePtr code = lookup[pc / 4];
+      if (code) {
+        pc = code() & 0xffc;
         if (broke()) R4300::set_irqs(0x1);
-        //if (logging_on) print_state();
-        block = &blocks[pc];
-      }
-
-      if (halted()) { /*block->valid = false;*/ return; }
-      uint32_t hash = crc32(imem + pc, block->len * 4);
-      if (!block->code || block->hash != hash) {
+      } else {
         bool skip_compile = false;
         for (auto &backup : backups[pc]) {
-          hash = crc32(imem + pc, backup.len * 4);
+          uint32_t hash = crc32(imem + pc, backup.len * 4);
           if (backup.hash == hash) {
-            block->code = backup.code;
-            block->len = backup.len;
-            block->hash = backup.hash;
-            skip_compile = true;
+            lookup[pc / 4] = backup.code;
+            memset(code_mask + pc, 0xff, backup.len * 4);
+            skip_compile = true; break;
           }
         }
         if (skip_compile) continue;
 
-        //printf("Compiling block at %x, %x != %x\n", pc, hash, block->hash);
-        block->len = Mips::compile_rsp(&block->code);
-        block->hash = crc32(imem + pc, block->len * 4);
-        backups[pc].push_back(*block);
-        //printf("Adding new block at %x with hash %x\n", pc, block->hash);
+        Block block = {0};
+        block.len = Mips::compile_rsp(&block.code);
+        block.hash = crc32(imem + pc, block.len * 4);
+        printf("Compiled new at %x with hash %x\n", pc, block.hash);
+        backups[pc].push_back(block);
+        lookup[pc / 4] = block.code;
       }
     }
     Sched::add(TASK_RSP, 0);
   }
-
-  void unhalt();
-}
-
-void RSP::unhalt() {
-  block = &blocks[pc &= 0xffc];
-  uint32_t hash = crc32(imem + pc, block->len * 4);
-  if (!block->code || block->hash != hash) {
-    block->len = Mips::compile_rsp(&block->code);
-    block->hash = crc32(imem + pc, block->len * 4);
-    backups[pc].push_back(*block);
-  }
-  Sched::add(TASK_RSP, 0);
 }
 
 void RSP::set_status(uint32_t val) {
   // update status flags, unhalt RSP
-  if (cop0[4] & val & 0x1) unhalt();
+  if (cop0[4] & val & 0x1) Sched::add(TASK_RSP, 0);
   cop0[4] &= ~(val & 0x1), cop0[4] |= (val >> 1) & 0x2;
   cop0[4] &= ~(val & 0x4) >> 1;
   cop0[4] &= ~(pext(val >> 5, 0x3ff) << 5);
@@ -195,6 +128,7 @@ void RSP::dma(uint32_t val, bool to_ram) {
   for (uint32_t i = 0; i <= count; ++i) {
     uint8_t *src = to_ram ? mem + cop0[0] : R4300::ram + cop0[1];
     uint8_t *dst = to_ram ? R4300::ram + cop0[1] : mem + cop0[0];
+    if (!to_ram && (cop0[0] >> 12)) unprotect(cop0[0], src, len);
     memcpy(dst, src, len), cop0[0] += len, cop0[1] += len + skip;
   }
 }

@@ -25,13 +25,7 @@ struct Block {
   CodePtr code;
   uint32_t len;
   uint32_t hash;
-
-  Block *next[8];
-  uint64_t next_pc[8];
-  uint64_t pad[14];
 };
-
-extern Block empty;
 
 namespace Mips {
   uint32_t compile_r4300(CodePtr *ptr);

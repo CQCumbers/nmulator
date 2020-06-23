@@ -6,7 +6,6 @@ using namespace asmjit;
 
 enum class Device { r4300, rsp };
 JitRuntime runtime;
-Block empty;
 
 namespace R4300 {
   extern uint32_t pc;
@@ -14,8 +13,6 @@ namespace R4300 {
   extern uint32_t pages[0x100000];
   extern uint32_t tlb[0x20][4];
   extern CodePtr lookup[0x20000000 / 4];
-
-  extern Block *block;
 
   int64_t mmio_read(uint32_t addr);
   void mmio_write(uint32_t addr, uint32_t val);
@@ -30,14 +27,10 @@ namespace RSP {
   extern bool step, moved;
   extern uint32_t pc;
   extern uint64_t reg_array[0x100];
-  extern uint8_t *imem;
-  extern Block *block;
-
-  extern Block blocks[0x1000];
+  extern CodePtr lookup[0x1000 / 4];
 
   uint32_t fetch(uint32_t addr);
   void mtc0(uint32_t idx, uint64_t val);
-  void print_state();
 }
 
 template <Device device>
@@ -275,7 +268,8 @@ struct MipsJit {
   uint32_t check_breaks(uint32_t pc, uint32_t next_pc) {
     if (is_rsp) {
       if (!RSP::moved) { RSP::moved = true; return next_pc; }
-      if (!RSP::step) return next_pc;
+      bool page_end = (next_pc & 0x7f) == 0x7c; // end on 128b bounds
+      if (!RSP::step/* && !page_end*/) return next_pc;
       if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(exit_label);
       return block_end;
     } else {
@@ -2457,20 +2451,8 @@ struct MipsJit {
       }
     }
 
-    // end block immediately on TLB fetch miss via check_breaks
-
     as.bind(end_label);
     if (!is_rsp) {
-      // check next instruction TLB mapped
-      /*as.mov(x86::ecx, x86::edi)
-
-      Label miss_label = as.newLabel();
-
-      as.mov(x86::eax, x86::edi), as.shr(x86::eax, 12);
-      as.cmp(x86::qword_ptr(x86::rbp, x86::rax, 3, pages), 0);
-      as.je(miss_label);*/
-      // no need for checks at all with RSP, as no MMIO or TLB
-
       as.add(x86_spill(9 + dev_cop0), cycles / 2);
       Label cont_label = as.newLabel();
       // check cause and status registers
@@ -2491,10 +2473,6 @@ struct MipsJit {
     uint32_t time = is_rsp ? cycles * 2 : cycles;
     as.sub(x86::qword_ptr(x86::rax), time), as.jl(exit_label);
 
-    // check next_pc matches and block valid
-    constexpr uint8_t hlen = 8, hash = 12;
-    constexpr uint8_t next = 16, npc = 80;
-
     if (!is_rsp) {
       // translate to physical address
       as.mov(x86::esi, x86::edi);
@@ -2507,29 +2485,16 @@ struct MipsJit {
       as.lea(x86::rsi, x86::qword_ptr(x86::rax, x86::rsi, 1));
     } else {
       as.and_(x86::edi, 0xffc);
-      as.mov(x86::rax, reinterpret_cast<uint64_t>(RSP::blocks));
-      as.mov(x86::ecx, x86::edi), as.shl(x86::ecx, 7);
-      as.lea(x86::rsi, x86::qword_ptr(x86::rax, x86::rcx));
-
-      Label loop = as.newLabel();
-      as.mov(x86::edx, x86::dword_ptr(x86::rsi, hlen)), as.xor_(x86::eax, x86::eax);
-      as.mov(x86::rcx, reinterpret_cast<uint64_t>(RSP::imem));
-      as.bind(loop), as.crc32(x86::eax, x86::dword_ptr(x86::rcx, x86::rdi));
-      as.add(x86::rcx, 4), as.sub(x86::edx, 1), as.ja(loop);
-      as.cmp(x86::eax, x86::dword_ptr(x86::rsi, hash)), as.jne(exit_label);
+      as.mov(x86::rax, (uint64_t)RSP::lookup);
+      as.lea(x86::rsi, x86::qword_ptr(x86::rax, x86::rdi, 1));
     }
     as.mov(x86::rdx, x86::qword_ptr(x86::rsi));
     as.cmp(x86::rdx, 0), as.je(exit_label);
-
-    if (is_rsp) as.mov(x86::rax, reinterpret_cast<uint64_t>(&RSP::block));
-    //else as.mov(x86::rax, reinterpret_cast<uint64_t>(&R4300::block));
-    if (is_rsp) as.mov(x86::qword_ptr(x86::rax), x86::rsi);
     as.add(x86::rdx, is_rsp ? 94 : 67); as.jmp(x86::rdx);
 
     as.bind(exit_label);
     x86_store_all(); as.pop(x86::rbp);
     as.mov(x86::eax, x86::edi); as.ret();
-    if (is_rsp) printf("Compiled block with %x bytes\n", cycles * 4);
     return cycles;
   }
 };

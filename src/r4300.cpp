@@ -68,10 +68,6 @@ namespace R4300 {
   SDL_Texture *texture = nullptr;
   uint8_t *pixels = nullptr;
 
-  //robin_hood::unordered_map<uint32_t, Block> blocks;
-  //Block blocks[addr_mask + 1];
-  robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
-
   void vi_init() {
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
     SDL_SetHint(SDL_HINT_RENDER_VSYNC, "0");
@@ -546,10 +542,9 @@ namespace R4300 {
 
   /* === Actual CPU Functions === */
 
-  //robin_hood::unordered_node_map<uint32_t, Block> blocks;
+  CodePtr lookup[0x20000000 / 4];
   robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
   const uint32_t hpage_mask = addr_mask & ~0xfff;
-  Block *block = &empty;
 
   void timer_fire() {
     cause |= 0x8000, cause &= ~0xff;
@@ -562,8 +557,6 @@ namespace R4300 {
     uint32_t cycles = cop0[11] - cop0[9];
     Sched::move(TASK_TIMER, cycles * 2);
   }
-
-  CodePtr lookup[0x20000000 / 4];
 
 #ifdef _WIN32
   uint8_t *alloc_pages(uint32_t size) {
