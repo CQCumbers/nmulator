@@ -16,57 +16,46 @@
 #endif
 
 namespace R4300 {
-  uint32_t pages[0x100000];
   uint8_t *ram = nullptr;
-
+  uint32_t pages[0x100000];
   uint32_t tlb[0x20][4];
-  constexpr uint32_t addr_mask = 0x1fffffff;
-  constexpr uint32_t page_mask = 0xfff;
 
-  bool tlb_miss = false;
-  uint32_t pc = 0xbfc00000; //0xa4000040;
-  uint64_t reg_array[0x63 + 52] = {0};
-  constexpr uint8_t hi = 0x20, lo = 0x21;
-  constexpr uint8_t dev_cop0 = 0x22, dev_cop1 = 0x42;
-
-  uint64_t &count = reg_array[9 + dev_cop0];
-  uint64_t &compare = reg_array[11 + dev_cop0];
-  uint64_t &status = reg_array[12 + dev_cop0];
-  uint64_t &cause = reg_array[13 + dev_cop0];
-
-  void joy_update(SDL_Event event);
-  void update();
+  uint32_t pc = 0xbfc00000;
+  uint64_t regs[99 + 52];
+  uint64_t *const cop0 = regs + 34;
+  uint64_t *const cop1 = regs + 66;
 
   /* === MIPS Interface registers === */
 
-  // put into array and read offset without switch?
-  constexpr uint32_t mi_version = 0x01010101;
-  uint32_t mi_irqs = 0x0, mi_mask = 0x0;
+  const uint32_t mi_version = 0x01010101;
+  uint32_t mi_irqs, mi_mask;
 
   void set_irqs(uint32_t mask) {
     mi_irqs |= mask;
-    if (mi_irqs & mi_mask) {
-      cause |= 0x400, cause &= ~0xff;
-    }
+    if (!(mi_irqs & mi_mask)) return;
+    cop0[13] |= 0x400, cop0[13] &= ~0xff;
   }
 
   void unset_irqs(uint32_t mask) {
     mi_irqs &= ~mask;
-    if (!(mi_irqs & mi_mask)) cause &= ~0x400;
+    if (mi_irqs & mi_mask) return;
+    cop0[13] &= ~0x400;
   }
 
   /* === Video Interface registers === */
 
-  uint32_t vi_status = 0x0, vi_origin = 0x0;
-  uint32_t vi_irq = 0x0, vi_line = 0x0;
-  uint32_t vi_width = 640, vi_height = 480;
-  uint32_t vi_line_progress = 0;
   bool vi_dirty = true;
+  uint32_t vi_width = 640, vi_height = 480;
+  uint32_t vi_status, vi_origin;
+  uint32_t vi_irq, vi_line;
+  uint32_t vi_line_progress;
 
-  SDL_Window *window = nullptr;
-  SDL_Renderer *renderer = nullptr;
-  SDL_Texture *texture = nullptr;
-  uint8_t *pixels = nullptr;
+  SDL_Window *window;
+  SDL_Renderer *renderer;
+  SDL_Texture *texture;
+  uint8_t *pixels;
+
+  void joy_update(SDL_Event event);
 
   void vi_init() {
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
@@ -367,8 +356,8 @@ namespace R4300 {
 
   /* === Reading and Writing === */
 
-  int64_t mmio_read(uint32_t addr) {
-    switch (addr & addr_mask) {
+  int64_t read(uint32_t addr) {
+    switch (addr & mask) {
       default: /*printf("[MMIO] read from %x\n", addr);*/ return 0;
       // RSP Interface
       case 0x4040000: return RSP::cop0[0];
@@ -409,8 +398,8 @@ namespace R4300 {
     }
   }
 
-  void mmio_write(uint32_t addr, uint32_t val) {
-    switch (addr & addr_mask) {
+  void write(uint32_t addr, uint64_t val) {
+    switch (addr & mask) {
       default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
       // RSP Interface
       case 0x4040000: RSP::cop0[0] = val & 0x1fff; return;
@@ -423,12 +412,12 @@ namespace R4300 {
       // RDP Interface
       case 0x4100000:
         // set RDP_PC_START
-        RSP::cop0[8] = val & addr_mask;
+        RSP::cop0[8] = val & mask;
         RSP::cop0[10] = RSP::cop0[8]; return;
       case 0x4100004:
         // set RDP_PC_END
         Sched::add(TASK_RDP, 0);
-        RSP::cop0[9] = val & addr_mask; return;
+        RSP::cop0[9] = val & mask; return;
       case 0x410000c:
         // update RDP_STATUS
         RSP::cop0[11] &= ~pext(val >> 0, 0x7);
@@ -440,8 +429,8 @@ namespace R4300 {
         mi_mask &= ~pext(val >> 0, 0x3f);
         mi_mask |= pext(val >> 1, 0x3f);
         if (mi_irqs & mi_mask) {
-          cause |= 0x400, cause &= ~0xff;
-        } else cause &= ~0x400; return;
+          cop0[13] |= 0x400, cop0[13] &= ~0xff;
+        } else cop0[13] &= ~0x400; return;
       // Video Interface
       case 0x4400000: 
         if (val == vi_status) return;
@@ -468,7 +457,7 @@ namespace R4300 {
         ai_16bit = (val >> 3) & 0x1, ai_dirty = true; return;
       // Peripheral Interface
       case 0x4600000: pi_ram = val & 0xffffff; return;
-      case 0x4600004: pi_rom = val & addr_mask; return;
+      case 0x4600004: pi_rom = val & mask; return;
       case 0x4600008:
         if (pi_status & 0x1) return;
         pi_len = val + 1, pi_to_rom = true;
@@ -492,16 +481,6 @@ namespace R4300 {
     }
   }
 
-  uint32_t tlb_map(uint32_t addr) {
-    // load COP0 context, bad_vaddr, entry_hi
-    uint64_t &ctx = reg_array[4 + dev_cop0];
-    ctx &= ~0x7ffff0, ctx |= (addr >> 9) & 0x7ffff0;
-    reg_array[8 + dev_cop0] = addr;
-    reg_array[10 + dev_cop0] = addr & 0xffffe000;
-    printf("TLB miss for addr: %x\n", addr);
-    return addr;
-  }
-
   // set bits 19/18 for physical pages with MMIO
   uint32_t mmio_bit(uint32_t pg, uint32_t len) {
     if (pg >= 0x3f00 && pg < 0x4000) pg |= 0xc0000;
@@ -509,9 +488,7 @@ namespace R4300 {
     return pg & ~(len - 1);  // align page address
   }
 
-  uint64_t *const cop0 = reg_array + dev_cop0;
-
-  void tlb_write(uint32_t idx) {
+  void tlb_write(uint32_t idx, uint64_t) {
     uint32_t pg = (tlb[idx][1] >> 12) & ~1;
     uint32_t len = (tlb[idx][0] >> 13) + 1;
     // unmap previous page in slot
@@ -544,10 +521,10 @@ namespace R4300 {
 
   CodePtr lookup[0x20000000 / 4];
   robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
-  const uint32_t hpage_mask = addr_mask & ~0xfff;
+  const uint32_t hpage_mask = mask & ~0xfff;
 
   void timer_fire() {
-    cause |= 0x8000, cause &= ~0xff;
+    cop0[13] |= 0x8000, cop0[13] &= ~0xff;
   }
 
   void mtc0(uint32_t idx, uint64_t val) {
@@ -585,7 +562,7 @@ namespace R4300 {
     if (sig != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
     uint8_t *addr = (uint8_t*)info->ExceptionRecord->ExceptionInformation[1];
     int64_t hpage = addr - ram;
-    if (!(0 <= hpage && hpage <= addr_mask)) exit(1);
+    if (!(0 <= hpage && hpage <= mask)) exit(1);
     unprotect(hpage & hpage_mask); return EXCEPTION_CONTINUE_EXECUTION;
   }
 
@@ -613,10 +590,10 @@ namespace R4300 {
     prot_pages[hpage].clear();
   }
 
-  void handle_fault(int sig, siginfo_t *info, void *raw_ctx) {
+  void handle_fault(int sig, siginfo_t *info, void*) {
     if (sig != SIGBUS && sig != SIGSEGV) return;
     int64_t hpage = (uint8_t*)info->si_addr - ram;
-    if (!(0 <= hpage && hpage <= addr_mask)) exit(1);
+    if (!(0 <= hpage && hpage <= mask)) exit(1);
     unprotect(hpage & hpage_mask);
   }
 
@@ -632,26 +609,26 @@ namespace R4300 {
 
   /* === Debugger interface === */
 
-  //bool broke, step;
   robin_hood::unordered_map<uint32_t, bool> breaks;
 
   // read registers in gdb MIPS order
   uint64_t read_reg(uint32_t idx) {
-    if (idx < 32) return reg_array[idx];
-    if (idx >= 38) return reg_array[idx - 38 + dev_cop1];
+    if (idx < 32) return regs[idx];
+    if (idx >= 38) return cop1[idx - 38];
     switch (idx) {
       default: printf("Invalid reg %x\n", idx), exit(1);
-      case 32: return reg_array[12 + dev_cop0];
-      case 33: return reg_array[33];
-      case 34: return reg_array[32];
-      case 35: return reg_array[8 + dev_cop0];
-      case 36: return reg_array[13 + dev_cop0];
+      case 32: return cop0[12];
+      case 33: return regs[33];
+      case 34: return regs[32];
+      case 35: return cop0[8];
+      case 36: return cop0[13];
       case 37: return pc;
     }
   }
 
   uint64_t read_mem(uint32_t addr) {
     addr = addr - pages[addr >> 12];
+    if (addr >> 31) return read(addr);
     return bswap64(*(uint64_t*)(ram + addr));
   }
  
@@ -660,9 +637,10 @@ namespace R4300 {
     breaks[addr] = active;
   }
 
-  // ignore breakpoint if just stopped
-  bool get_break(uint32_t addr) {
-    if (broke) return broke = false;
+  // ignore breakpoint if just broke
+  // stop compiler at 4kb boundaries
+  int64_t stop_at(uint32_t addr) {
+    if (!(addr & 0xfff)) return true;
     return broke = step || breaks[addr];
   }
 
@@ -678,6 +656,17 @@ namespace R4300 {
   }
 
   /* === Recompiler interface === */
+
+  MipsConfig cfg = {
+    .regs = regs, .cop0 = 34,
+    .cop1 = 66, .pool = 99,
+    .lookup = lookup, .mtc0 = mtc0,
+    .fetch = fetch, .stop_at = stop_at,
+
+    .pages = pages, .tlb = tlb[0],
+    .read = read, .write = write,
+    .tlbwi = tlb_write
+  };
 
   uint32_t crc32(uint8_t *bytes, uint32_t len) {
     uint32_t crc = 0, *msg = (uint32_t*)bytes;
@@ -695,9 +684,10 @@ namespace R4300 {
         if (!broke) continue;
         step = Debugger::update(&dbg_config);
         memset(lookup, 0, sizeof(lookup));
+        broke = false;
       } else {
         protect(ppc & hpage_mask);
-        Mips::compile_r4300(lookup + ppc / 4);
+        Mips::compile_r4300(&cfg, pc, lookup + ppc / 4);
       }
     }
     Sched::add(TASK_R4300, 0);
@@ -705,7 +695,7 @@ namespace R4300 {
 
   void init(const char *filename) {
     // allocate memory, setup change detection
-    ram = alloc_pages(0x20000000);
+    ram = cfg.mem = alloc_pages(0x20000000);
     setup_fault_handler();
 
     // (paddr >> 18) == 3 for unmapped regions
@@ -743,7 +733,7 @@ namespace R4300 {
     }
 
     // setup other components
-    Mips::init_pool(reg_array + 99);
+    Mips::init_pool(regs + 99);
     vi_init(), RDP::init();
     RSP::init(ram + 0x04000000);
   }

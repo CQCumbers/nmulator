@@ -15,8 +15,7 @@ static uint32_t crc32(uint8_t *bytes, uint32_t len) {
 namespace RSP { uint8_t *mem, *imem; }
 
 namespace RSP {
-  const uint32_t addr_mask = 0xfff;
-  bool step = false, moved = false;
+  bool step = false;
   bool hash_dirty = true;
 
   CodePtr lookup[0x1000 / 4];
@@ -27,20 +26,11 @@ namespace RSP {
     return read32(imem + addr);
   }
 
-  uint64_t reg_array[200];
-  uint64_t *const cop0 = reg_array + 32;
-
-  const uint8_t dev_cop0 = 0x20, dev_cop2 = 0x40, dev_cop2c = 0x86;
-  robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
+  uint64_t regs[200];
+  uint64_t *const cop0 = regs + 32;
   uint32_t pc = 0x0;
 
-  inline bool halted() {
-    return reg_array[4 + dev_cop0] & 0x1;
-  }
-
-  inline bool broke() {
-    return (reg_array[4 + dev_cop0] & 0x42) == 0x42;
-  }
+  robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
 
   void mtc0(uint32_t idx, uint64_t val) {
     switch (idx &= 0x1f) {
@@ -74,13 +64,25 @@ namespace RSP {
     }
   }
 
+  // stop early if single-stepping
+  int64_t stop_at(uint32_t) {
+    return step;
+  }
+
+  MipsConfig cfg = {
+    .regs = regs, .cop0 = 32,
+    .cop2 = 64, .pool = 148,
+    .lookup = lookup, .mtc0 = mtc0,
+    .fetch = fetch, .stop_at = stop_at
+  };
+
   void update() {
     while (Sched::until >= 0) {
-      if (halted()) return;
+      if (cop0[4] & 0x1) return;
       CodePtr code = lookup[pc / 4];
       if (code) {
         pc = code() & 0xffc;
-        if (broke()) R4300::set_irqs(0x1);
+        if ((cop0[4] & 0x42) == 0x42) R4300::set_irqs(0x1);
       } else {
         bool skip_compile = false;
         for (auto &backup : backups[pc]) {
@@ -93,8 +95,8 @@ namespace RSP {
         }
         if (skip_compile) continue;
 
-        Block block = {0};
-        block.len = Mips::compile_rsp(&block.code);
+        Block block;
+        block.len = Mips::compile_rsp(&cfg, pc, &block.code);
         block.hash = crc32(imem + pc, block.len * 4);
         printf("Compiled new at %x with hash %x\n", pc, block.hash);
         backups[pc].push_back(block);
@@ -135,7 +137,7 @@ void RSP::dma(uint32_t val, bool to_ram) {
 
 void RSP::init(uint8_t *mem) {
   // set mem pointer, initial cop0 values
-  RSP::mem = mem, imem = mem + 0x1000;
+  RSP::mem = cfg.mem = mem, imem = mem + 0x1000;
   cop0[4] = 0x1, cop0[11] = 0x80;
-  Mips::init_pool(reg_array + 148);
+  Mips::init_pool(regs + 148);
 }

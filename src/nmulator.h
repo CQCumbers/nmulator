@@ -7,19 +7,26 @@
 
 /* === MIPS-to-x64 JIT compiler === */
 
-typedef uint64_t (*ReadPtr)(uint32_t addr);
+typedef int64_t (*ReadPtr)(uint32_t addr);
+typedef uint32_t (*FetchPtr)(uint32_t addr);
 typedef void (*WritePtr)(uint32_t addr, uint64_t val);
 typedef uint32_t (*CodePtr)();
 
-/*struct MipsConfig {
-  ReadPtr read;
-  WritePtr write;
+struct MipsConfig {
   uint64_t *regs;
   uint32_t cop0, cop1;
   uint32_t cop2, pool;
   uint8_t *mem;
-  uint32_t *pages;
-};*/
+  CodePtr *lookup;
+  FetchPtr fetch;
+  WritePtr mtc0;
+  ReadPtr stop_at;
+
+  uint32_t *pages, *tlb;
+  ReadPtr read;
+  WritePtr write;
+  WritePtr tlbwi;
+};
 
 struct Block {
   CodePtr code;
@@ -28,8 +35,8 @@ struct Block {
 };
 
 namespace Mips {
-  uint32_t compile_r4300(CodePtr *ptr);
-  uint32_t compile_rsp(CodePtr *ptr);
+  uint32_t compile_r4300(MipsConfig *cfg, uint32_t pc, CodePtr *ptr);
+  uint32_t compile_rsp(MipsConfig *cfg, uint32_t pc, CodePtr *ptr);
   void init_pool(uint64_t *pool);
 }
 
@@ -104,32 +111,32 @@ namespace RDP {
 /* === Common utilities === */
 
 inline uint64_t bswap64(uint64_t x) {
-	return (
-		((x & 0x00000000000000ff) << 56) |
-		((x & 0x000000000000ff00) << 40) |
-		((x & 0x0000000000ff0000) << 24) |
-		((x & 0x00000000ff000000) <<  8) |
-		((x & 0x000000ff00000000) >>  8) |
-		((x & 0x0000ff0000000000) >> 24) |
-		((x & 0x00ff000000000000) >> 40) |
-		((x & 0xff00000000000000) >> 56)
-	);
+  return (
+    ((x & 0x00000000000000ff) << 56) |
+    ((x & 0x000000000000ff00) << 40) |
+    ((x & 0x0000000000ff0000) << 24) |
+    ((x & 0x00000000ff000000) <<  8) |
+    ((x & 0x000000ff00000000) >>  8) |
+    ((x & 0x0000ff0000000000) >> 24) |
+    ((x & 0x00ff000000000000) >> 40) |
+    ((x & 0xff00000000000000) >> 56)
+  );
 }
 
 inline uint32_t bswap32(uint32_t x) {
-	return (
-		((x & 0x000000ff) << 24) |
-		((x & 0x0000ff00) <<  8) |
-		((x & 0x00ff0000) >>  8) |
-		((x & 0xff000000) >> 24)
-	);
+  return (
+    ((x & 0x000000ff) << 24) |
+    ((x & 0x0000ff00) <<  8) |
+    ((x & 0x00ff0000) >>  8) |
+    ((x & 0xff000000) >> 24)
+  );
 }
 
 inline uint16_t bswap16(uint16_t x) {
-	return (
-		((x & 0x00ff) <<  8) |
-		((x & 0xff00) >>  8)
-	);
+  return (
+    ((x & 0x00ff) <<  8) |
+    ((x & 0xff00) >>  8)
+  );
 }
 
 inline uint32_t pext(uint32_t val, uint32_t mask) {
