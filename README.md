@@ -1,15 +1,16 @@
 # nmulator
-> A broken N64 emulator
+> A WIP N64 emulator
 
-nmulator is a work-in-progress Nintendo 64 emulator for PCs. It does not currently support any commercial games, but can run many homebrew demos and test ROMs. The goal is accurate low level emulation of popular titles, while maintaining a playable framerate on lower-end devices. Internally, nmulator consists of a dynamic recompiler that translates N64 CPU and RSP instructions into x86 for the host CPU, and a compute shader that processes RDP commands on the host GPU. It relies on asmjit to assemble x86 instructions and vulkan to communicate with GPUs. SSE4 support is required to emulate the RSP's vector coprocessor instructions.
+nmulator is a work-in-progress Nintendo 64 emulator for PCs. It currently only boots a handful of commercial games, all with numerous graphical inaccuracies, primarily due to an incomplete RDP implementation. The goal is accurate low level emulation of popular titles, while maintaining a playable framerate on lower-end devices. Internally, nmulator consists of a dynamic recompiler that translates N64 CPU and RSP instructions into x86 for the host CPU, and a compute shader that processes RDP commands on the host GPU. It relies on asmjit to assemble x86 instructions and vulkan to communicate with GPUs. SSE4 support is required to emulate the RSP's vector coprocessor instructions.
 
 ## Todo List
-- RDP 2-cycle mode, indexed texture formats
-- RSP control registers, transposed loads/stores
-- More accurate component timings, memory access synchronization
-- Configurable guest page tables, TLB emulation
-- Inline page table lookup on memory access
-- Optimize shader architecture
+- Support save files and controllers
+- Debug compute RDP against Angrylion
+- Batch triangles across render targets
+- Handle TLB exceptions used in Goldeneye
+- Optimize reused block lookup, change detection
+- Link direct branches in R4300 code
+- Implement RSP transposed loads/stores
 
 ## Building
 The following has only been tested on macos Catalina.

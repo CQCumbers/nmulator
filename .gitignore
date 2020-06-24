@@ -15,6 +15,7 @@ nmulator
 # for personal usage
 .DS_Store
 gdb-entitlement.xml
+pifdata.bin
 roms/
 *~
 
