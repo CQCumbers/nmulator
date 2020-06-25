@@ -5,15 +5,11 @@
 #else
 #  include <netinet/in.h>
 #  include <sys/socket.h>
-#  include <sys/select.h>
 #endif
 
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
-#include <numeric>
-
+#include <stdlib.h>
 #include "nmulator.h"
 
 using sock_t = decltype(socket(0, 0, 0));
@@ -162,7 +158,7 @@ static void read_mem(sock_t sockfd, const char *cmd_buf) {
   uint32_t addr = strtoul(cmd_buf + 1, &ptr, 16);
   uint32_t len = strtoul(ptr + 1, NULL, 16);
   for (unsigned i = 0; i < len; i += 8)
-    sprintf(buf + i * 2, "%016" PRIx64, cfg->read_mem(addr + i));
+    sprintf(buf + i * 2, "%016llx", cfg->read_mem(addr + i));
   send_gdb(sockfd, buf);
 }
 

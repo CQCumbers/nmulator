@@ -1,9 +1,3 @@
-#include <vector>
-#include "robin_hood.h"
-
-#include <immintrin.h>
-#include "nmulator.h"
-
 #ifdef _WIN32
 #  include <SDL.h>
 #  undef main
@@ -14,6 +8,12 @@
 #  include <sys/mman.h>
 #  include <signal.h>
 #endif
+
+#include <vector>
+#include "robin_hood.h"
+
+#include <nmmintrin.h>
+#include "nmulator.h"
 
 namespace R4300 { uint8_t *ram; }
 static uint32_t pages[0x100000];
@@ -160,7 +160,7 @@ static void ai_config() {
     .freq = (int)(ntsc_clock / (ai_rate + 1)) << !ai_16bit,
     .format = fmt, .channels = 2, .samples = 256,
   };
-  audio_dev = SDL_OpenAudioDevice(nullptr, 0, &spec, nullptr, 0);
+  audio_dev = SDL_OpenAudioDevice(NULL, 0, &spec, NULL, 0);
   SDL_PauseAudioDevice(audio_dev, 0);
 }
 
@@ -597,7 +597,7 @@ static void setup_fault_handler() {
   act.sa_sigaction = handle_fault;
   act.sa_flags = SA_RESTART | SA_SIGINFO;
   sigemptyset(&act.sa_mask);
-  sigaction(SIGBUS, &act, nullptr);
+  sigaction(SIGBUS, &act, NULL);
 }
 
 #endif
@@ -698,7 +698,7 @@ void R4300::update() {
       broke = false;
     } else {
       protect(ppc >> 12);
-      Mips::compile_r4300(&cfg, pc, lookup + ppc / 4);
+      Mips::jit(&cfg, pc, lookup + ppc / 4);
     }
   }
   Sched::add(TASK_R4300, 0);

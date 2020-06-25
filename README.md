@@ -1,5 +1,5 @@
 # nmulator
-> A WIP N64 emulator
+> A broken N64 emulator
 
 nmulator is a work-in-progress Nintendo 64 emulator for PCs. It currently only boots a handful of commercial games, all with numerous graphical inaccuracies, primarily due to an incomplete RDP implementation. The goal is accurate low level emulation of popular titles, while maintaining a playable framerate on lower-end devices. Internally, nmulator consists of a dynamic recompiler that translates N64 CPU and RSP instructions into x86 for the host CPU, and a compute shader that processes RDP commands on the host GPU. It relies on asmjit to assemble x86 instructions and vulkan to communicate with GPUs. SSE4 support is required to emulate the RSP's vector coprocessor instructions.
 

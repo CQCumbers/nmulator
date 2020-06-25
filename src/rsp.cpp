@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <immintrin.h>
+#include <nmmintrin.h>
 #include "nmulator.h"
 
 #include <vector>
@@ -97,7 +97,8 @@ static MipsConfig cfg = {
   .regs = regs, .cop0 = 32,
   .cop2 = 64, .pool = 148,
   .lookup = lookup, .mtc0 = mtc0,
-  .fetch = fetch, .stop_at = stop_at
+  .fetch = fetch, .stop_at = stop_at,
+  .is_rsp = true
 };
 
 robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
@@ -131,7 +132,7 @@ void RSP::update() {
 
       // compile code, store length and hash in backup
       Block block;
-      block.len = Mips::compile_rsp(&cfg, pc, &block.code);
+      block.len = Mips::jit(&cfg, pc, &block.code);
       block.hash = crc32(imem + pc, block.len * 4);
       printf("Compiled new at %x with hash %x\n", pc, block.hash);
       backups[pc].push_back(block);

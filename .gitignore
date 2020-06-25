@@ -17,6 +17,9 @@ nmulator
 gdb-entitlement.xml
 pifdata.bin
 roms/
+screenshots/
+dump.bin
+log*
 *~
 
 # cmake generated files

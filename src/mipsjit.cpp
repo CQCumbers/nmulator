@@ -4,7 +4,6 @@
 
 using namespace asmjit;
 
-template <bool is_rsp>
 struct MipsJit {
   MipsConfig &cfg;
   x86::Assembler as;
@@ -1171,7 +1170,7 @@ struct MipsJit {
 
   void tlbr() {
     constexpr uint8_t entry_reg[4] = {5, 10, 2, 3};
-    as.mov(x86::rsi, reinterpret_cast<uint64_t>(cfg.tlb));
+    as.mov(x86::rsi, (uint64_t)cfg.tlb);
     as.mov(x86::eax, x86_spill(cfg.cop0));
     as.shl(x86::eax, 4), as.add(x86::rsi, x86::eax);
     for (uint8_t i = 0; i < 4; ++i) {
@@ -1189,7 +1188,7 @@ struct MipsJit {
   }
 
   void tlbp() {
-    as.mov(x86::rsi, reinterpret_cast<uint64_t>(cfg.tlb));
+    as.mov(x86::rsi, (uint64_t)cfg.tlb);
     as.mov(x86::ecx, x86_spill(10 + cfg.cop0)), as.xor_(x86::eax, x86::eax);
     as.mov(x86::edx, x86_spill(cfg.cop0)), as.or_(x86::edx, 0x80000000);
     for (uint8_t i = 0; i < 32; ++i) {
@@ -1512,9 +1511,8 @@ struct MipsJit {
   }
 
   void invalid(uint32_t instr) {
-    printf("Unimplemented instruction %x\n", instr);
-    printf("is_rsp: %x\n", is_rsp);
-    exit(1);
+    const char *name = cfg.is_rsp ? "RSP" : "R4300";
+    printf("Invalid %s instruction %x\n", name, instr), exit(1);
   }
 
   enum VMUDN_Type { VMULF, VMULU, VMUDL, VMUDM, VMUDN, VMUDH };
@@ -2351,8 +2349,6 @@ struct MipsJit {
     cop1_checked = false, exc_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
       uint32_t instr = cfg.fetch(pc);
-      //if (is_rsp) printf("RSP PC: %x, instr: %x\n", pc);
-      //if (!is_rsp) printf("R4300 PC: %x\n", pc);
       pc = cycles ? check_breaks(pc, next_pc) : next_pc;
       switch (next_pc += 4, instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
@@ -2413,7 +2409,7 @@ struct MipsJit {
     }
 
     as.bind(end_label);
-    if (!is_rsp) {
+    if (!cfg.is_rsp) {
       as.add(x86_spill(9 + cfg.cop0), cycles / 2);
       Label cont_label = as.newLabel();
       // check cause and status registers
@@ -2430,8 +2426,8 @@ struct MipsJit {
     }
 
     // check still_top (no intervening events)
-    as.mov(x86::rax, reinterpret_cast<uint64_t>(&Sched::until));
-    uint32_t time = is_rsp ? cycles * 2 : cycles;
+    as.mov(x86::rax, (uint64_t)&Sched::until);
+    uint32_t time = cfg.is_rsp ? cycles * 2 : cycles;
     as.sub(x86::qword_ptr(x86::rax), time), as.jl(exit_label);
 
     if (cfg.pages) {
@@ -2460,26 +2456,9 @@ struct MipsJit {
   }
 };
 
+/* === Wrapper interface === */
 
-JitRuntime runtime;
-
-uint32_t Mips::compile_r4300(MipsConfig *cfg, uint32_t pc, CodePtr *ptr) {
-  CodeHolder code;
-  code.init(runtime.codeInfo());
-  MipsJit<false> jit(cfg, code);
-  uint32_t len = jit.jit_block(pc);
-  runtime.add(ptr, &code);
-  return len;
-}
-
-uint32_t Mips::compile_rsp(MipsConfig *cfg, uint32_t pc, CodePtr *ptr) {
-  CodeHolder code;
-  code.init(runtime.codeInfo());
-  MipsJit<true> jit(cfg, code);
-  uint32_t len = jit.jit_block(pc);
-  runtime.add(ptr, &code);
-  return len;
-}
+static JitRuntime runtime;
 
 static const uint16_t pool[26 * 8] = {
   // unaligned load/store
@@ -2516,7 +2495,15 @@ static const uint16_t pool[26 * 8] = {
   0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100, 0x0100,
 };
 
-// eventually, pass cfg* instead of uint64_t*
+uint32_t Mips::jit(MipsConfig *cfg, uint32_t pc, CodePtr *ptr) {
+  CodeHolder code;
+  code.init(runtime.codeInfo());
+  MipsJit jit(cfg, code);
+  uint32_t len = jit.jit_block(pc);
+  runtime.add(ptr, &code);
+  return len;
+}
+
 void Mips::init_pool(uint64_t *pool_ptr) {
   memcpy(pool_ptr, pool, sizeof(pool));
 }
