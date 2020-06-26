@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define printf(fmt, ...) (0)
+//#define printf(fmt, ...) (0)
 
 /* === MIPS-to-x64 JIT compiler === */
 
@@ -21,6 +21,7 @@ struct MipsConfig {
   FetchPtr fetch;
   WritePtr mtc0;
   ReadPtr stop_at;
+  bool is_rsp;
 
   uint32_t *pages, *tlb;
   ReadPtr read;
@@ -35,8 +36,7 @@ struct Block {
 };
 
 namespace Mips {
-  uint32_t compile_r4300(MipsConfig *cfg, uint32_t pc, CodePtr *ptr);
-  uint32_t compile_rsp(MipsConfig *cfg, uint32_t pc, CodePtr *ptr);
+  uint32_t jit(MipsConfig *cfg, uint32_t pc, CodePtr *ptr);
   void init_pool(uint64_t *pool);
 }
 

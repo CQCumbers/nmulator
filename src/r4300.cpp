@@ -245,14 +245,15 @@ static uint8_t crc8(const uint8_t *msg, uint32_t len) {
 // mempak to pifram, len = read length + 1 crc byte
 static void mempak_read(uint32_t pc, uint8_t len) {
   uint32_t mem = read16(R4300::ram + pc) & ~0x1f;
-  memcpy(R4300::ram + pc + 2, mempak + mem, --len);
+  memcpy(R4300::ram + pc + 2, mempak + mem / 8, --len);
   R4300::ram[pc + 2 + len] = crc8(R4300::ram + pc + 2, len);
 }
 
 // pifram to mempak, len = 2 address bytes + write data length
 static void mempak_write(uint32_t pc, uint8_t len) {
   uint32_t mem = read16(R4300::ram + pc) & ~0x1f;
-  memcpy(mempak + mem, R4300::ram + pc + 2, len - 2);
+  if (mem == 0x8000) return;  // ignore enable/disable
+  memcpy(mempak + mem / 8, R4300::ram + pc + 2, len - 2);
   R4300::ram[pc + len] = crc8(R4300::ram + pc + 2, len - 2);
 }
 
@@ -519,6 +520,7 @@ static void tlb_write(uint32_t idx, uint64_t) {
 
 // read instruction from vaddr
 static uint32_t fetch(uint32_t addr) {
+  //printf("R4300 PC: %x\n", addr);
   addr = addr - pages[addr >> 12];
   if (addr >> 31) printf("Invalid fetch of %x\n", addr);
   return read32(R4300::ram + addr);

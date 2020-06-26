@@ -28,10 +28,10 @@ static void unprotect(uint32_t addr, uint8_t *src, uint32_t len) {
 
     // clear lookup table if change detected
     if (!((old_ ^ new_) & mask)) continue;
-    uint32_t pg = (addr + i) & 0xf80;
-    memset(code_mask + pg, 0, 0x80);
-    memset(lookup + pg / 4, 0, 0x100);
-    i = (i & 0xf80) | 0x78;
+    uint32_t pg = (addr + i) & 0xf00;
+    memset(code_mask + pg, 0, 0x100);
+    memset(lookup + pg / 4, 0, 0x200);
+    i = ((addr + i) & ~0xff) + 0xf8 - addr;
   }
 }
 
@@ -67,6 +67,7 @@ void RSP::set_status(uint32_t val) {
 
 // read instruction, mark code address
 static uint32_t fetch(uint32_t addr) {
+  //printf("RSP PC: %x\n", addr);
   write32(code_mask + addr, 0xffffffff);
   return read32(imem + addr);
 }
@@ -89,7 +90,8 @@ static void mtc0(uint32_t idx, uint64_t val) {
   }
 }
 
-static int64_t stop_at(uint32_t) {
+static int64_t stop_at(uint32_t addr) {
+  if (!(addr & 0xff)) return true;
   return false;  // true to single-step
 }
 
@@ -134,7 +136,6 @@ void RSP::update() {
       Block block;
       block.len = Mips::jit(&cfg, pc, &block.code);
       block.hash = crc32(imem + pc, block.len * 4);
-      printf("Compiled new at %x with hash %x\n", pc, block.hash);
       backups[pc].push_back(block);
       lookup[pc / 4] = block.code;
     }

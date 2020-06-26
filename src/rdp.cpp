@@ -1,6 +1,5 @@
 #include <vulkan/vulkan.h>
 #include <array>
-#include <vector>
 #include <string.h>
 #include <stdio.h>
 #include "nmulator.h"
@@ -125,13 +124,13 @@ namespace Vulkan {
     // check all vulkan physical devices
     uint32_t n_gpus = 0;
     vkEnumeratePhysicalDevices(instance, &n_gpus, 0);
-    std::vector<VkPhysicalDevice> gpus(n_gpus);
+    std::array<VkPhysicalDevice, 16> gpus;
     vkEnumeratePhysicalDevices(instance, &n_gpus, gpus.data());
     for (VkPhysicalDevice gpu_ : gpus) {
       // check queue families on each device
       uint32_t n_queues = 0;
       vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, 0);
-      std::vector<VkQueueFamilyProperties> queues(n_queues);
+      std::array<VkQueueFamilyProperties, 16> queues;
       vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, queues.data());
       // if queue family supports compute, init virtual device
       for (uint32_t i = 0; i < n_queues; ++i) {
