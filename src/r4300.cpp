@@ -64,7 +64,7 @@ static void vi_init() {
   const uint32_t flags = SDL_WINDOW_ALLOW_HIGHDPI;
   SDL_CreateWindowAndRenderer(640, 480, flags, &window, &renderer);
   SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
-  SDL_RenderClear(renderer);
+  SDL_RenderClear(renderer), SDL_SetWindowTitle(window, title);
 }
 
 // convert rgba5551 to bgra8888, 16 byte aligned len
@@ -287,12 +287,12 @@ static void mempak_init(const char *name) {
   // open or create mempak file
   int file = open(name, O_RDWR | O_CREAT | O_EXCL, 0644), exists;
   if ((exists = file < 0 && errno == EEXIST)) file = open(name, O_RDWR);
-  if (file < 0) printf("Can't open %s\n", name);
+  if (file < 0) printf("Can't open %s\n", name), exit(1);
 
   // map mempak file into memory
-  if (ftruncate(file, 0x8000) < 0) printf("Can't modify %s\n", name);
-  mempak = (uint64_t*)mmap(NULL, 0x8000, PROT_READ | PROT_WRITE,
-    MAP_FILE | MAP_SHARED, file, 0);
+  if (ftruncate(file, 0x8000) < 0) printf("Can't modify %s\n", name), exit(1);
+  mempak = (uint64_t*)mmap(NULL, 0x8000,
+    PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
   if (!exists) memcpy(mempak, mempak_blank, 272);
 }
 
@@ -315,12 +315,12 @@ static void eeprom_init(char *name) {
   // change extension to .eep, open file
   strcpy(name + strlen(name) - 4, ".eep");
   int file = open(name, O_RDWR | O_CREAT, 0644);
-  if (file < 0) printf("Can't open %s\n", name);
+  if (file < 0) printf("Can't open %s\n", name), exit(1);
 
   // map 4kbit eeprom file into memory
-  if (ftruncate(file, 0x200) < 0) printf("Can't modify %s\n", name);
-  eeprom = (uint64_t*)mmap(NULL, 0x200, PROT_READ | PROT_WRITE,
-    MAP_FILE | MAP_SHARED, file, 0);
+  if (ftruncate(file, 0x200) < 0) printf("Can't modify %s\n", name), exit(1);
+  eeprom = (uint64_t*)mmap(NULL, 0x200,
+    PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
 }
 
 // eeprom to pifram, len = read length
@@ -598,6 +598,7 @@ static uint32_t fetch(uint32_t addr) {
 
 static CodePtr lookup[0x20000000 / 4];
 robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
+uint8_t *sram;
 
 #ifdef _WIN32
 
@@ -641,6 +642,18 @@ static uint8_t *alloc_pages(uint32_t size) {
     MAP_ANONYMOUS | MAP_SHARED, 0, 0);
 }
 
+static void sram_protect() {
+  mprotect(R4300::ram + 0x8000000, 0x10000, PROT_NONE);
+}
+
+static void sram_init(char *name) {
+  strcpy(name + strlen(name) - 4, ".sra");
+  int file = open(name, O_RDWR | O_CREAT, 0644);
+  if (file < 0 || ftruncate(file, 0x10000) < 0) exit(1);
+  sram = (uint8_t*)mmap(R4300::ram + 0x8000000, 0x10000,
+    PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, file, 0);
+}
+
 static void protect(uint32_t pg) {
   if (prot_pages[pg].empty())
     mprotect(R4300::ram + (pg << 12), 0x1000, PROT_READ);
@@ -649,6 +662,7 @@ static void protect(uint32_t pg) {
 }
 
 static void unprotect(uint32_t pg) {
+  if (0x8000 <= pg && pg < 0x8010 && !sram) sram_init(strdup(title));
   for (uint32_t addr : prot_pages[pg]) lookup[addr] = NULL;
   mprotect(R4300::ram + (pg << 12), 0x1000, PROT_READ | PROT_WRITE);
   prot_pages[pg].clear();
@@ -797,7 +811,7 @@ void R4300::init(const char *name) {
   if (!rom) printf("Can't find rom %s\n", name), exit(1);
   fread(ram + 0x10000000, 1, 0x4000000, rom), fclose(rom);
   memcpy(ram + 0x4000000, ram + 0x10000000, 0x40000);
-  mempak_init("mempak.mpk");  // shared mempak, per-ROM eeprom
+  mempak_init("mempak.mpk"), sram_protect();
 
   // read PIF boot rom, setup ram based on CIC
   FILE *pifrom = fopen("pifdata.bin", "r");
