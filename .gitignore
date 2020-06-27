@@ -16,6 +16,7 @@ nmulator
 .DS_Store
 gdb-entitlement.xml
 pifdata.bin
+mempak.mpk
 roms/
 screenshots/
 dump.bin
