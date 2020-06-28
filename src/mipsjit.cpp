@@ -2341,6 +2341,9 @@ struct MipsJit {
 
   uint32_t jit_block(uint32_t pc) {
     as.push(x86::rbp);
+#ifdef _WIN32
+    as.push(x86::rdi), as.push(x86::rsi);
+#endif
     as.mov(x86::rbp, (uint64_t)cfg.regs);
     x86_load_all();
 
@@ -2450,8 +2453,12 @@ struct MipsJit {
     as.add(x86::rdx, cfg.cop2 ? 94 : 67); as.jmp(x86::rdx);
 
     as.bind(exit_label);
-    x86_store_all(); as.pop(x86::rbp);
-    as.mov(x86::eax, x86::edi); as.ret();
+    x86_store_all();
+    as.mov(x86::eax, x86::edi);
+#ifdef _WIN32
+    as.pop(x86::rsi), as.pop(x86::rdi);
+#endif
+    as.pop(x86::rbp), as.ret();
     return cycles;
   }
 };

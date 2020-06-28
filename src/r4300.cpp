@@ -1,20 +1,22 @@
 #ifdef _WIN32
 #  include <SDL.h>
 #  undef main
-#  include <memory.h>
+#  define _AMD64_
+#  include <memoryapi.h>
 #  include <errhandlingapi.h>
+#  include <io.h>
 #else
 #  include <SDL2/SDL.h>
 #  include <sys/mman.h>
 #  include <signal.h>
 #  include <unistd.h>
-#  include <fcntl.h>
-#  include <errno.h>
 #endif
 
 #include <vector>
 #include "robin_hood.h"
 
+#include <fcntl.h>
+#include <errno.h>
 #include <nmmintrin.h>
 #include "nmulator.h"
 
@@ -283,6 +285,36 @@ static const uint8_t mempak_blank[272] = {
   0x00, 0x03, 0x00, 0x03, 0x00, 0x03, 0x00, 0x03
 };
 
+#ifdef _WIN32
+
+static void mempak_init(const char *name) {
+  // open or create mempak file
+  int mode = _S_IREAD | _S_IWRITE, exists;
+  int file = _open(name, _O_RDWR | _O_CREAT | _O_EXCL, mode);
+  if ((exists = file < 0 && errno == EEXIST)) file = _open(name, _O_RDWR);
+  if (file < 0) printf("Can't open %s\n", name), exit(1);
+
+  // map mempak file into memory
+  if (_chsize(file, 0x8000) < 0) printf("Can't modify %s\n", name), exit(1);
+  mempak = (uint64_t*)MapViewOfFile((HANDLE)_get_osfhandle(file),
+    FILE_MAP_ALL_ACCESS, 0, 0, 0x8000), _close(file);
+  if (!exists) memcpy(mempak, mempak_blank, 272);
+}
+
+static void eeprom_init(char *name) {
+  // change extension to .eep, open file
+  strcpy(name + strlen(name) - 4, ".eep");
+  int file = _open(name, _O_RDWR | _O_CREAT, _S_IREAD | _S_IWRITE);
+  if (file < 0) printf("Can't open %s\n", name), exit(1);
+
+  // map 4kbit eeprom file into memory
+  if (_chsize(file, 0x200) < 0) printf("Can't modify %s\n", name), exit(1);
+  mempak = (uint64_t*)MapViewOfFile((HANDLE)_get_osfhandle(file),
+    FILE_MAP_ALL_ACCESS, 0, 0, 0x200), _close(file);
+}
+
+#else
+
 static void mempak_init(const char *name) {
   // open or create mempak file
   int file = open(name, O_RDWR | O_CREAT | O_EXCL, 0644), exists;
@@ -291,10 +323,24 @@ static void mempak_init(const char *name) {
 
   // map mempak file into memory
   if (ftruncate(file, 0x8000) < 0) printf("Can't modify %s\n", name), exit(1);
-  mempak = (uint64_t*)mmap(NULL, 0x8000,
-    PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
+  mempak = (uint64_t*)mmap(NULL, 0x8000, PROT_READ | PROT_WRITE,
+    MAP_SHARED, file, 0), close(file);
   if (!exists) memcpy(mempak, mempak_blank, 272);
 }
+
+static void eeprom_init(char *name) {
+  // change extension to .eep, open file
+  strcpy(name + strlen(name) - 4, ".eep");
+  int file = open(name, O_RDWR | O_CREAT, 0644);
+  if (file < 0) printf("Can't open %s\n", name), exit(1);
+
+  // map 4kbit eeprom file into memory
+  if (ftruncate(file, 0x200) < 0) printf("Can't modify %s\n", name), exit(1);
+  eeprom = (uint64_t*)mmap(NULL, 0x200, PROT_READ | PROT_WRITE,
+    MAP_SHARED, file, 0), close(file);
+}
+
+#endif
 
 // mempak to pifram, len = read length + 1 crc byte
 static void mempak_read(uint32_t pc, uint8_t len) {
@@ -309,18 +355,6 @@ static void mempak_write(uint32_t pc, uint8_t len) {
   if (mem == 0x8000) return;  // ignore enable/disable
   memcpy(mempak + mem / 8, R4300::ram + pc + 2, len - 2);
   R4300::ram[pc + len] = crc8(R4300::ram + pc + 2, len - 2);
-}
-
-static void eeprom_init(char *name) {
-  // change extension to .eep, open file
-  strcpy(name + strlen(name) - 4, ".eep");
-  int file = open(name, O_RDWR | O_CREAT, 0644);
-  if (file < 0) printf("Can't open %s\n", name), exit(1);
-
-  // map 4kbit eeprom file into memory
-  if (ftruncate(file, 0x200) < 0) printf("Can't modify %s\n", name), exit(1);
-  eeprom = (uint64_t*)mmap(NULL, 0x200,
-    PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
 }
 
 // eeprom to pifram, len = read length
@@ -607,18 +641,32 @@ static uint8_t *alloc_pages(uint32_t size) {
     MEM_COMMIT, PAGE_READWRITE);
 }
 
+static void sram_protect() {
+  DWORD old = PAGE_READWRITE;
+  VirtualProtect(R4300::ram + 0x8000000, 0x10000, PAGE_NOACCESS, &old);
+}
+
+static void sram_init(char *name) {
+  strcpy(name + strlen(name) - 4, ".sra");
+  int file = _open(name, _O_RDWR | _O_CREAT, 0644);
+  if (file < 0 || _chsize(file, 0x10000) < 0) exit(1);
+  sram = (uint8_t*)MapViewOfFileEx((HANDLE)_get_osfhandle(file),
+    FILE_MAP_ALL_ACCESS, 0, 0, 0x10000, R4300::ram + 0x8000000);
+  _close(file);
+}
+
 static void protect(uint32_t pg) {
-  DWORD old;
+  DWORD old = PAGE_READWRITE;
   if (prot_pages[pg].empty())
-    VirtualProtect(ram + (pg << 12), 0x1000, PAGE_READONLY, &old);
+    VirtualProtect(R4300::ram + (pg << 12), 0x1000, PAGE_READONLY, &old);
   uint32_t ppc = pc - pages[pc >> 12];
   prot_pages[pg].push_back(ppc / 4);
 }
 
 static void unprotect(uint32_t pg) {
-  DWORD old;
+  DWORD old = PAGE_READONLY;
   for (uint32_t addr : prot_pages[pg]) lookup[addr] = NULL;
-  VirtualProtect(ram + (pg << 12), 0x1000, PAGE_READWRITE, &old);
+  VirtualProtect(R4300::ram + (pg << 12), 0x1000, PAGE_READWRITE, &old);
   prot_pages[pg].clear();
 }
 
@@ -652,6 +700,7 @@ static void sram_init(char *name) {
   if (file < 0 || ftruncate(file, 0x10000) < 0) exit(1);
   sram = (uint8_t*)mmap(R4300::ram + 0x8000000, 0x10000,
     PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, file, 0);
+  close(file);
 }
 
 static void protect(uint32_t pg) {
@@ -739,6 +788,7 @@ void R4300::timer_fire() {
 // update timer on cop0 write
 static void mtc0(uint32_t idx, uint64_t val) {
   cop0[idx &= 0x1f] = val;
+  printf("Ran mtc0\n");
   if (idx != 9 && idx != 11) return;
   if (idx == 11) cop0[13] &= ~0x8000;
   uint32_t cycles = cop0[11] - cop0[9];
@@ -755,8 +805,8 @@ static int64_t stop_at(uint32_t addr) {
 static MipsConfig cfg = {
   .regs = regs, .cop0 = 34,
   .cop1 = 66, .pool = 99,
-  .lookup = lookup, .mtc0 = mtc0,
-  .fetch = fetch, .stop_at = stop_at,
+  .lookup = lookup, .fetch = fetch,
+  .mtc0 = mtc0, .stop_at = stop_at,
 
   .pages = pages, .tlb = tlb[0],
   .read = read, .write = write,

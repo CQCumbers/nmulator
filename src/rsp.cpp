@@ -98,8 +98,8 @@ static int64_t stop_at(uint32_t addr) {
 static MipsConfig cfg = {
   .regs = regs, .cop0 = 32,
   .cop2 = 64, .pool = 148,
-  .lookup = lookup, .mtc0 = mtc0,
-  .fetch = fetch, .stop_at = stop_at,
+  .lookup = lookup, .fetch = fetch,
+  .mtc0 = mtc0, .stop_at = stop_at,
   .is_rsp = true
 };
 
