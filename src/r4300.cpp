@@ -61,7 +61,7 @@ static void joy_update(SDL_Event event);
 
 // setup SDL renderer for display
 static void vi_init() {
-  SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+  SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER);
   SDL_SetHint(SDL_HINT_RENDER_VSYNC, "0");
   const uint32_t flags = SDL_WINDOW_ALLOW_HIGHDPI;
   SDL_CreateWindowAndRenderer(640, 480, flags, &window, &renderer);
@@ -408,51 +408,55 @@ static void si_update() {
   }
 }
 
+static const uint32_t keys[16] = {
+  SDLK_x, SDLK_c, SDLK_z, SDLK_RETURN,  // A, B, Z, Start
+  SDLK_k, SDLK_j, SDLK_h, SDLK_i,       // D-pad U/D/L/R
+  0x0000, 0x0000, SDLK_a, SDLK_s,       // Trigger L/R
+  SDLK_o, SDLK_i, SDLK_u, SDLK_p        // C-pad U/D/L/R
+};
+
+static const uint8_t ctrl[12] = {
+  0x00, 0x01, 0xff, 0x06,  // A, B, INVALID, START
+  0x0b, 0x0c, 0x0d, 0x0e,  // UP, DOWN, LEFT, RIGHT
+  0xff, 0xff, 0x09, 0x0a   // LEFTSHOULDER, RIGHTSHOULDER
+}; // SDL_CONTROLLER_BUTTON values
+
 // read controller inputs from SDL
 static void joy_update(SDL_Event event) {
   if (event.type == SDL_KEYDOWN) {
-    switch (event.key.keysym.sym) {
-      case SDLK_x: buttons |= (1 << 15); break;  // A
-      case SDLK_c: buttons |= (1 << 14); break;  // B
-      case SDLK_z: buttons |= (1 << 13); break;  // Z
-      case SDLK_RETURN: buttons |= (1 << 12); break;  // Start
-      case SDLK_k: buttons |= (1 << 11); break;  // D Up
-      case SDLK_j: buttons |= (1 << 10); break;  // D Down
-      case SDLK_h: buttons |= (1 << 9); break;   // D Left
-      case SDLK_l: buttons |= (1 << 8); break;   // D Right
-      case SDLK_o: buttons |= (1 << 3); break;   // C Up
-      case SDLK_i: buttons |= (1 << 2); break;   // C Down
-      case SDLK_u: buttons |= (1 << 1); break;   // C Left
-      case SDLK_p: buttons |= (1 << 0); break;   // C Right
-      case SDLK_a: buttons |= (1 << 5); break;   // Trigger Left
-      case SDLK_s: buttons |= (1 << 4); break;   // Trigger Right
-      case SDLK_UP: joy_y = 80; break;           // Stick Up
-      case SDLK_DOWN: joy_y = -80; break;        // Stick Down
-      case SDLK_LEFT: joy_x = -80; break;        // Stick Left
-      case SDLK_RIGHT: joy_x = 80; break ;       // Stick Right
-    }
+    uint32_t k = event.key.keysym.sym;
+    if (k == SDLK_UP) joy_y = 80;
+    if (k == SDLK_DOWN) joy_y = -80;
+    if (k == SDLK_LEFT) joy_x = -80;
+    if (k == SDLK_RIGHT) joy_x = 80;
+    for (uint32_t i = 0; i < 16; ++i)
+      if (k == keys[i]) buttons |= 0x8000 >> i;
   } else if (event.type == SDL_KEYUP) {
-    switch (event.key.keysym.sym) {
-      case SDLK_x: buttons &= ~(1 << 15); break;  // A
-      case SDLK_c: buttons &= ~(1 << 14); break;  // B
-      case SDLK_z: buttons &= ~(1 << 13); break;  // Z
-      case SDLK_RETURN: buttons &= ~(1 << 12); break;  // Start
-      case SDLK_k: buttons &= ~(1 << 11); break;  // D Up
-      case SDLK_j: buttons &= ~(1 << 10); break;  // D Down
-      case SDLK_h: buttons &= ~(1 << 9); break;   // D Left
-      case SDLK_l: buttons &= ~(1 << 8); break;   // D Right
-      case SDLK_o: buttons &= ~(1 << 3); break;   // C Up
-      case SDLK_i: buttons &= ~(1 << 2); break;   // C Down
-      case SDLK_u: buttons &= ~(1 << 1); break;   // C Left
-      case SDLK_p: buttons &= ~(1 << 0); break;   // C Right
-      case SDLK_a: buttons &= ~(1 << 5); break;   // Trigger Left
-      case SDLK_s: buttons &= ~(1 << 4); break;   // Trigger Right
-      case SDLK_UP: joy_y = 0; break;             // Stick Up
-      case SDLK_DOWN: joy_y = 0; break;           // Stick Down
-      case SDLK_LEFT: joy_x = 0; break;           // Stick Left
-      case SDLK_RIGHT: joy_x = 0; break;          // Stick Right
-      case SDLK_q: RDP::dump = true; break;
-    }
+    uint32_t k = event.key.keysym.sym;
+    if (k == SDLK_UP) joy_y = 0;
+    if (k == SDLK_DOWN) joy_y = 0;
+    if (k == SDLK_LEFT) joy_x = 0;
+    if (k == SDLK_RIGHT) joy_x = 0;
+    for (uint32_t i = 0; i < 16; ++i)
+      if (k == keys[i]) buttons &= ~(0x8000 >> i);
+  } else if (event.type == SDL_CONTROLLERBUTTONDOWN) {
+    for (uint32_t i = 0, k = event.cbutton.button; i < 12; ++i)
+      if (k == ctrl[i]) buttons |= (0x8000 >> i);
+  } else if (event.type == SDL_CONTROLLERBUTTONDOWN) {
+    for (uint32_t i = 0, k = event.cbutton.button; i < 12; ++i)
+      if (k == ctrl[i]) buttons &= ~(0x8000 >> i);
+  } else if (event.type == SDL_CONTROLLERAXISMOTION) {
+    uint32_t a = event.caxis.axis, v = event.caxis.value;
+    if (a == SDL_CONTROLLER_AXIS_LEFTX) joy_x = v >> 8;
+    if (a == SDL_CONTROLLER_AXIS_LEFTY) joy_y = -v >> 8;
+    if (a == SDL_CONTROLLER_AXIS_RIGHTX)
+      (v == 0x7fff ? buttons |= 0x1 : buttons &= ~0x1),
+      (v == 0x8000 ? buttons |= 0x2 : buttons &= ~0x2);
+    if (a == SDL_CONTROLLER_AXIS_RIGHTY)
+      (v == 0x7fff ? buttons |= 0x4 : buttons &= ~0x4),
+      (v == 0x8000 ? buttons |= 0x8 : buttons &= ~0x8);
+    if (a == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
+      (v == 0x7fff ? buttons |= 0x2000 : buttons &= ~0x2000);
   }
 }
 
@@ -788,7 +792,6 @@ void R4300::timer_fire() {
 // update timer on cop0 write
 static void mtc0(uint32_t idx, uint64_t val) {
   cop0[idx &= 0x1f] = val;
-  printf("Ran mtc0\n");
   if (idx != 9 && idx != 11) return;
   if (idx == 11) cop0[13] &= ~0x8000;
   uint32_t cycles = cop0[11] - cop0[9];
