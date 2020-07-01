@@ -296,8 +296,9 @@ static void mempak_init(const char *name) {
 
   // map mempak file into memory
   if (_chsize(file, 0x8000) < 0) printf("Can't modify %s\n", name), exit(1);
-  mempak = (uint64_t*)MapViewOfFile((HANDLE)_get_osfhandle(file),
-    FILE_MAP_ALL_ACCESS, 0, 0, 0x8000), _close(file);
+  HANDLE fh = (HANDLE)_get_osfhandle(file);
+  HANDLE mh = CreateFileMappingW(fh, NULL, PAGE_READWRITE, 0, 0, NULL);
+  mempak = (uint64_t*)MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, 0x8000);
   if (!exists) memcpy(mempak, mempak_blank, 272);
 }
 
@@ -309,8 +310,9 @@ static void eeprom_init(char *name) {
 
   // map 4kbit eeprom file into memory
   if (_chsize(file, 0x200) < 0) printf("Can't modify %s\n", name), exit(1);
-  mempak = (uint64_t*)MapViewOfFile((HANDLE)_get_osfhandle(file),
-    FILE_MAP_ALL_ACCESS, 0, 0, 0x200), _close(file);
+  HANDLE fh = (HANDLE)_get_osfhandle(file);
+  HANDLE mh = CreateFileMappingW(fh, NULL, PAGE_READWRITE, 0, 0, NULL);
+  eeprom = (uint64_t*)MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, 0x200);
 }
 
 #else
@@ -419,7 +421,7 @@ static const uint8_t ctrl[12] = {
   0x00, 0x01, 0xff, 0x06,  // A, B, INVALID, START
   0x0b, 0x0c, 0x0d, 0x0e,  // UP, DOWN, LEFT, RIGHT
   0xff, 0xff, 0x09, 0x0a   // LEFTSHOULDER, RIGHTSHOULDER
-}; // SDL_CONTROLLER_BUTTON values
+};
 
 // read controller inputs from SDL
 static void joy_update(SDL_Event event) {
@@ -654,9 +656,10 @@ static void sram_init(char *name) {
   strcpy(name + strlen(name) - 4, ".sra");
   int file = _open(name, _O_RDWR | _O_CREAT, 0644);
   if (file < 0 || _chsize(file, 0x10000) < 0) exit(1);
-  sram = (uint8_t*)MapViewOfFileEx((HANDLE)_get_osfhandle(file),
-    FILE_MAP_ALL_ACCESS, 0, 0, 0x10000, R4300::ram + 0x8000000);
-  _close(file);
+  HANDLE fh = (HANDLE)_get_osfhandle(file);
+  HANDLE mh = CreateFileMappingW(fh, NULL, PAGE_READWRITE, 0, 0, NULL);
+  sram = (uint8_t*)MapViewOfFileEx(mh, FILE_MAP_ALL_ACCESS,
+    0, 0, 0x10000, R4300::ram + 0x8000000);
 }
 
 static void protect(uint32_t pg) {

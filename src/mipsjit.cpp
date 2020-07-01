@@ -137,15 +137,17 @@ struct MipsJit {
     }
   }
 
+  // arg0 rcx preserved, arg1 rsi clobbered
+  // rbx, rbp, rdi, rsp, r12-r15 preserved
   void x86_call(uint64_t func) {
 #ifdef _WIN32
-    as.mov(x86::rcx, x86::rdi);
-    as.mov(x86::rdx, x86::rsi);
-    as.sub(x86::rsp, 32);
-    as.call(func);
-    as.add(x86::rsp, 32);
+    as.push(x86::rcx), as.sub(x86::rsp, 32);
+    as.mov(x86::rdx, x86::rsi), as.call(func);
+    as.add(x86::rsp, 32), as.pop(x86::rcx);
 #else
-    as.call(func);
+    as.push(x86::rdi), as.push(x86::rdi), as.push(x86::rcx);
+    as.mov(x86::rdi, x86::rcx), as.call(func);
+    as.pop(x86::rcx), as.pop(x86::rdi), as.pop(x86::rdi);
 #endif
   }
 
@@ -258,13 +260,8 @@ struct MipsJit {
   inline void x86_paddr_miss(Label miss, uint64_t func) {
     Label after = as.newLabel();
     as.jmp(after), as.bind(miss);
-    //as.bt(x86::ecx, 30), as.jc(tlb_exc);
-    //as.call(write_thunk), as.bind(after);
-    as.add(x86::ecx, x86::dword_ptr(x86::rax, x86::rdx, 2));
-    as.push(x86::rdi), x86_store_caller();
-    as.mov(x86::edi, x86::ecx), x86_call(func);
-    x86_load_caller(), as.pop(x86::rdi);
-    as.bind(after);
+    x86_store_caller(), x86_call(func);
+    x86_load_caller(), as.bind(after);
   }
 
   template <typename T>
@@ -285,7 +282,7 @@ struct MipsJit {
     } else if (sizeof(T) == 1) {
       as.movzx(x86::eax, x86::byte_ptr(x86::rax, x86::rcx));
     }
-    // translation miss handler (arg0 ecx)
+    // translation miss handler
     uint64_t func = (uint64_t)cfg.read;
     if (cfg.pages) x86_paddr_miss(miss, func);
   }
@@ -309,7 +306,7 @@ struct MipsJit {
     } else if (sizeof(T) == 1) {
       as.movsx(x86::rax, x86::byte_ptr(x86::rax, x86::rcx));
     }
-    // translation miss handler (arg0 ecx)
+    // translation miss handler
     uint64_t func = (uint64_t)cfg.read;
     if (cfg.pages) x86_paddr_miss(miss, func);
   }
@@ -319,6 +316,7 @@ struct MipsJit {
     // translate virtual address
     Label miss = as.newLabel();
     if (cfg.pages && !phys) x86_paddr(miss);
+    if (cfg.pages && phys) as.cmp(x86::ecx, 0), as.js(miss);
     if (!cfg.pages) as.and_(x86::ecx, 0xfff);
     // writes rsi to paddr ecx
     as.mov(x86::rax, (uint64_t)cfg.mem);
@@ -331,9 +329,9 @@ struct MipsJit {
     } else if (sizeof(T) == 1) {
       as.mov(x86::byte_ptr(x86::rax, x86::rcx), x86::sil);
     }
-    // translation miss handler (arg0 ecx, arg1 esi)
+    // translation miss handler
     uint64_t func = (uint64_t)cfg.write;
-    if (cfg.pages && !phys) x86_paddr_miss(miss, func);
+    if (cfg.pages) x86_paddr_miss(miss, func);
   }
 
   template <typename T>
@@ -400,10 +398,11 @@ struct MipsJit {
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
     int32_t off = right * ((int32_t)sizeof(T) - 1);
-    as.add(x86::ecx, imm(instr) - off), as.mov(x86::esi, x86::ecx);
+    as.add(x86::ecx, imm(instr) - off);
     // load byte-swapped data from address
     constexpr bool sign = T(-1) < T(0);
     sign ? x86_read_s<T>() : x86_read<T>();
+    as.mov(x86::esi, x86::ecx);
     if (right) as.dec(x86::esi);
     as.and_(x86::esi, (uint8_t)sizeof(T) - 1);
     right ? as.not_(x86::rsi) : as.neg(x86::rsi);
@@ -1181,10 +1180,9 @@ struct MipsJit {
 
   template <bool rand>
   void tlbwi() {
-    as.push(x86::rdi), x86_store_caller();
-    as.mov(x86::edi, x86_spill(rand + cfg.cop0));
-    as.and_(x86::edi, 0x1f), x86_call((uint64_t)cfg.tlbwi);
-    x86_load_caller(), as.pop(x86::rdi);
+    x86_store_caller(), as.mov(x86::ecx, x86_spill(rand + cfg.cop0));
+    as.and_(x86::ecx, 0x1f), x86_call((uint64_t)cfg.tlbwi);
+    x86_load_caller();
   }
 
   void tlbp() {
@@ -1218,9 +1216,8 @@ struct MipsJit {
       else as.movsxd(x86::rsi, x86_spill(rt(instr)));
     } else as.xor_(x86::esi, x86::esi);
     // pass cop0 index to callback
-    as.push(x86::edi), x86_store_caller();
-    as.mov(x86::edi, rd(instr)), x86_call((uint64_t)cfg.mtc0);
-    x86_load_caller(), as.pop(x86::edi);
+    x86_store_caller(), as.mov(x86::ecx, rd(instr));
+    x86_call((uint64_t)cfg.mtc0), x86_load_caller();
   }
 
   enum ADD_FMT_Type {
@@ -2347,7 +2344,7 @@ struct MipsJit {
     as.mov(x86::rbp, (uint64_t)cfg.regs);
     x86_load_all();
 
-    uint32_t cycles = 0;
+    uint32_t cycles = 0, start = (uint32_t)as.offset();
     end_label = as.newLabel(), exit_label = as.newLabel();
     cop1_checked = false, exc_label = as.newLabel();
     for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
@@ -2442,15 +2439,14 @@ struct MipsJit {
       as.sub(x86::esi, off);
       // get function pointer from table
       as.mov(x86::rax, (uint64_t)cfg.lookup);
-      as.lea(x86::rsi, x86::qword_ptr(x86::rax, x86::rsi, 1));
+      as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rsi, 1));
     } else {
       as.and_(x86::edi, 0xffc);
       as.mov(x86::rax, (uint64_t)cfg.lookup);
-      as.lea(x86::rsi, x86::qword_ptr(x86::rax, x86::rdi, 1));
+      as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rdi, 1));
     }
-    as.mov(x86::rdx, x86::qword_ptr(x86::rsi));
     as.cmp(x86::rdx, 0), as.je(exit_label);
-    as.add(x86::rdx, cfg.cop2 ? 94 : 67); as.jmp(x86::rdx);
+    as.add(x86::rdx, start); as.jmp(x86::rdx);
 
     as.bind(exit_label);
     x86_store_all();
