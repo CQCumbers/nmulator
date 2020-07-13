@@ -117,7 +117,7 @@ void RSP::update() {
     if (cop0[4] & 0x1) return;
     CodePtr code = lookup[pc / 4];
     if (code) {
-      pc = code() & 0xffc;
+      pc = Mips::run(&cfg, code) & 0xffc;
       if ((cop0[4] & 0x42) == 0x42) R4300::set_irqs(0x1);
     } else {
       // search backup blocks for matching hash
@@ -145,7 +145,8 @@ void RSP::update() {
 
 void RSP::init(uint8_t *mem) {
   // set mem pointer, initial cop0 values
-  RSP::mem = cfg.mem = mem, imem = mem + 0x1000;
+  RSP::mem = cfg.mem = mem;
+  imem = mem + 0x1000;
   cop0[4] = 0x1, cop0[11] = 0x80;
-  Mips::init_pool(regs + 148);
+  Mips::init(&cfg);
 }

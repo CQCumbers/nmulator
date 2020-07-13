@@ -16,17 +16,20 @@ struct MipsConfig {
   uint64_t *regs;
   uint32_t cop0, cop1;
   uint32_t cop2, pool;
+
   uint8_t *mem;
   CodePtr *lookup;
-  FetchPtr fetch;
   WritePtr mtc0;
-  ReadPtr stop_at;
-  bool is_rsp;
 
   uint32_t *pages, *tlb;
+  uint64_t thunks[4];
   ReadPtr read;
   WritePtr write;
   WritePtr tlbwi;
+
+  FetchPtr fetch;
+  ReadPtr stop_at;
+  bool is_rsp;
 };
 
 struct Block {
@@ -36,8 +39,9 @@ struct Block {
 };
 
 namespace Mips {
+  uint32_t run(MipsConfig *cfg, CodePtr ptr);
   uint32_t jit(MipsConfig *cfg, uint32_t pc, CodePtr *ptr);
-  void init_pool(uint64_t *pool);
+  void init(MipsConfig *cfg);
 }
 
 /* === Scheduler and debugger === */

@@ -67,6 +67,7 @@ static void vi_init() {
   SDL_CreateWindowAndRenderer(640, 480, flags, &window, &renderer);
   SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
   SDL_RenderClear(renderer), SDL_SetWindowTitle(window, title);
+  for (uint32_t i = 0; i < SDL_NumJoysticks(); ++i) SDL_GameControllerOpen(i);
 }
 
 // convert rgba5551 to bgra8888, 16 byte aligned len
@@ -444,13 +445,13 @@ static void joy_update(SDL_Event event) {
   } else if (event.type == SDL_CONTROLLERBUTTONDOWN) {
     for (uint32_t i = 0, k = event.cbutton.button; i < 12; ++i)
       if (k == ctrl[i]) buttons |= (0x8000 >> i);
-  } else if (event.type == SDL_CONTROLLERBUTTONDOWN) {
+  } else if (event.type == SDL_CONTROLLERBUTTONUP) {
     for (uint32_t i = 0, k = event.cbutton.button; i < 12; ++i)
       if (k == ctrl[i]) buttons &= ~(0x8000 >> i);
   } else if (event.type == SDL_CONTROLLERAXISMOTION) {
-    uint32_t a = event.caxis.axis, v = event.caxis.value;
+    uint16_t a = event.caxis.axis, v = event.caxis.value;
     if (a == SDL_CONTROLLER_AXIS_LEFTX) joy_x = v >> 8;
-    if (a == SDL_CONTROLLER_AXIS_LEFTY) joy_y = -v >> 8;
+    if (a == SDL_CONTROLLER_AXIS_LEFTY) joy_y = ~v >> 8;
     if (a == SDL_CONTROLLER_AXIS_RIGHTX)
       (v == 0x7fff ? buttons |= 0x1 : buttons &= ~0x1),
       (v == 0x8000 ? buttons |= 0x2 : buttons &= ~0x2);
@@ -831,7 +832,7 @@ void R4300::update() {
     uint32_t ppc = pc - pages[pc >> 12];
     CodePtr code = lookup[ppc / 4];
     if (code) {
-      pc = code();
+      pc = Mips::run(&cfg, code);
       if (!broke) continue;
       step = Debugger::update(&dbg);
       memset(lookup, 0, sizeof(lookup));
@@ -885,7 +886,7 @@ void R4300::init(const char *name) {
   }
 
   // setup other components
-  Mips::init_pool(regs + 99);
+  Mips::init(&cfg);
   vi_init(), RDP::init();
   RSP::init(ram + 0x04000000);
 }
