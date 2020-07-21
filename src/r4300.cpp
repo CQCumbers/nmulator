@@ -196,10 +196,91 @@ static uint32_t pi_status, pi_len;
 static uint32_t pi_ram, pi_rom;
 static bool pi_to_rom;
 
+enum FramMode {
+  FRAM_STATUS, FRAM_ID,
+  FRAM_WRITE, FRAM_READ,
+  FRAM_CLEAR, FRAM_ERASE
+};
+
+static uint8_t *fram;
+static uint32_t fram_pg, fram_mode;
+static uint32_t fram_status, fram_src;
+const bool has_fram = false;
+
+#ifdef _WIN32
+
+static void eeprom_init(char *name) {
+  // change extension to .fla, open file
+  strcpy(name + strlen(name) - 4, ".fla");
+  int file = _open(name, _O_RDWR | _O_CREAT, _S_IREAD | _S_IWRITE);
+  if (file < 0) printf("Can't open %s\n", name), exit(1);
+
+  // map 1mbit flashram file into memory
+  if (_chsize(file, 0x20000) < 0) printf("Can't modify %s\n", name), exit(1);
+  HANDLE fh = (HANDLE)_get_osfhandle(file);
+  HANDLE mh = CreateFileMappingW(fh, NULL, PAGE_READWRITE, 0, 0, NULL);
+  eeprom = (uint64_t*)MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, 0x20000);
+}
+
+#else
+
+static void fram_init(char *name) {
+  // change extension to .fla, open file
+  strcpy(name + strlen(name) - 4, ".fla");
+  int file = open(name, O_RDWR | O_CREAT, 0644);
+  if (file < 0) printf("Can't open %s\n", name), exit(1);
+
+  // map 1mbit flashram file into memory
+  if (ftruncate(file, 0x20000) < 0) printf("Can't modify %s\n", name), exit(1);
+  fram = (uint8_t*)mmap(NULL, 0x20000, PROT_READ | PROT_WRITE,
+    MAP_SHARED, file, 0), close(file);
+}
+
+#endif
+
+// run flashram command on mapped write
+static void fram_write(uint32_t cmd) {
+  uint32_t off = 0;
+  switch (cmd >> 24) {
+    case 0x4b:   // set erase page
+      fram_pg = (cmd & 0xff80) << 7;
+      fram_mode = FRAM_ERASE; break;
+    case 0x78:   // trigger erase
+      if (fram_mode == FRAM_CLEAR)
+        memset(fram, 0xff, 0x20000);
+      if (fram_mode == FRAM_ERASE)
+        memset(fram + fram_pg, 0xff, 0x4000);
+      fram_status |= 0x8;
+      fram_mode = FRAM_STATUS; break;
+    case 0xa5:  // trigger write
+      off = (cmd & 0xff80) << 7; fram_status |= 0x4;
+      memcpy(fram + off, R4300::ram + fram_src, 0x80);
+      fram_mode = FRAM_STATUS; break;
+    case 0xd2: fram_mode = FRAM_STATUS; break;
+    case 0xe1: fram_mode = FRAM_ID; break;
+    case 0xb4: fram_mode = FRAM_WRITE; break;
+    case 0xf0: fram_mode = FRAM_READ; break;
+    case 0x3c: fram_mode = FRAM_CLEAR; break;
+  }
+}
+
+// handle PI DMAs to/from flashram
+static void fram_dma() {
+  uint64_t fram_id = 0x1111800100c20000;
+  if (pi_to_rom && fram_mode == FRAM_WRITE)
+    fram_src = (pi_ram & 0xffff) * 2;
+  if (!pi_to_rom && !pi_rom && fram_mode == FRAM_ID)
+    *(uint64_t*)(R4300::ram + pi_ram) = bswap64(fram_id);
+  if (!pi_to_rom && pi_rom && fram_mode == FRAM_READ)
+    memcpy(R4300::ram + pi_ram, fram, pi_len);
+  R4300::set_irqs(0x10), pi_status &= ~0x1;
+}
+
 // DMA bytes from cartridge to RDRAM, or vice-versa
 void R4300::pi_update() {
   uint8_t *src = ram + (pi_to_rom ? pi_ram : pi_rom);
   uint8_t *dst = ram + (pi_to_rom ? pi_rom : pi_ram);
+  if (has_fram && (pi_rom >> 16) == 0x800) return fram_dma();
   memcpy(dst, src, pi_len), set_irqs(0x10), pi_status &= ~0x1;
 }
 
@@ -520,6 +601,8 @@ static int64_t read(uint32_t addr) {
     case 0x4700010: return 0x63634;  // RI_REFRESH
     // Serial Interface
     case 0x4800018: return (mi_irqs & 0x2) << 11;
+    // FlashRAM Interface
+    case 0x8000000: return (fram_mode ? 0 : fram_status);
   }
 }
 
@@ -621,6 +704,11 @@ static void write(uint32_t addr, uint64_t val) {
       memcpy(ram + 0x1fc007c0, ram + si_ram, 0x40);
       R4300::set_irqs(0x2); return;
     case 0x4800018: R4300::unset_irqs(0x2); return;
+    // FlashRAM Interface
+    case 0x8000000:
+      if (fram_mode != FRAM_STATUS) return;
+      fram_status = val & 0xff; return;
+    case 0x8010000: fram_write(val); return;
   }
 }
 
@@ -629,6 +717,7 @@ static uint32_t mmio_bit(uint32_t pg, uint32_t len) {
   pg &= 0x1ffff;
   if (pg >= 0x3f00 && pg < 0x4000) pg |= 0x80000;
   if (pg >= 0x4002 && pg < 0x8000) pg |= 0x80000;
+  if (has_fram && pg >= 0x8000 && pg < 0x8020) pg |= 0x80000;
   return pg & ~(len - 1);  // align page address
 }
 
@@ -695,17 +784,17 @@ static uint8_t *alloc_pages(uint32_t size) {
 
 static void sram_protect() {
   DWORD old = PAGE_READWRITE;
-  VirtualProtect(R4300::ram + 0x8000000, 0x10000, PAGE_NOACCESS, &old);
+  VirtualProtect(R4300::ram + 0x8000000, 0x8000, PAGE_NOACCESS, &old);
 }
 
 static void sram_init(char *name) {
   strcpy(name + strlen(name) - 4, ".sra");
   int file = _open(name, _O_RDWR | _O_CREAT, 0644);
-  if (file < 0 || _chsize(file, 0x10000) < 0) exit(1);
+  if (file < 0 || _chsize(file, 0x8000) < 0) exit(1);
   HANDLE fh = (HANDLE)_get_osfhandle(file);
   HANDLE mh = CreateFileMappingW(fh, NULL, PAGE_READWRITE, 0, 0, NULL);
   sram = (uint8_t*)MapViewOfFileEx(mh, FILE_MAP_ALL_ACCESS,
-    0, 0, 0x10000, R4300::ram + 0x8000000);
+    0, 0, 0x8000, R4300::ram + 0x8000000);
 }
 
 static void protect(uint32_t pg) {
@@ -750,8 +839,8 @@ static void sram_protect() {
 static void sram_init(char *name) {
   strcpy(name + strlen(name) - 4, ".sra");
   int file = open(name, O_RDWR | O_CREAT, 0644);
-  if (file < 0 || ftruncate(file, 0x10000) < 0) exit(1);
-  sram = (uint8_t*)mmap(R4300::ram + 0x8000000, 0x10000,
+  if (file < 0 || ftruncate(file, 0x8000) < 0) exit(1);
+  sram = (uint8_t*)mmap(R4300::ram + 0x8000000, 0x8000,
     PROT_READ | PROT_WRITE, MAP_FIXED | MAP_SHARED, file, 0);
   close(file);
 }
@@ -922,6 +1011,7 @@ void R4300::init(const char *name) {
   fread(ram + 0x10000000, 1, 0x4000000, rom), fclose(rom);
   memcpy(ram + 0x4000000, ram + 0x10000000, 0x40000);
   mempak_init("mempak.mpk"), sram_protect();
+  if (has_fram) fram_init(strdup(title));
 
   // read PIF boot rom, setup ram based on CIC
   FILE *pifrom = fopen("pifdata.bin", "r");
