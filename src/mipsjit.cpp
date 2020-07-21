@@ -167,9 +167,29 @@ struct MipsJit {
     as.ret();
 
     // TLB miss thunk
-    /*as.mov(x86::edi, 0x80000180);
+    // assumes not in branch delay, EXL = 0
+    cfg.thunks[2] = (uint32_t)as.offset();
+    // Cause
+    uint32_t reg = (13 + cfg.cop0) << 3;
+    as.mov(x86::byte_ptr(x86::rbp, reg), x86::eax);
+    // Status, EPC
     as.or_(x86_spill(12 + cfg.cop0), 0x2);
-    // setup cop0 registers for TLB miss*/
+    as.mov(x86_spill(14 + cfg.cop0), x86::edi);
+    Label valid = as.newLabel();
+    as.bt(x86::ecx, 29), as.mov(x86::edi, 0x80000000);
+    as.jnc(valid), as.add(x86::edi, 0x180), as.bind(valid);
+    // BadVAddr
+    as.and_(x86::ecx, 0xfff), as.mov(x86::eax, x86::edx);
+    as.shl(x86::eax, 12), as.or_(x86::ecx, x86::eax);
+    as.mov(x86_spill(8 + cfg.cop0), x86::ecx);
+    // Context
+    as.mov(x86::eax, x86_spill(4 + cfg.cop0));
+    as.and_(x86::eax, 0xff000000), as.and_(x86::edx, 0xffffe);
+    as.shl(x86::edx, 3), as.or_(x86::eax, x86::edx);
+    as.mov(x86_spill(4 + cfg.cop0), x86::eax);
+    // EntryHi
+    as.shl(x86::edx, 9);
+    as.mov(x86_spill(10 + cfg.cop0), x86::edx);
 
     // JIT return thunk
     cfg.thunks[3] = (uint32_t)as.offset();
@@ -180,7 +200,7 @@ struct MipsJit {
     as.pop(x86::rbp), as.ret();
 
     // JIT entrance thunk
-    cfg.thunks[2] = (uint32_t)as.offset();
+    cfg.thunks[4] = (uint32_t)as.offset();
     as.push(x86::rbp);
 #ifdef _WIN32
     as.push(x86::rdi), as.push(x86::rsi);
@@ -280,7 +300,8 @@ struct MipsJit {
 
   uint32_t check_breaks(uint32_t pc, uint32_t next_pc) {
     if (!cfg.stop_at(pc)) return next_pc;
-    if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(cfg.thunks[3]);
+    // ensure it actually returns to C++
+    if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
     return block_end;
   }
 
@@ -295,16 +316,20 @@ struct MipsJit {
     as.sub(x86::ecx, off), as.js(miss);
   }
 
-  // fallback to MMIO or jump to TLB miss thunk
+  // fallback to MMIO or jump to TLB miss
+  // paddr in ecx, vpage in edx, pc in edi
   inline void x86_miss(Label miss, uint64_t thunk) {
     Label after = as.newLabel();
     as.jmp(after), as.bind(miss);
-    //as.bt(x86::ecx, 30), as.jc(tlb_thunk);
+    as.mov(x86::eax, thunk == cfg.thunks[1] ? 12 : 8);
+    as.bt(x86::ecx, 30), as.jc(cfg.thunks[2]);
     as.call(thunk), as.bind(after);
   }
 
   template <typename T>
-  inline void x86_read() {
+  inline void x86_read(uint32_t pc) {
+    bool early = pc != block_end && cfg.pages;
+    if (early) as.mov(x86::edi, pc);
     // translate virtual address
     Label miss = as.newLabel();
     if (cfg.pages) x86_paddr(miss);
@@ -326,7 +351,9 @@ struct MipsJit {
   }
 
   template <typename T>
-  inline void x86_read_s() {
+  inline void x86_read_s(uint32_t pc) {
+    bool early = pc != block_end && cfg.pages;
+    if (early) as.mov(x86::edi, pc);
     // translate virtual address
     Label miss = as.newLabel();
     if (cfg.pages) x86_paddr(miss);
@@ -349,7 +376,9 @@ struct MipsJit {
   }
 
   template <typename T, bool phys=false>
-  inline void x86_write() {
+  inline void x86_write(uint32_t pc) {
+    bool early = pc != block_end && cfg.pages;
+    if (early && !phys) as.mov(x86::edi, pc);
     // translate virtual address
     Label miss = as.newLabel();
     if (cfg.pages && !phys) x86_paddr(miss);
@@ -371,7 +400,7 @@ struct MipsJit {
   }
 
   template <typename T>
-  void lw(uint32_t instr) {
+  void lw(uint32_t instr, uint32_t pc) {
     if (rt(instr) == 0) return;
     // LW BASE(RS), RT, OFFSET(IMMEDIATE)
     uint8_t rsx = x86_reg(rs(instr));
@@ -380,7 +409,7 @@ struct MipsJit {
     as.add(x86::ecx, imm(instr));
     // load byte-swapped data from address
     constexpr bool sign = T(-1) < T(0);
-    sign ? x86_read_s<T>() : x86_read<T>();
+    sign ? x86_read_s<T>(pc) : x86_read<T>(pc);
     // move data into register
     uint8_t rtx = x86_reg(rt(instr));
     if (rtx) as.mov(x86::gpq(rtx), x86::rax);
@@ -388,7 +417,7 @@ struct MipsJit {
   }
 
   template <typename T>
-  void sw(uint32_t instr) {
+  void sw(uint32_t instr, uint32_t pc) {
     // SW BASE(RS), RT, OFFSET(IMMEDIATE)
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
@@ -398,11 +427,11 @@ struct MipsJit {
     uint8_t rtx = x86_reg(rt(instr));
     if (rtx) as.mov(x86::rsi, x86::gpq(rtx));
     else as.mov(x86::rsi, x86_spilld(rt(instr)));
-    x86_write<T>();
+    x86_write<T>(pc);
   }
 
   template <typename T, bool right>
-  void lwl(uint32_t instr) {
+  void lwl(uint32_t instr, uint32_t pc) {
     if (rt(instr) == 0) return;
     // LWL BASE(RS), RT, OFFSET(IMMEDIATE)
     uint8_t rsx = x86_reg(rs(instr));
@@ -412,7 +441,7 @@ struct MipsJit {
     as.add(x86::ecx, imm(instr) - off);
     // load byte-swapped data from address
     constexpr bool sign = T(-1) < T(0);
-    sign ? x86_read_s<T>() : x86_read<T>();
+    sign ? x86_read_s<T>(pc) : x86_read<T>(pc);
     if (right) as.dec(x86::ecx);
     as.and_(x86::ecx, (uint8_t)sizeof(T) - 1);
     right ? as.not_(x86::rcx) : as.neg(x86::rcx);
@@ -428,7 +457,7 @@ struct MipsJit {
   }
 
   template <typename T, bool right>
-  void swl(uint32_t instr) {
+  void swl(uint32_t instr, uint32_t pc) {
     // SWL BASE(RS), RT, OFFSET(IMMEDIATE)
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
@@ -437,7 +466,7 @@ struct MipsJit {
     as.add(x86::ecx, imm(instr) - off);
     // load byte-swapped data from address
     constexpr bool sign = T(-1) < T(0);
-    sign ? x86_read_s<T>() : x86_read<T>();
+    sign ? x86_read_s<T>(pc) : x86_read<T>(pc);
     as.mov(x86::esi, x86::ecx);
     if (right) as.dec(x86::esi);
     as.and_(x86::esi, (uint8_t)sizeof(T) - 1);
@@ -450,7 +479,7 @@ struct MipsJit {
     as.and_(x86::rax, x86::qword_ptr(x86::rbp, x86::rsi, 0, mask));
     if (rtx) as.xor_(x86::rax, x86::gpq(rtx));
     else as.xor_(x86::rax, x86_spilld(rt(instr)));
-    as.mov(x86::rsi, x86::rax), x86_write<T, true>();
+    as.mov(x86::rsi, x86::rax), x86_write<T, true>(0);
   }
 
   void lui(uint32_t instr) {
@@ -1207,7 +1236,7 @@ struct MipsJit {
     constexpr uint8_t entry_reg[4] = {5, 10, 2, 3};
     as.mov(x86::rsi, (uint64_t)cfg.tlb);
     as.mov(x86::eax, x86_spill(cfg.cop0));
-    as.shl(x86::eax, 4), as.add(x86::rsi, x86::eax);
+    as.shl(x86::eax, 4), as.add(x86::rsi, x86::rax);
     for (uint8_t i = 0; i < 4; ++i) {
       as.mov(x86::eax, x86::dword_ptr(x86::rsi, i * 4));
       as.mov(x86_spill(entry_reg[i] + cfg.cop0), x86::eax);
@@ -1217,6 +1246,11 @@ struct MipsJit {
   template <bool rand>
   void tlbwi() {
     x86_store_caller(), as.mov(x86::ecx, x86_spill(rand + cfg.cop0));
+    if (rand) {
+      as.mov(x86::ecx, 32), as.sub(x86::ecx, x86_spill(6 + cfg.cop0));
+      as.crc32(x86::eax, x86_spill(9 + cfg.cop0)), as.mul(x86::ecx);
+      as.mov(x86::ecx, x86::edx), as.xor_(x86::ecx, 0x1f);
+    }
     as.and_(x86::ecx, 0x1f), x86_call((uint64_t)cfg.tlbwi);
     x86_load_caller();
   }
@@ -1443,7 +1477,8 @@ struct MipsJit {
   }
 
   template <typename T>
-  void lwc1(uint32_t instr) {
+  void lwc1(uint32_t instr, uint32_t pc) {
+    if (!cop1_checked) check_cop1(pc);
     // LW BASE(RS), RT, OFFSET(IMMEDIATE)
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
@@ -1451,7 +1486,7 @@ struct MipsJit {
     as.add(x86::ecx, imm(instr));
     // load byte-swapped data from address
     constexpr bool sign = T(-1) < T(0);
-    sign ? x86_read_s<T>() : x86_read<T>();
+    sign ? x86_read_s<T>(pc) : x86_read<T>(pc);
     // move data into register
     bool fr = cfg.regs[12 + cfg.cop0] & 0x4000000;
     if (sizeof(T) < 8 && !fr) {
@@ -1466,7 +1501,8 @@ struct MipsJit {
   }
 
   template <typename T>
-  void swc1(uint32_t instr) {
+  void swc1(uint32_t instr, uint32_t pc) {
+    if (!cop1_checked) check_cop1(pc);
     // SW BASE(RS), RT, OFFSET(IMMEDIATE)
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
@@ -1483,7 +1519,7 @@ struct MipsJit {
       if (rtx) as.movsd(x86_spilld(rt(instr) + cfg.cop1), x86::xmm(rtx));
       as.mov(x86::rsi, x86_spilld(rt(instr) + cfg.cop1));
     }
-    x86_write<T>();
+    x86_write<T>(pc);
   }
 
   enum ROUND_FMT_Type { RN_FMT, RM_FMT, RP_FMT, RZ_FMT };
@@ -1964,7 +2000,7 @@ struct MipsJit {
     // LDV BASE(RS), RT, OFFSET(IMMEDIATE)
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
-    as.add(x86::ecx, off), x86_read<T>();
+    as.add(x86::ecx, off), x86_read<T>(0);
     // align old register values
     uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
     auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
@@ -2000,7 +2036,7 @@ struct MipsJit {
     if (sizeof(T) == 4) as.pextrd(x86::rsi, result, 0x3 - (sa(instr) >> 3));
     if (sizeof(T) == 8) as.pextrq(x86::rsi, result, 0x1 - (sa(instr) >> 4));
     if (elem) as.palignr(result, result, elem);
-    x86_write<T>();
+    x86_write<T>(0);
   }
 
   template <bool right>
@@ -2405,34 +2441,34 @@ struct MipsJit {
         case 0x17: next_pc = bltzl<BGTZ, false>(instr, pc); break;
         case 0x18: daddiu(instr); break; // DADDI
         case 0x19: daddiu(instr); break;
-        case 0x1a: lwl<uint64_t, false>(instr); break;
-        case 0x1b: lwl<uint64_t, true>(instr); break;
-        case 0x20: lw<int8_t>(instr); break;
-        case 0x21: lw<int16_t>(instr); break;
-        case 0x22: lwl<int32_t, false>(instr); break;
-        case 0x23: lw<int32_t>(instr); break;
-        case 0x24: lw<uint8_t>(instr); break;
-        case 0x25: lw<uint16_t>(instr); break;
-        case 0x26: lwl<int32_t, true>(instr); break;
-        case 0x27: lw<uint32_t>(instr); break;
-        case 0x28: sw<uint8_t>(instr); break;
-        case 0x29: sw<uint16_t>(instr); break;
-        case 0x2a: swl<uint32_t, false>(instr); break;
-        case 0x2b: sw<uint32_t>(instr); break;
-        case 0x2c: swl<uint64_t, false>(instr); break;
-        case 0x2d: swl<uint64_t, true>(instr); break;
-        case 0x2e: swl<uint32_t, true>(instr); break;
+        case 0x1a: lwl<uint64_t, false>(instr, pc); break;
+        case 0x1b: lwl<uint64_t, true>(instr, pc); break;
+        case 0x20: lw<int8_t>(instr, pc); break;
+        case 0x21: lw<int16_t>(instr, pc); break;
+        case 0x22: lwl<int32_t, false>(instr, pc); break;
+        case 0x23: lw<int32_t>(instr, pc); break;
+        case 0x24: lw<uint8_t>(instr, pc); break;
+        case 0x25: lw<uint16_t>(instr, pc); break;
+        case 0x26: lwl<int32_t, true>(instr, pc); break;
+        case 0x27: lw<uint32_t>(instr, pc); break;
+        case 0x28: sw<uint8_t>(instr, pc); break;
+        case 0x29: sw<uint16_t>(instr, pc); break;
+        case 0x2a: swl<uint32_t, false>(instr, pc); break;
+        case 0x2b: sw<uint32_t>(instr, pc); break;
+        case 0x2c: swl<uint64_t, false>(instr, pc); break;
+        case 0x2d: swl<uint64_t, true>(instr, pc); break;
+        case 0x2e: swl<uint32_t, true>(instr, pc); break;
         case 0x2f: printf("CACHE instruction %x\n", instr); break;
-        case 0x30: lw<int32_t>(instr); break; // LL
-        case 0x31: lwc1<int32_t>(instr); break;
+        case 0x30: lw<int32_t>(instr, pc); break; // LL
+        case 0x31: lwc1<int32_t>(instr, pc); break;
         case 0x32: lwc2(instr); break;
-        case 0x35: lwc1<uint64_t>(instr); break;
-        case 0x37: lw<uint64_t>(instr); break;
-        case 0x38: sw<uint32_t>(instr); break; // SC
-        case 0x39: swc1<uint32_t>(instr); break;
+        case 0x35: lwc1<uint64_t>(instr, pc); break;
+        case 0x37: lw<uint64_t>(instr, pc); break;
+        case 0x38: sw<uint32_t>(instr, pc); break; // SC
+        case 0x39: swc1<uint32_t>(instr, pc); break;
         case 0x3a: swc2(instr); break;
-        case 0x3d: swc1<uint64_t>(instr); break;
-        case 0x3f: sw<uint64_t>(instr); break;
+        case 0x3d: swc1<uint64_t>(instr, pc); break;
+        case 0x3f: sw<uint64_t>(instr, pc); break;
         default: invalid(instr); break;
       }
     }
@@ -2454,28 +2490,31 @@ struct MipsJit {
       as.bind(cont_label);
     }
 
-    // check still_top (no intervening events)
-    as.mov(x86::rax, (uint64_t)&Sched::until);
-    uint32_t time = cfg.is_rsp ? cycles * 2 : cycles;
-    as.sub(x86::qword_ptr(x86::rax), time), as.jl(cfg.thunks[3]);
-
     if (cfg.pages) {
       // translate to physical address
-      as.mov(x86::esi, x86::edi);
-      as.mov(x86::ecx, x86::edi), as.shr(x86::ecx, 12);
+      as.mov(x86::ecx, x86::edi);
+      as.mov(x86::edx, x86::edi), as.shr(x86::edx, 12);
       as.mov(x86::rax, (uint64_t)cfg.pages);
-      auto off = x86::dword_ptr(x86::rax, x86::rcx, 2);
-      as.sub(x86::esi, off);
+      auto off = x86::dword_ptr(x86::rax, x86::rdx, 2);
+      as.sub(x86::ecx, off), as.mov(x86::eax, 8);
+      as.bt(x86::ecx, 30), as.jc(cfg.thunks[2]);
       // get function pointer from table
       as.mov(x86::rax, (uint64_t)cfg.lookup);
-      as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rsi, 1));
+      as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rcx, 1));
     } else {
       as.and_(x86::edi, 0xffc);
       as.mov(x86::rax, (uint64_t)cfg.lookup);
       as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rdi, 1));
     }
+
+    // check still_top (no intervening events)
+    as.mov(x86::rax, (uint64_t)&Sched::until);
+    uint32_t time = cfg.is_rsp ? cycles * 2 : cycles;
+    as.sub(x86::qword_ptr(x86::rax), time), as.jl(cfg.thunks[3]);
+
     as.cmp(x86::rdx, 0), as.je(cfg.thunks[3]);
     as.jmp(x86::rdx);
+    //as.jmp(cfg.thunks[3]);
     return cycles;
   }
 };
@@ -2530,7 +2569,7 @@ uint32_t Mips::jit(MipsConfig *cfg, uint32_t pc, CodePtr *ptr) {
 }
 
 uint32_t Mips::run(MipsConfig *cfg, CodePtr block) {
-  RunPtr run = (RunPtr)cfg->thunks[2];
+  RunPtr run = (RunPtr)cfg->thunks[4];
   return run(block);
 }
 
@@ -2543,6 +2582,6 @@ void Mips::init(MipsConfig *cfg) {
 
   jit.emit_thunks();
   runtime.add(&ptr, &code);
-  for (uint32_t i = 0; i < 4; ++i)
+  for (uint32_t i = 0; i < 5; ++i)
     cfg->thunks[i] += (uint64_t)ptr;
 }

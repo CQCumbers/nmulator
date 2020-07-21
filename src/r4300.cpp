@@ -49,8 +49,10 @@ void R4300::unset_irqs(uint32_t mask) {
 /* === Video Interface registers === */
 
 static uint32_t vi_status, vi_origin;
-static uint32_t vi_width, vi_height;
+static uint32_t vi_hbound, vi_hscale;
+static uint32_t vi_vbound, vi_vscale;
 static uint32_t vi_irq_line, vi_line;
+static uint32_t vi_width, vi_sync;
 static bool vi_dirty;
 
 static const char *title;
@@ -67,7 +69,7 @@ static void vi_init() {
   SDL_CreateWindowAndRenderer(640, 480, flags, &window, &renderer);
   SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
   SDL_RenderClear(renderer), SDL_SetWindowTitle(window, title);
-  for (uint32_t i = 0; i < SDL_NumJoysticks(); ++i) SDL_GameControllerOpen(i);
+  for (int32_t i = 0; i < SDL_NumJoysticks(); ++i) SDL_GameControllerOpen(i);
 }
 
 // convert rgba5551 to bgra8888, 16 byte aligned len
@@ -102,14 +104,23 @@ static void convert32(uint8_t *dst, const uint8_t *src, uint32_t len) {
 void R4300::vi_update() {
   if (vi_line == vi_irq_line) set_irqs(0x8);
   vi_line += 0x2, Sched::add(TASK_VI, 6510);
-  if (vi_line < vi_height) return;
+  if (vi_line < vi_sync) return;
 
   // reset scanline to 0 (1 on odd interlaced frames)
   bool interlaced = vi_status & 0x40;
   vi_line = interlaced & ~vi_line;
   if (vi_line == 0x1) return;
   uint8_t format = vi_status & 0x3;
-  uint32_t height = vi_height >> !interlaced;
+
+  // calculate image dimensions
+  uint32_t hend = (vi_hbound & 0x3ff);
+  uint32_t hbeg = (vi_hbound >> 16) & 0x3ff;
+  uint32_t width = ((hend - hbeg) * vi_hscale) >> 10;
+
+  uint32_t vend = (vi_vbound & 0x3ff);
+  uint32_t vbeg = (vi_vbound >> 16) & 0x3ff;
+  uint32_t height = ((vend - vbeg) * vi_vscale) >> 11;
+  //if (width == 0 || format == 0) height = 0;
 
   if (vi_dirty) {
     if (texture) SDL_DestroyTexture(texture);
@@ -468,7 +479,7 @@ static void joy_update(SDL_Event event) {
 // handle MMIO read from physical address
 static int64_t read(uint32_t addr) {
   switch (addr & R4300::mask) {
-    default: /*printf("[MMIO] read from %x\n", addr);*/ return 0;
+    default: return (addr & 0xffff0000) | (addr >> 16);
     // RSP Interface
     case 0x4040000: return RSP::cop0[0];
     case 0x4040004: return RSP::cop0[1];
@@ -490,7 +501,11 @@ static int64_t read(uint32_t addr) {
     case 0x4400008: return vi_width;
     case 0x440000c: return vi_irq_line;
     case 0x4400010: return vi_line;
-    case 0x4400018: return vi_height;
+    case 0x4400018: return vi_sync;
+    case 0x4400024: return vi_hbound;
+    case 0x4400028: return vi_vbound;
+    case 0x4400030: return vi_hscale;
+    case 0x4400034: return vi_vscale;
     // Audio Interface
     case 0x4500004: return (ai_status & 0x1 ? ai_len : 0);
     case 0x450000c: return ai_status;
@@ -515,8 +530,12 @@ static void write(uint32_t addr, uint64_t val) {
     default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
     // RSP Interface
     case 0x4040000: RSP::cop0[0] = val & 0x1fff; return;
-    case 0x4040004: RSP::cop0[1] = val & 0xffffff; return;
-    case 0x4040008: RSP::dma(val, false); return;
+    case 0x4040004:
+      printf("[RSP] Writing %x to DMA_SRC\n", val);
+      RSP::cop0[1] = val & 0xffffff; return;
+    case 0x4040008:
+      printf("[RSP] Writing %x to DMA_READ_LEN\n", val);
+      RSP::dma(val, false); return;
     case 0x404000c: RSP::dma(val, true); return;
     case 0x4040010: RSP::set_status(val); return;
     case 0x404001c: RSP::cop0[7] = 0x0; return;
@@ -554,8 +573,20 @@ static void write(uint32_t addr, uint64_t val) {
     case 0x440000c: vi_irq_line = val & 0x3ff; return;
     case 0x4400010: R4300::unset_irqs(0x8); return;
     case 0x4400018:
-      if ((val & 0x3ff) == vi_height) return;
-      vi_height = val & 0x3ff, vi_dirty = true; return;
+      if ((val & 0x3ff) == vi_sync) return;
+      vi_sync = val & 0x3ff, vi_dirty = true; return;
+    case 0x4400024:
+      if (val == vi_hbound) return;
+      vi_hbound = val, vi_dirty = true; return;
+    case 0x4400028:
+      if (val == vi_vbound) return;
+      vi_vbound = val, vi_dirty = true; return;
+    case 0x4400030:
+      if ((val & 0xfff) == vi_hscale) return;
+      vi_hscale = val & 0xfff, vi_dirty = true; return;
+    case 0x4400034:
+      if ((val & 0xfff) == vi_vscale) return;
+      vi_vscale = val & 0xfff, vi_dirty = true; return;
     // Audio Interface
     case 0x4500000: ai_ram = val & 0xfffff8; return;
     case 0x4500004: ai_dma(val); return;
@@ -595,8 +626,9 @@ static void write(uint32_t addr, uint64_t val) {
 
 // set bits 19/18 for physical pages with MMIO
 static uint32_t mmio_bit(uint32_t pg, uint32_t len) {
-  if (pg >= 0x3f00 && pg < 0x4000) pg |= 0xc0000;
-  if (pg >= 0x4002 && pg < 0x5000) pg |= 0xc0000;
+  pg &= 0x1ffff;
+  if (pg >= 0x3f00 && pg < 0x4000) pg |= 0x80000;
+  if (pg >= 0x4002 && pg < 0x8000) pg |= 0x80000;
   return pg & ~(len - 1);  // align page address
 }
 
@@ -607,31 +639,44 @@ static void tlb_write(uint32_t idx, uint64_t) {
 
   // unmap previous page in slot
   for (uint32_t i = 0; i < len * 2; ++i, ++pg) {
-    if ((pg >> 18) == 0x2) break;
-    pages[pg] = ((pg >> 18) - 0x2) << 30;
+    if ((pg >> 17) == 0x4) break;
+    pages[pg] = ((pg >> 17) - 0x6) << 29;
   }
 
   // calculate physical address diff
   pg = (uint32_t)cop0[10] >> 12;
   len = ((uint32_t)cop0[5] >> 13) + 1;
+  cop0[2] &= 0x7fffff, cop0[3] &= 0x7fffff;
   uint32_t d1 = (pg &= ~1) - mmio_bit(cop0[2] >> 6, len);
   uint32_t d2 = (pg + len) - mmio_bit(cop0[3] >> 6, len);
+  //printf("TLB map %x to %llx, idx: %x, inval: %llx, wired: %x, pc: %x\n",
+  //  pg, cop0[2] >> 6, idx, cop0[2] & 0x2, cop0[6], pc);
+
+  // set bit 17 for invalid regions
+  d1 = cop0[2] & 0x2 ? d1 : pg - 0xe0000;
+  d2 = cop0[3] & 0x2 ? d2 : pg + len - 0xe0000;
 
   // map new page in slot
   const uint8_t entry[4] = {5, 10, 2, 3};
   for (uint8_t i = 0; i < 4; ++i)
     tlb[idx][i] = (uint32_t)cop0[entry[i]];
   for (uint32_t i = 0; i < len * 2; ++i, ++pg) {
-    if ((pg >> 18) == 0x2) break;
+    if ((pg >> 17) == 0x4) break;
     pages[pg] = (i < len ? d1 : d2) << 12;
   }
+
+  /*for (uint32_t i = 0; i < 32; ++i) {
+    printf("TLB[%d] = %x %x %x %x\n",
+      i, tlb[i][0], tlb[i][1],
+      tlb[i][2], tlb[i][3]);
+  }*/
 }
 
 // read instruction from vaddr
 static uint32_t fetch(uint32_t addr) {
   //printf("R4300 PC: %x\n", addr);
   addr = addr - pages[addr >> 12];
-  if (addr >> 31) printf("Invalid fetch of %x\n", addr);
+  if (addr >> 29) return 0;
   return read32(R4300::ram + addr);
 }
 
@@ -827,13 +872,20 @@ static uint32_t crc32(uint8_t *bytes, uint32_t len) {
   return crc;
 }
 
+static uint32_t dcc;
+
 void R4300::update() {
   while (Sched::until >= 0) {
     uint32_t ppc = pc - pages[pc >> 12];
     CodePtr code = lookup[ppc / 4];
     if (code) {
       pc = Mips::run(&cfg, code);
-      if (!broke) continue;
+      //printf("PC: %x\n", pc);
+      /*if (ram[0x6a32] != dcc) {
+        printf("6a32 is now %x\n", ram[0x6a32]);
+        dcc = ram[0x6a32];
+      }*/
+      if (!(broke |= breaks[pc])) continue;
       step = Debugger::update(&dbg);
       memset(lookup, 0, sizeof(lookup));
       broke = false;
@@ -850,13 +902,14 @@ void R4300::init(const char *name) {
   ram = cfg.mem = alloc_pages(0x20000000);
   setup_fault_handler();
 
-  // (paddr >> 18) == 3 for unmapped regions
-  // (paddr >> 18) == 2 for MMIO regions
+  // (paddr >> 17) == 0x7 for invalid regions
+  // (paddr >> 17) == 0x6 for unmapped regions
+  // (paddr >> 17) == 0x4 for MMIO regions
   // page[vaddr >> 12] = vaddr - paddr
   for (uint32_t pg = 0; pg < 0x80000; ++pg)
-    pages[pg] = ((pg >> 18) - 0x2) << 30;
+    pages[pg] = ((pg >> 17) - 0x6) << 29;
   for (uint32_t pg = 0xc0000; pg < 0xe0000; ++pg)
-    pages[pg] = ((pg >> 18) - 0x2) << 30;
+    pages[pg] = ((pg >> 17) - 0x6) << 29;
   for (uint32_t pg = 0; pg < 0x20000; ++pg) {
     uint32_t v1 = 0x80000 + pg, v2 = 0xa0000 + pg;
     pages[v1] = (v1 - mmio_bit(pg, 1)) << 12;
@@ -875,7 +928,7 @@ void R4300::init(const char *name) {
   if (!pifrom) printf("Can't find pifdata.bin\n"), exit(1);
   fread(ram + 0x1fc00000, 1, 0x7c0, pifrom), fclose(pifrom);
 
-  write32(ram + 0x318, 0x800000);  // 8MB RDRAM
+  // setup CIC seed values
   switch (crc32(ram + 0x04000040, 0xfc0)) {
     case 0x583af077: write32(ram + 0x1fc007e4, 0x43f3f); break;  // 6101
     case 0x98a02fa9: write32(ram + 0x1fc007e4, 0x3f3f); break;   // 6102
@@ -884,6 +937,10 @@ void R4300::init(const char *name) {
     case 0x0f727fb1: write32(ram + 0x1fc007e4, 0x853f); break;   // 6106
     default: printf("No compatible CIC chip found\n"), exit(1);
   }
+
+  // 8MB RDRAM for 6102/6105
+  if (ram[0x1fc007e6] == 0x3f) write32(ram + 0x318, 0x800000);
+  if (ram[0x1fc007e6] == 0x91) write32(ram + 0x3f0, 0x800000);
 
   // setup other components
   Mips::init(&cfg);

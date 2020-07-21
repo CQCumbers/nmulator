@@ -70,7 +70,7 @@ namespace Vulkan {
 
   uint8_t *mapped_mem = nullptr;
   const uint32_t group_size = 8, max_cmds = 2048, max_copies = 4096;
-  uint32_t gwidth = 320 / group_size, gheight = 240 / group_size;
+  uint32_t gwidth = 640 / group_size, gheight = 480 / group_size;
   uint32_t n_cmds = 0, n_tmems = 0;
 
   const VkDeviceSize cmds_offset = 0;
@@ -442,6 +442,8 @@ namespace RDP {
     //printf("RDP render to %x, %x\n", img_addr - R4300::ram, zbuf_addr - R4300::ram);
     uint32_t img_len = img_width * height * img_size;
     uint32_t zbuf_len = img_width * height * 2;
+    if (img_len > Vulkan::pixels_size) img_len = Vulkan::pixels_size;
+    if (zbuf_len > Vulkan::zbuf_size) zbuf_len = Vulkan::zbuf_size;
     Vulkan::render(img_addr, img_len, zbuf_addr, zbuf_len);
   }
 
@@ -463,9 +465,10 @@ namespace RDP {
   void set_scissor() {
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     state.sxh = zext(instr[0] >> 12, 12) << 14, state.syh = zext(instr[0], 12);
-    state.sxl = zext(instr[1] >> 12, 12) << 14, state.syl = sext(instr[1], 12);
+    state.sxl = zext(instr[1] >> 12, 12) << 14, state.syl = zext(instr[1], 12);
     height = (state.syl >> 2) - (state.syh >> 2);
-    Vulkan::gheight = height / Vulkan::group_size;
+    Vulkan::gheight = height / Vulkan::group_size + 1;
+    height = Vulkan::gheight * Vulkan::group_size;
   }
 
   void set_other_modes() {

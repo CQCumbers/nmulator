@@ -395,6 +395,7 @@ uint blend(uint pixel, uint color, inout uint zmem, uint oz, uint cvg, bool far,
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   GlobalData global = globals[0];
   if (GlobalID.x >= global.width) return;
+  if (GlobalID.y >= 240) return;
   uint tile_pos = GlobalID.y * global.width + GlobalID.x;
   uint pixel = pixels.Load(tile_pos * global.size), zmem = zbuf.Load(tile_pos * 2);
   zmem = unpackz(tile_pos & 0x1 ? zmem >> 16 : zmem & 0xffff);

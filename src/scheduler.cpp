@@ -22,14 +22,15 @@ static const task_t tasks[] = {
 /* === Internal helpers === */
 
 // Compare event times without overflow
+// returns true if lhs is after rhs
 static bool after(uint64_t lhs, uint64_t rhs) {
-  return (int64_t)lhs - (int64_t)rhs < 0;
+  return (int64_t)rhs - (int64_t)lhs < 0;
 }
 
 // Insert event into sorted events array,
 // searching forward from ptr
 static void move_down(uint64_t *ptr, uint64_t event) {
-  while (ptr < top && !after(event, ptr[1]))
+  while (ptr < top && after(event, ptr[1]))
     ptr[0] = ptr[1], ++ptr;
   ptr[0] = event;
 }
@@ -37,7 +38,7 @@ static void move_down(uint64_t *ptr, uint64_t event) {
 // Insert event into sorted events array,
 // searching backwards from ptr
 static void move_up(uint64_t *ptr, uint64_t event) {
-  while (ptr + 1 >= events && !after(ptr[0], event))
+  while (ptr + 1 >= events && after(ptr[0], event))
     ptr[1] = ptr[0], --ptr;
   ptr[1] = event;
 }
