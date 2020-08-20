@@ -151,24 +151,29 @@ struct MipsJit {
 #endif
   }
 
-  void emit_thunks() {
-    // MMIO read thunk
-    cfg.thunks[0] = (uint32_t)as.offset();
+  enum FN_Type {
+    FN_READ, FN_WRITE, FN_TLB,
+    FN_EXIT, FN_ENTER, FN_EXC
+  };
+
+  void emit_funcs() {
+    // MMIO read handler
+    cfg.fn[FN_READ] = (uint32_t)as.offset();
     x86_store_caller(), as.push(x86::rdi);
     x86_call((uint64_t)cfg.read);
     as.pop(x86::rdi), x86_load_caller();
     as.ret();
 
-    // MMIO write thunk
-    cfg.thunks[1] = (uint32_t)as.offset();
+    // MMIO write handler
+    cfg.fn[FN_WRITE] = (uint32_t)as.offset();
     x86_store_caller(), as.push(x86::rdi);
     x86_call((uint64_t)cfg.write);
     as.pop(x86::rdi), x86_load_caller();
     as.ret();
 
-    // TLB miss thunk
+    // TLB miss handler
     // assumes not in branch delay, EXL = 0
-    cfg.thunks[2] = (uint32_t)as.offset();
+    cfg.fn[FN_TLB] = (uint32_t)as.offset();
     // Cause
     uint32_t reg = (13 + cfg.cop0) << 3;
     as.mov(x86::byte_ptr(x86::rbp, reg), x86::eax);
@@ -191,16 +196,16 @@ struct MipsJit {
     as.shl(x86::edx, 9);
     as.mov(x86_spill(10 + cfg.cop0), x86::edx);
 
-    // JIT return thunk
-    cfg.thunks[3] = (uint32_t)as.offset();
+    // JIT return handler
+    cfg.fn[FN_EXIT] = (uint32_t)as.offset();
     x86_store_all(), as.mov(x86::eax, x86::edi);
 #ifdef _WIN32
     as.pop(x86::rsi), as.pop(x86::rdi);
 #endif
     as.pop(x86::rbp), as.ret();
 
-    // JIT entrance thunk
-    cfg.thunks[4] = (uint32_t)as.offset();
+    // JIT enter handler
+    cfg.fn[FN_ENTER] = (uint32_t)as.offset();
     as.push(x86::rbp);
 #ifdef _WIN32
     as.push(x86::rdi), as.push(x86::rsi);
@@ -318,12 +323,12 @@ struct MipsJit {
 
   // fallback to MMIO or jump to TLB miss
   // paddr in ecx, vpage in edx, pc in edi
-  inline void x86_miss(Label miss, uint64_t thunk) {
+  inline void x86_miss(Label miss, uint32_t func) {
     Label after = as.newLabel();
     as.jmp(after), as.bind(miss);
-    as.mov(x86::eax, thunk == cfg.thunks[1] ? 12 : 8);
-    as.bt(x86::ecx, 30), as.jc(cfg.thunks[2]);
-    as.call(thunk), as.bind(after);
+    as.mov(x86::eax, func == FN_WRITE ? 12 : 8);
+    as.bt(x86::ecx, 30), as.jc(cfg.fn[FN_TLB]);
+    as.call(cfg.fn[func]), as.bind(after);
   }
 
   template <typename T>
@@ -347,7 +352,7 @@ struct MipsJit {
       as.movzx(x86::eax, x86::byte_ptr(x86::rax, x86::rcx));
     }
     // translation miss handler
-    if (cfg.pages) x86_miss(miss, cfg.thunks[0]);
+    if (cfg.pages) x86_miss(miss, FN_READ);
   }
 
   template <typename T>
@@ -372,7 +377,7 @@ struct MipsJit {
       as.movsx(x86::rax, x86::byte_ptr(x86::rax, x86::rcx));
     }
     // translation miss handler
-    if (cfg.pages) x86_miss(miss, cfg.thunks[0]);
+    if (cfg.pages) x86_miss(miss, FN_READ);
   }
 
   template <typename T, bool phys=false>
@@ -396,7 +401,7 @@ struct MipsJit {
       as.mov(x86::byte_ptr(x86::rax, x86::rcx), x86::sil);
     }
     // translation miss handler
-    if (cfg.pages) x86_miss(miss, cfg.thunks[1]);
+    if (cfg.pages) x86_miss(miss, FN_WRITE);
   }
 
   template <typename T>
@@ -1279,6 +1284,8 @@ struct MipsJit {
   }
 
   void mtc0(uint32_t instr) {
+    bool call = cfg.mtc0_mask & (1 << rd(instr));
+    if (!call) return move(rd(instr) + cfg.cop0, rt(instr));
     // read register value parameter
     if (rt(instr) != 0) {
       uint32_t rtx = x86_reg(rt(instr));
@@ -2490,6 +2497,13 @@ struct MipsJit {
       as.bind(cont_label);
     }
 
+    // only check interrupts when status or
+    // cause registers change - eret, mtc0, set_irqs
+    //if (cfg.cop0[12] & 0x3 != 0x1) continue;
+    // as.test(x86_spill(12 + cfg.cop0), 0x2);
+    // as.jc(cfg.thunks[4]);
+    // check jumps to funcs are actually are rip-relative
+
     if (cfg.pages) {
       // translate to physical address
       as.mov(x86::ecx, x86::edi);
@@ -2497,7 +2511,7 @@ struct MipsJit {
       as.mov(x86::rax, (uint64_t)cfg.pages);
       auto off = x86::dword_ptr(x86::rax, x86::rdx, 2);
       as.sub(x86::ecx, off), as.mov(x86::eax, 8);
-      as.bt(x86::ecx, 30), as.jc(cfg.thunks[2]);
+      as.bt(x86::ecx, 30), as.jc(cfg.fn[FN_TLB]);
       // get function pointer from table
       as.mov(x86::rax, (uint64_t)cfg.lookup);
       as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rcx, 1));
@@ -2510,11 +2524,12 @@ struct MipsJit {
     // check still_top (no intervening events)
     as.mov(x86::rax, (uint64_t)&Sched::until);
     uint32_t time = cfg.is_rsp ? cycles * 2 : cycles;
-    as.sub(x86::qword_ptr(x86::rax), time), as.jl(cfg.thunks[3]);
+    as.sub(x86::qword_ptr(x86::rax), time), as.jl(cfg.fn[FN_EXIT]);
 
-    as.cmp(x86::rdx, 0), as.je(cfg.thunks[3]);
+    as.cmp(x86::rdx, 0), as.je(cfg.fn[FN_EXIT]);
     as.jmp(x86::rdx);
-    //as.jmp(cfg.thunks[3]);
+    // fill lookup table with offsets to exit thunk
+    //as.jmp(cfg.fn[FN_EXIT]);
     return cycles;
   }
 };
@@ -2569,7 +2584,7 @@ uint32_t Mips::jit(MipsConfig *cfg, uint32_t pc, CodePtr *ptr) {
 }
 
 uint32_t Mips::run(MipsConfig *cfg, CodePtr block) {
-  RunPtr run = (RunPtr)cfg->thunks[4];
+  RunPtr run = (RunPtr)cfg->fn[MipsJit::FN_ENTER];
   return run(block);
 }
 
@@ -2580,8 +2595,8 @@ void Mips::init(MipsConfig *cfg) {
   code.init(runtime.codeInfo());
   MipsJit jit(cfg, code);
 
-  jit.emit_thunks();
+  jit.emit_funcs();
   runtime.add(&ptr, &code);
   for (uint32_t i = 0; i < 5; ++i)
-    cfg->thunks[i] += (uint64_t)ptr;
+    cfg->fn[i] += (uint64_t)ptr;
 }

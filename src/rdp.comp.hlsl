@@ -4,6 +4,7 @@
 #define M0_COPY      0x00200000
 #define M0_2CYCLE    0x00100000
 #define M0_PERSP     0x00080000
+#define M0_TLUT_EN   0x00008000
 #define M0_TLUT_IA   0x00004000
 
 #define M1_BLEND     0x00004000
@@ -51,8 +52,8 @@ struct RDPCommand {
   uint modes[2], mux[2];
   uint tlut, tmem, texes;
   uint fill, fog, blend;
-  uint env, prim, zprim;
-  uint keys, keyc, pad2;
+  uint env, prim, lodf;
+  uint zprim, keys, keyc;
 };
 
 struct RDPTex {
@@ -69,11 +70,11 @@ struct RDPTex {
 [[vk::binding(2)]] StructuredBuffer<RDPTex> texes;
 [[vk::binding(3)]] StructuredBuffer<GlobalData> globals;
 
-[[vk::binding(4)]] ByteAddressBuffer tmem;
-[[vk::binding(5)]] RWByteAddressBuffer pixels;
-[[vk::binding(6)]] RWByteAddressBuffer zbuf;
+[[vk::binding(4)]] StructuredBuffer<uint16_t> tmem;
+[[vk::binding(5)]] RWStructuredBuffer<uint16_t> pix16;
+[[vk::binding(6)]] RWStructuredBuffer<uint16_t> zbuf;
 
-/* === Utility Functions === */
+/* === Format Conversions === */
 
 uint read_rgba16(uint enc) {
   // bswapped RGBA5551 to ABGR8888
@@ -84,14 +85,28 @@ uint read_rgba16(uint enc) {
   return dec | ((enc & 0xf800) >> 8);
 }
 
-uint write_rgba16(uint dec) {
+uint16_t write_rgba16(uint dec) {
   // ABGR8888 to bswapped RGBA5551
   uint enc = (dec & (0xff << 24)) != 0;
   enc |= (dec >> 18) & 0x3e;
   enc |= (dec >> 5) & 0x7c0;
   enc |= (dec << 8) & 0xf800;
-  return ((enc << 8) | (enc >> 8)) & 0xffff;
+  return (uint16_t)((enc << 8) | (enc >> 8));
 }
+
+uint read_ia16(uint enc) {
+  // 8 bit intensity, 8 bit alpha
+  uint i = enc & 0xff, a = enc >> 8;
+  return (a << 24) | (i << 16) | (i << 8) | i;
+}
+
+uint read_i4(uint enc) {
+  // 4 bit intensity
+  uint i = (enc << 4) | enc;
+  return (i << 24) | (i << 16) | (i << 8) | i;
+}
+
+/* === Utility Functions === */
 
 uint4 usadd(uint4 a, uint4 b) {
   return b == 0 ? a : a + max(b, -a);
@@ -106,7 +121,7 @@ int mul16(int a, int b) {
 
 uint sel(uint idx, uint4 inputs) {
   switch (idx & 0x3) {
-    case 0: return inputs.x;
+    default: return inputs.x;
     case 1: return inputs.y;
     case 2: return inputs.z;
     case 3: return inputs.w;
@@ -127,7 +142,7 @@ uint sel(uint idx, uint4 i0, uint4 i1, uint4 i2, uint4 i3) {
 }
 
 uint pack32(uint4 color) {
-  uint4 c = min(color >> 16, 0xff);
+  uint4 c = (color >> 16) & 0xff;
   return (c.w << 24) | (c.z << 16) | (c.y << 8) | c.x;
 }
 
@@ -164,78 +179,101 @@ uint packz(uint dec) {
   return ((enc << 8) | (enc >> 8)) & 0xffff;
 }
 
+uint tmem4r(uint pos, uint off, uint idx) {
+  pos = (pos & 0xfff) | (idx << 12);
+  uint val = tmem[pos >> 1];
+  uint shift = ((off & 0x3) ^ 0x1) * 4;
+  return (val >> shift) & 0xf;
+}
+
+uint tmem8r(uint pos, uint idx) {
+  pos = (pos & 0xfff) | (idx << 12);
+  uint val = tmem[pos >> 1];
+  uint shift = (pos & 0x1) * 8;
+  return (val >> shift) & 0xff;
+}
+
+uint tmem16r(uint pos, uint idx) {
+  pos = (pos & 0xfff) | (idx << 12);
+  return tmem[pos >> 1];
+}
+
 /* === Pipeline Stages === */
 
-uint read_texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
+uint texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
+  // apply mirror/mask to ST coords
+  if (cmd.modes[0] & M0_TLUT_EN) tex.format = 2;
   bool2 mst = tex.shift & 0x100, en = (mask != 0);
   st ^= -(en & (st >> mask) & mst), st &= (en << mask) - 1;
-  uint s = st.x, t = st.y;
-  tex.addr = (tex.addr & 0xfff) + (cmd.tmem << 12);
-  cmd.tlut = (cmd.tlut & 0xfff) + (cmd.tmem << 12);
-  if (tex.format == 0 && tex.size == 2) {        // 16 bit RGBA
-    if (t & 0x1) s ^= 0x2;
-    uint tex_pos = tex.addr + t * tex.width + s * 2;
-    uint texel = tmem.Load(tex_pos);
-    return read_rgba16(s & 0x1 ? texel >> 16 : texel & 0xffff);
+
+  // see manual 13.8 for tmem layouts
+  uint s = st.x, t = st.y, wd = tex.width;
+  uint flip = (st.y & 0x1) << 2;
+  bool ia = cmd.modes[0] & M0_TLUT_IA;
+
+  if (tex.format == 0 && tex.size == 0) {        // 4 bit RGBA
+    uint pos = (tex.addr + t * wd + s / 2) ^ flip;
+    return read_i4(tmem4r(pos, s, cmd.tmem));
+  } else if (tex.format == 0 && tex.size == 1) { // 8 bit RGBA
+    uint pos = (tex.addr + t * wd + s) ^ flip;
+    uint i = tmem8r(pos, cmd.tmem);
+    return (i << 24) | (i << 16) | (i << 8) | i;
+  } else if (tex.format == 0 && tex.size == 2) { // 16 bit RGBA
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    return read_rgba16(tmem16r(pos, cmd.tmem));
   } else if (tex.format == 0 && tex.size == 3) { // 32 bit RGBA
-    if (t & 0x1) s ^= 0x2;
-    uint tex_pos = tex.addr + t * tex.width + s * 2;
-    tex_pos = (tex.addr & ~0x7ff) | (tex_pos & 0x7ff);
-    uint texel1 = tmem.Load(tex_pos + 0x800), texel2 = tmem.Load(tex_pos);
-    texel1 = s & 0x1 ? texel1 & ~0xffff : texel1 << 16;
-    texel2 = s & 0x1 ? texel2 >> 16 : texel2 & 0xffff;
-    return texel1 | texel2;
-  } else if (tex.format == 2 && tex.size == 1) { // 8 bit CI
-    if (t & 0x1) s ^= 0x4;
-    uint tex_pos = tex.addr + t * tex.width + s;
-    uint idx = (tmem.Load(tex_pos) >> ((s & 0x3) * 8)) & 0xff;
-    uint texel = tmem.Load(cmd.tlut + idx * 2);
-    texel = idx & 0x1 ? texel >> 16 : texel & 0xffff;
-    if (cmd.modes[0] & M0_TLUT_IA) {
-      uint i = texel & 0xff, a = texel >> 8;
-      return (a << 24) | (i << 16) | (i << 8) | i;
-    } else return read_rgba16(texel);
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    uint hi = tmem16r(pos | 0x800, cmd.tmem);
+    uint lo = tmem16r(pos & 0x7ff, cmd.tmem);
+    return (hi << 16) | (lo & 0xffff);
   } else if (tex.format == 2 && tex.size == 0) { // 4 bit CI
-    if (t & 0x1) s ^= 0x8;
-    uint tex_pos = tex.addr + t * tex.width + s / 2;
-    uint idx = tmem.Load(tex_pos) >> ((s & 0x6) * 4);
-    idx = (s & 0x1 ? idx : idx >> 4) & 0xf;
-    uint texel = tmem.Load(cmd.tlut + (tex.pal << 5) + idx * 2);
-    texel = idx & 0x1 ? texel >> 16 : texel & 0xffff;
-    if (cmd.modes[0] & M0_TLUT_IA) {
-      uint i = texel & 0xff, a = texel >> 8;
-      return (a << 24) | (i << 16) | (i << 8) | i;
-    } else return read_rgba16(texel);
-  } else if (tex.format == 3 && tex.size == 2) { // 16 bit IA
-    if (t & 0x1) s ^= 0x2;
-    uint texel = tmem.Load(tex.addr + t * tex.width + s * 2);
-    texel = s & 0x1 ? texel >> 16 : texel & 0xffff;
-    uint i = texel & 0xff, a = texel >> 8;
+    uint pos = (tex.addr + t * wd + s / 2) ^ flip;
+    uint idx = (tex.pal << 4) | tmem4r(pos & 0x7ff, s, cmd.tmem);
+    if (~cmd.modes[0] & M0_TLUT_EN) return idx;
+    uint entry = tmem16r(0x800 | (idx << 3), cmd.tmem);
+    return ia ? read_ia16(entry) : read_rgba16(entry);
+  } else if (tex.format == 2 && tex.size == 1) { // 8 bit CI
+    uint pos = (tex.addr + t * wd + s) ^ flip;
+    uint idx = tmem8r(pos & 0x7ff, cmd.tmem);
+    if (~cmd.modes[0] & M0_TLUT_EN) return idx;
+    uint entry = tmem16r(0x800 | (idx << 3), cmd.tmem);
+    return ia ? read_ia16(entry) : read_rgba16(entry);
+  } else if (tex.format == 2) {                  // 32 bit CI
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    uint idx = tmem16r(pos & 0x7ff, cmd.tmem);
+    if (~cmd.modes[0] & M0_TLUT_EN) return (idx << 16) | idx;
+    uint entry = tmem16r(0x800 | ((idx >> 8) << 3), cmd.tmem);
+    return ia ? read_ia16(entry) : read_rgba16(entry);
+  } else if (tex.format == 3 && tex.size == 0) { // 4 bit IA
+    uint pos = (tex.addr + t * wd + s / 2) ^ flip;
+    uint val = tmem4r(pos, s, cmd.tmem);
+    uint i = val & 0xe, a = (val & 0x1) * 0xff;
+    i = (i << 4) | (i << 1) | (i >> 2);
     return (a << 24) | (i << 16) | (i << 8) | i;
   } else if (tex.format == 3 && tex.size == 1) { // 8 bit IA
-    if (t & 0x1) s ^= 0x4;
-    uint tex_pos = tex.addr + t * tex.width + s;
-    uint texel = tmem.Load(tex_pos) >> ((s & 0x3) * 8);
-    uint i = texel & 0xf0, a = (texel << 4) & 0xf0;
+    uint pos = (tex.addr + t * wd + s) ^ flip;
+    uint val = tmem8r(pos, cmd.tmem);
+    uint i = (val & 0xf0) | (val >> 4);
+    uint a = (val << 4) | (val & 0x0f);
     return (a << 24) | (i << 16) | (i << 8) | i;
-  } else if (tex.format == 3 && tex.size == 0) { // 4 bit IA
-    if (t & 0x1) s ^= 0x8;
-    uint tex_pos = tex.addr + t * tex.width + s / 2;
-    uint texel = tmem.Load(tex_pos) >> ((s & 0x6) * 4);
-    texel = (s & 0x1 ? texel : texel >> 4) & 0xf;
-    uint i = (texel & 0xe) << 4, a = (texel & 0x1) * 0xff;
-    return (a << 24) | (i << 16) | (i << 8) | i;
-  } else if (tex.format == 4 && tex.size == 1) { // 8 bit I
-    if (t & 0x1) s ^= 0x4;
-    uint tex_pos = tex.addr + t * tex.width + s;
-    uint i = (tmem.Load(tex_pos) >> ((s & 0x3) * 8)) & 0xff;
-    return (i << 24) | (i << 16) | (i << 8) | i;
+  } else if (tex.format == 3 && tex.size == 2) { // 16 bit IA
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    return read_ia16(tmem16r(pos, cmd.tmem));
+  } else if (tex.format == 3 && tex.size == 3) { // 32 bit IA
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    uint val = tmem16r(pos, cmd.tmem);
+    return (val << 16) | (val & 0xffff);
   } else if (tex.format == 4 && tex.size == 0) { // 4 bit I
-    if (t & 0x1) s ^= 0x8;
-    uint tex_pos = tex.addr + t * tex.width + s / 2;
-    uint texel = tmem.Load(tex_pos) >> ((s & 0x6) * 4);
-    uint i = (s & 0x1 ? texel << 4 : texel) & 0xf0;
+    uint pos = (tex.addr + t * wd + s / 2) ^ flip;
+    return read_i4(tmem4r(pos, s, cmd.tmem));
+  } else if (tex.format == 4 && tex.size == 1) { // 8 bit I
+    uint pos = (tex.addr + t * wd + s) ^ flip;
+    uint i = tmem8r(pos, cmd.tmem);
     return (i << 24) | (i << 16) | (i << 8) | i;
+  } else if (tex.format == 4) {                  // 32 bit I
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    uint val = tmem16r(pos, cmd.tmem);
+    return (val << 16) | (val & 0xffff);
   }
   return 0xffff00ff;
 }
@@ -258,7 +296,7 @@ uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
   int4 x1 = cmd.xh + cmd.sh * (y - cmd.yh) / 4;
   int4 xm = cmd.xm + cmd.sm * (y - cmd.yh) / 4;
   int4 xl = cmd.xl + cmd.sl * (y - cmd.ym) / 4;
-  int4 x2 = y < int4(cmd.ym) ? xm : xl;
+  int4 x2 = y < (int4)cmd.ym ? xm : xl;
   // compute valid sub-scanlines
   bool lft = cmd.type & (T_LMAJOR | T_RECT);
   int4 xa = (lft ? x1 : x2), xb = (lft ? x2 : x1);
@@ -279,7 +317,7 @@ bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out int4 st
   // read old z, dz from zbuf
   bool skip = (~cmd.type & T_ZBUF) || (~cmd.modes[1] & M1_ZCMP);
   skip = skip || (cmd.modes[0] & M0_COPY);
-  if (cvg == 0 || skip) return bool2(true);
+  if (cvg == 0 || skip) return (bool2)true;
   uint oz = zmem >> 4, odz = zmem & 0xf;
   bool zmax = (oz == 0x3ffff);
   // calculate new z from slopes
@@ -304,10 +342,10 @@ bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out int4 st
   return bool2(zle, zge);
 }
 
-uint sample_tex(int3 stw, RDPCommand cmd) {
+uint sample_tex(int3 stw, uint tile_off, RDPCommand cmd) {
   if (~cmd.type & T_TEX) return 0;
   uint mode = cmd.modes[0]; stw >>= 16;
-  RDPTex tex = texes[cmd.tmem * 8 + cmd.tile];
+  RDPTex tex = texes[cmd.tmem * 8 + cmd.tile + tile_off];
   // correct perspective, apply shift
   //if (stw.z > 0) {
   if (mode & M0_PERSP) stw = 32768.0 * stw / (float3)stw.z;
@@ -319,7 +357,16 @@ uint sample_tex(int3 stw, RDPCommand cmd) {
   bool2 cst = (tex.shift >> 9) || (mask == 0);
   int2 stl = tex.stl << 3, sth = tex.sth << 3;
   st = cst ? clamp(st - stl, 0, sth - stl) : st - stl;
-  return read_texel(st >> 5, mask, tex, cmd);
+  // read appropriate texels
+  int2 stfrac = st & 0x1f; st >>= 5;
+  bool up = (stfrac.x + stfrac.y) & 0x20;
+  int4 c1 = unpack32(texel(st + (int2)up, mask, tex, cmd));
+  int4 c2 = unpack32(texel(st + int2(1, 0), mask, tex, cmd));
+  int4 c3 = unpack32(texel(st + int2(0, 1), mask, tex, cmd));
+  // 3-tap bilinear filter
+  stfrac = up ? 0x20 - stfrac.yx : stfrac.xy;
+  int4 mix = stfrac.x * (c2 - c1) + stfrac.y * (c3 - c1);
+  return pack32(c1 + (mix + 0x10) / 0x20);
 }
 
 uint sample_shade(int2 dxy, RDPCommand cmd) {
@@ -328,36 +375,61 @@ uint sample_shade(int2 dxy, RDPCommand cmd) {
   return pack32(max(rgba + cmd.sdx * dxy.x / 4, 0));
 }
 
-uint combine(uint tex, uint shade, uint noise_, uint prev, RDPCommand cmd) {
-  uint cycle = cmd.modes[0] & M0_FILL;
-  if (cycle == M0_COPY) return tex;
-  if (cycle == M0_FILL) return read_rgba16(cmd.fill);
-  // read mux values
-  uint mux0 = cmd.mux[0], mux1 = cmd.mux[1];
-  uint mc = (mux0 >> 15) & 0x1f;
+int4 sext(uint4 val) {
+  uint sgn = 1 << 25, mask = (1 << 26) - 1;
+  return ((val & mask) ^ sgn) - sgn;
+}
+
+uint2 combine(uint tex0, uint tex1, uint shade, uint noise_, uint2 prev, RDPCommand cmd, uint cycle) {
+  uint cycle_ = cmd.modes[0] & M0_FILL;
+  if (cycle_ == M0_COPY) return tex0;
+  if (cycle_ == M0_FILL) return read_rgba16(cmd.fill);
   // setup input options
-  uint4 i1 = uint4(prev, tex, tex, cmd.prim);
+  uint4 i1 = uint4(prev.x, tex0, tex1, cmd.prim);
   uint4 i2 = uint4(shade, cmd.env, -1, 0);
-  uint4 i3 = uint4(tex, tex, cmd.prim, shade);
+  uint4 i3 = uint4(tex0, tex1, cmd.prim, shade);
   uint4 ia2 = uint4(shade, cmd.env, -1, noise_);
   uint4 ib2 = uint4(shade, cmd.env, cmd.keyc, 0);
   uint4 ic2 = uint4(shade, cmd.env, cmd.keys, 0);
   // select packed inputs
-  uint pa = sel((mux0 >> 20) & 0xf, i1, ia2);
-  uint pb = sel((mux1 >> 28) & 0xf, i1, ib2);
-  uint pc = sel(mc, i1, ic2, i3, uint4(cmd.env, 0, 0, 0));
-  uint pd = sel((mux1 >> 15) & 0x7, i1, i2);
+  uint mux0 = cmd.mux[0], mux1 = cmd.mux[1];
+  uint mc, pa, pb, pc, pd;
+  if (cycle == 0) {
+    mc = (mux0 >> 15) & 0x1f;
+    pa = sel((mux0 >> 20) & 0xf, i1, ia2);
+    pb = sel((mux1 >> 28) & 0xf, i1, ib2);
+    pc = sel(mc, i1, ic2, i3, uint4(cmd.env, 0, cmd.lodf, 0));
+    pd = sel((mux1 >> 15) & 0x7, i1, i2);
+  } else {
+    mc = (mux0 >> 0) & 0x1f;
+    pa = sel((mux0 >> 5) & 0xf, i1, ia2);
+    pb = sel((mux1 >> 24) & 0xf, i1, ib2);
+    pc = sel(mc, i1, ic2, i3, uint4(cmd.env, 0, cmd.lodf, 0));
+    pd = sel((mux1 >> 6) & 0x7, i1, i2);
+  }
   // unpack input channels
-  uint4 a = unpack32(pa), b = unpack32(pb);
-  uint4 c = unpack32(pc), d = unpack32(pd);
+  int4 a = unpack32(pa), b = unpack32(pb);
+  int4 c = unpack32(pc), d = unpack32(pd);
+  if (cycle != 0 && mc == 0) {
+    c |= unpack32(prev.y) << 8;
+  }
   if (mc >= 7) c = c.wwww;
   // select alpha inputs
-  a.w = unpacka(sel((mux0 >> 12) & 0x7, i1, i2));
-  b.w = unpacka(sel((mux1 >> 12) & 0x7, i1, i2));
-  c.w = unpacka(sel((mux0 >> 9) & 0x7, i1, i2));
-  d.w = unpacka(sel((mux1 >> 9) & 0x7, i1, i2));
+  if (cycle == 0) {
+    a.w = unpacka(sel((mux0 >> 12) & 0x7, i1, i2));
+    b.w = unpacka(sel((mux1 >> 12) & 0x7, i1, i2));
+    c.w = unpacka(sel((mux0 >> 9) & 0x7, i1, i2));
+    d.w = unpacka(sel((mux1 >> 9) & 0x7, i1, i2));
+  } else {
+    a.w = unpacka(sel((mux1 >> 21) & 0x7, i1, i2));
+    b.w = unpacka(sel((mux1 >> 3) & 0x7, i1, i2));
+    c.w = unpacka(sel((mux1 >> 18) & 0x7, i1, i2));
+    d.w = unpacka(sel((mux1 >> 0) & 0x7, i1, i2));
+  }
   // combine selected inputs
-  return pack32((a - b) * (c >> 16) / 256 + d);
+  int4 res = (a - b) * (c >> 16);
+  res = d + (res + 0x8000) / 256;
+  return uint2(pack32(res), pack32(res >> 8));
 }
 
 uint blend(uint pixel, uint color, inout uint zmem, uint oz, uint cvg, bool far, RDPCommand cmd) {
@@ -391,16 +463,23 @@ uint blend(uint pixel, uint color, inout uint zmem, uint oz, uint cvg, bool far,
   return (pack32(res) & 0xffffff) | output;
 }
 
+uint clamp_color16(uint2 inp) {
+  int4 color = unpack32(inp.x);
+  color |= unpack32(inp.y) << 8;
+  color = (((color - 0x800000) << 7) >> 7) + 0x800000;
+  return pack32(clamp(color, 0, 0xff0000));
+}
+  
+
 [numthreads(8, 8, 1)]
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   GlobalData global = globals[0];
   if (GlobalID.x >= global.width) return;
   if (GlobalID.y >= 240) return;
-  uint tile_pos = GlobalID.y * global.width + GlobalID.x;
-  uint pixel = pixels.Load(tile_pos * global.size), zmem = zbuf.Load(tile_pos * 2);
-  zmem = unpackz(tile_pos & 0x1 ? zmem >> 16 : zmem & 0xffff);
-  if (global.size == 2)
-    pixel = read_rgba16(tile_pos & 0x1 ? pixel >> 16 : pixel & 0xffff);
+
+  uint pos = GlobalID.y * global.width + GlobalID.x;
+  uint pixel = read_rgba16(pix16[pos]);
+  uint zmem = unpackz(zbuf[pos]);
   uint noise_ = 0xff888888;
 
   TileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
@@ -415,40 +494,25 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       uint cvg = visible(GlobalID.xy, cmd, dxy);
       bool2 depth = compare_z(zmem, cvg, dxy, cmd, stwz);
       if (cvg == 0 || !depth.x) continue;
-      uint tex = sample_tex(stwz, cmd);
-      uint shade = sample_shade(dxy, cmd);
-      uint color = combine(tex, shade, noise_, 0, cmd);
+      uint tex0 = sample_tex(stwz.xyz, 0, cmd), tex1 = 0;
       if (cmd.modes[0] & M0_2CYCLE) {
-        uint m0 = (cmd.mux[0] & 0x1f) << 15;
-        cmd.mux[0] = m0 | ((cmd.mux[1] >> 9) & 0x3e0);
-        uint m1 = (cmd.mux[1] & 0x1f) << 9;
-        cmd.mux[1] = m1 | ((cmd.mux[1] << 4) & (0xf << 28));
-        color = combine(tex, shade, noise_, color, cmd);
+        tex1 = sample_tex(stwz.xyz, 1, cmd);
       }
-      pixel = blend(pixel, color, zmem, oz, cvg, depth.y, cmd);
+      uint shade = sample_shade(dxy, cmd);
+      uint2 color = combine(tex0, tex1, shade, noise_, 0, cmd, 0);
+      if (cmd.modes[0] & M0_2CYCLE) {
+        color = combine(tex1, tex1, shade, noise_, color, cmd, 1);
+      }
+      pixel = blend(pixel, color.x, zmem, oz, cvg, depth.y, cmd);
       if (cmd.modes[0] & M0_2CYCLE) {
         cmd.modes[0] &= ~M0_2CYCLE;
         uint mux = (cmd.modes[1] & 0x33330000) << 2;
         cmd.modes[1] = mux | (cmd.modes[1] & 0xffff);
-        pixel = blend(pixel, color, zmem, oz, cvg, depth.y, cmd);
+        pixel = blend(pixel, color.x, zmem, oz, cvg, depth.y, cmd);
       }
     }
   }
   
-  if (tile_pos & 0x1) {
-    zbuf.InterlockedAnd(tile_pos * 2, 0x0000ffff);
-    zbuf.InterlockedOr(tile_pos * 2, packz(zmem) << 16);
-  } else {
-    zbuf.InterlockedAnd(tile_pos * 2, 0xffff0000);
-    zbuf.InterlockedOr(tile_pos * 2, packz(zmem));
-  }
-  if (global.size == 2) {
-    if (tile_pos & 0x1) {
-      pixels.InterlockedAnd(tile_pos * 2, 0x0000ffff);
-      pixels.InterlockedOr(tile_pos * 2, write_rgba16(pixel) << 16);
-    } else {
-      pixels.InterlockedAnd(tile_pos * 2, 0xffff0000);
-      pixels.InterlockedOr(tile_pos * 2, write_rgba16(pixel));
-    }
-  } else pixels.Store(tile_pos * 4, pixel);
+  zbuf[pos] = (uint16_t)packz(zmem);
+  pix16[pos] = write_rgba16(pixel);
 }

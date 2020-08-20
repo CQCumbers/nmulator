@@ -44,16 +44,19 @@ void RSP::dma(uint32_t val, bool to_ram) {
   len = (len > max ? max : len), cop0[0] &= 0x1ff8, cop0[1] &= 0x7ffff8;
 
   // repeatedly DMA bytes from RDRAM to DMEM/IMEM, or vice-versa
+  //printf("fd8: %llx\n", read32(mem + 0xfd8));
   for (uint32_t i = 0; i <= count; ++i) {
     uint8_t *src = to_ram ? mem + cop0[0] : R4300::ram + cop0[1];
     uint8_t *dst = to_ram ? R4300::ram + cop0[1] : mem + cop0[0];
     if (!to_ram && (cop0[0] >> 12)) unprotect(cop0[0], src, len);
     memcpy(dst, src, len), cop0[0] += len, cop0[1] += len + skip;
   }
+  //printf("fd8: %llx\n", read32(mem + 0xfd8));
 }
 
 void RSP::set_status(uint32_t val) {
   // update status flags, unhalt RSP
+  //printf("Setting RSP status to %x\n", val);
   if (cop0[4] & val & 0x1) Sched::add(TASK_RSP, 0);
   cop0[4] &= ~(val & 0x1), cop0[4] |= (val >> 1) & 0x2;
   cop0[4] &= ~(val & 0x4) >> 1;
@@ -79,8 +82,12 @@ static void mtc0(uint32_t idx, uint64_t val) {
   switch (idx &= 0x1f) {
     default: RSP::cop0[idx] = val;
     case 0: RSP::cop0[0] = val & 0x1fff; return;
-    case 1: RSP::cop0[1] = val & 0xffffff; return;
-    case 2: RSP::dma(val, false); return;
+    case 1:
+      //printf("[RSP] Writing %x to DMA_SRC at %x\n", val, RSP::pc);
+      RSP::cop0[1] = val & 0xffffff; return;
+    case 2:
+      //printf("[RSP] Writing %x to DMA_READ_LEN\n", val);
+      RSP::dma(val, false); return;
     case 3: RSP::dma(val, true); return;
     case 4: RSP::set_status(val); return;
     case 8: RSP::cop0[10] = RSP::cop0[8] = val; return;
@@ -92,7 +99,7 @@ static void mtc0(uint32_t idx, uint64_t val) {
 
 static int64_t stop_at(uint32_t addr) {
   if (!(addr & 0xff)) return true;
-  return false;  // true to single-step
+  return true;  // true to single-step
 }
 
 static MipsConfig cfg = {
@@ -100,7 +107,7 @@ static MipsConfig cfg = {
   .cop2 = 64, .pool = 148,
   .lookup = lookup, .fetch = fetch,
   .mtc0 = mtc0, .stop_at = stop_at,
-  .is_rsp = true
+  .mtc0_mask = 0x0b1f, .is_rsp = true
 };
 
 robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
@@ -118,6 +125,9 @@ void RSP::update() {
     CodePtr code = lookup[pc / 4];
     if (code) {
       pc = Mips::run(&cfg, code) & 0xffc;
+      //for (uint32_t i = 0; i < 32; ++i)
+      //  printf("Reg %d: %llx\n", i, regs[i]);
+      //printf("RSP PC: %x | %x %x\n", pc, read32(imem + pc), read32(imem + pc + 4));
       if ((cop0[4] & 0x42) == 0x42) R4300::set_irqs(0x1);
     } else {
       // search backup blocks for matching hash

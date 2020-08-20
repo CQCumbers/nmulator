@@ -20,9 +20,10 @@ struct MipsConfig {
   uint8_t *mem;
   CodePtr *lookup;
   WritePtr mtc0;
+  uint32_t mtc0_mask;
 
   uint32_t *pages, *tlb;
-  uint64_t thunks[5];
+  uint64_t fn[5];
   ReadPtr read;
   WritePtr write;
   WritePtr tlbwi;

@@ -10,7 +10,8 @@ add_subdirectory(extern/asmjit)
 set(HLSL "${CMAKE_CURRENT_SOURCE_DIR}/src/rdp.comp.hlsl")
 set(SPIRV "${CMAKE_CURRENT_SOURCE_DIR}/src/comp.spv")
 add_custom_command(OUTPUT ${SPIRV}
-    COMMAND glslangValidator -V -D ${HLSL} -e main --vn comp_code -o ${SPIRV}
+    COMMAND docker run --rm -v ${CMAKE_CURRENT_SOURCE_DIR}:${CMAKE_CURRENT_SOURCE_DIR} -w ${CMAKE_CURRENT_SOURCE_DIR} dxc -T cs_6_6 -enable-16bit-types
+    -fspv-extension=SPV_KHR_16bit_storage -E main -spirv ${HLSL} -Fh ${SPIRV}
     DEPENDS ${HLSL})
 add_custom_target(shader DEPENDS ${SPIRV})
 

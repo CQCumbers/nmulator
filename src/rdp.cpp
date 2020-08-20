@@ -27,8 +27,8 @@ struct RDPState {
   uint32_t modes[2], mux[2];
   uint32_t tlut, tmem, texes;
   uint32_t fill, fog, blend;
-  uint32_t env, prim, zprim;
-  uint32_t keys, keyc, pad2;
+  uint32_t env, prim, lodf;
+  uint32_t zprim, keys, keyc;
 };
 
 struct RDPCommand {
@@ -112,10 +112,12 @@ namespace Vulkan {
       .pApplicationName = "nmulator RDP",
       .apiVersion = VK_API_VERSION_1_0
     };
+    const char *exts[] = { "VK_KHR_get_physical_device_properties2" };
     const VkInstanceCreateInfo instance_info = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
       .pApplicationInfo = &app_info,
       .enabledLayerCount = 1, .ppEnabledLayerNames = layers,
+      .enabledExtensionCount = 1, .ppEnabledExtensionNames = exts
     };
     vkCreateInstance(&instance_info, 0, instance);
   }
@@ -141,9 +143,14 @@ namespace Vulkan {
           .queueFamilyIndex = (queue_idx = i),
           .queueCount = 1, .pQueuePriorities = &priority
         };
+        const char *exts[] = {
+          "VK_KHR_storage_buffer_storage_class",
+          "VK_KHR_16bit_storage", "VK_KHR_8bit_storage"
+        };
         const VkDeviceCreateInfo device_info = {
           .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
           .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue_info,
+          .enabledExtensionCount = 3, .ppEnabledExtensionNames = exts
         };
         vkCreateDevice((*gpu = gpu_), &device_info, 0, &device);
         vkGetDeviceQueue(device, queue_idx, 0, &queue);
@@ -158,7 +165,7 @@ namespace Vulkan {
     // load shader code into module
     const VkShaderModuleCreateInfo comp_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(comp_code), .pCode = comp_code,
+      .codeSize = sizeof(g_main), .pCode = (uint32_t*)g_main,
     };
     VkShaderModule comp;
     vkCreateShaderModule(device, &comp_info, 0, &comp);
@@ -492,6 +499,7 @@ namespace RDP {
   void set_combine() {
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     memcpy(state.mux, instr.data(), 8);
+    printf("[RDP] SET_COMBINE %llx %llx\n", state.mux[0], state.mux[1]);
   }
 
   void set_env() {
@@ -499,7 +507,9 @@ namespace RDP {
   }
 
   void set_prim() {
-    state.prim = bswap32(fetch<2>(pc)[1]);
+    std::array<uint32_t, 2> instr = fetch<2>(pc);
+    state.lodf = (instr[0] & 0xff) << 24;
+    state.prim = bswap32(instr[1]);
   }
 
   void set_zprim() {
@@ -609,13 +619,16 @@ namespace RDP {
     // Set copy parameters
     Vulkan::add_tmem_copy(state);
     std::array<uint32_t, 2> instr = fetch<2>(pc);
-    uint32_t sh = (instr[1] >> 14) & 0xff, sl = (instr[0] >> 14) & 0xff;
+    uint32_t sh = (instr[1] >> 14) & 0x3ff, sl = (instr[0] >> 14) & 0x3ff;
     RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
     // Copy from texture image to tmem
     uint8_t *mem = Vulkan::tmem_ptr() + (state.tlut = tex.addr);
     uint32_t ram = tex_addr + sl * tex_nibs / 2;
     uint32_t width = (sh - sl + 1) * tex_nibs / 2;
-    memcpy(mem, R4300::ram + ram, width);
+    // quadricate memory while copying
+    for (uint32_t i = 0; i < width * 4; ++i) {
+      ((uint16_t*)mem)[i] = ((uint16_t*)(R4300::ram + ram))[i / 4];
+    }
   }
 
   void shade_triangle(RDPCommand &cmd) {
@@ -758,7 +771,10 @@ namespace RDP {
         default: invalid(); break;
       }
       if (pc > pc_end) pc = pc_end, offset = pc_end - start;
-      if (pc == pc_end) { status |= 0x80; return; }
+      if (pc == pc_end) {
+        //printf("[RDP] DP_END: %x\n", pc_end);
+        status |= 0x80; return;
+      }
     }
     Sched::add(TASK_RDP, 0);
   }

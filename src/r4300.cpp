@@ -209,17 +209,20 @@ const bool has_fram = false;
 
 #ifdef _WIN32
 
-static void eeprom_init(char *name) {
+static void fram_init(char *name) {
   // change extension to .fla, open file
   strcpy(name + strlen(name) - 4, ".fla");
-  int file = _open(name, _O_RDWR | _O_CREAT, _S_IREAD | _S_IWRITE);
+  int mode = _S_IREAD | _S_IWRITE, exists;
+  int file = _open(name, _O_RDWR | _O_CREAT | _O_EXCL, mode);
+  if ((exists = file < 0 && errno == EEXIST)) file = _open(name, _O_RDWR);
   if (file < 0) printf("Can't open %s\n", name), exit(1);
 
   // map 1mbit flashram file into memory
   if (_chsize(file, 0x20000) < 0) printf("Can't modify %s\n", name), exit(1);
   HANDLE fh = (HANDLE)_get_osfhandle(file);
   HANDLE mh = CreateFileMappingW(fh, NULL, PAGE_READWRITE, 0, 0, NULL);
-  eeprom = (uint64_t*)MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, 0x20000);
+  fram = (uint8_t*)MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, 0x20000);
+  if (!exists) memcpy(fram, 0xff, 0x20000);
 }
 
 #else
@@ -227,13 +230,15 @@ static void eeprom_init(char *name) {
 static void fram_init(char *name) {
   // change extension to .fla, open file
   strcpy(name + strlen(name) - 4, ".fla");
-  int file = open(name, O_RDWR | O_CREAT, 0644);
+  int file = open(name, O_RDWR | O_CREAT | O_EXCL, 0644), exists;
+  if ((exists = file < 0 && errno == EEXIST)) file = open(name, O_RDWR);
   if (file < 0) printf("Can't open %s\n", name), exit(1);
 
   // map 1mbit flashram file into memory
   if (ftruncate(file, 0x20000) < 0) printf("Can't modify %s\n", name), exit(1);
   fram = (uint8_t*)mmap(NULL, 0x20000, PROT_READ | PROT_WRITE,
     MAP_SHARED, file, 0), close(file);
+  if (!exists) memset(fram, 0xff, 0x20000);
 }
 
 #endif
@@ -253,7 +258,7 @@ static void fram_write(uint32_t cmd) {
       fram_status |= 0x8;
       fram_mode = FRAM_STATUS; break;
     case 0xa5:  // trigger write
-      off = (cmd & 0xff80) << 7; fram_status |= 0x4;
+      off = (cmd & 0xffff) << 7; fram_status |= 0x4;
       memcpy(fram + off, R4300::ram + fram_src, 0x80);
       fram_mode = FRAM_STATUS; break;
     case 0xd2: fram_mode = FRAM_STATUS; break;
@@ -267,12 +272,13 @@ static void fram_write(uint32_t cmd) {
 // handle PI DMAs to/from flashram
 static void fram_dma() {
   uint64_t fram_id = 0x1111800100c20000;
+  uint32_t addr = (pi_rom & 0xffff) * 2;
   if (pi_to_rom && fram_mode == FRAM_WRITE)
-    fram_src = (pi_ram & 0xffff) * 2;
-  if (!pi_to_rom && !pi_rom && fram_mode == FRAM_ID)
+    fram_src = pi_ram;
+  if (!pi_to_rom && fram_mode == FRAM_ID)
     *(uint64_t*)(R4300::ram + pi_ram) = bswap64(fram_id);
-  if (!pi_to_rom && pi_rom && fram_mode == FRAM_READ)
-    memcpy(R4300::ram + pi_ram, fram, pi_len);
+  if (!pi_to_rom && fram_mode == FRAM_READ)
+    memcpy(R4300::ram + pi_ram, fram + addr, pi_len);
   R4300::set_irqs(0x10), pi_status &= ~0x1;
 }
 
@@ -612,7 +618,9 @@ static void write(uint32_t addr, uint64_t val) {
   switch (addr & R4300::mask) {
     default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
     // RSP Interface
-    case 0x4040000: RSP::cop0[0] = val & 0x1fff; return;
+    case 0x4040000:
+      printf("[RSP] Writing %x to DMA_DST\n", val);
+      RSP::cop0[0] = val & 0x1fff; return;
     case 0x4040004:
       printf("[RSP] Writing %x to DMA_SRC\n", val);
       RSP::cop0[1] = val & 0xffffff; return;
@@ -649,7 +657,7 @@ static void write(uint32_t addr, uint64_t val) {
     case 0x4400000:
       if (val == vi_status) return;
       vi_status = val, vi_dirty = true; return;
-    case 0x4400004: vi_origin = val & 0xffffff; return;
+    case 0x4400004: vi_origin = val & 0xffffff; printf("VI_ORIGIN_REG set to %x\n", vi_origin); return;
     case 0x4400008:
       if ((val & 0xfff) == vi_width) return;
       vi_width = val & 0xfff, vi_dirty = true; return;
@@ -948,6 +956,7 @@ static MipsConfig cfg = {
   .cop1 = 66, .pool = 99,
   .lookup = lookup, .fetch = fetch,
   .mtc0 = mtc0, .stop_at = stop_at,
+  .mtc0_mask = 0x0a00,
 
   .pages = pages, .tlb = tlb[0],
   .read = read, .write = write,
@@ -970,9 +979,9 @@ void R4300::update() {
     if (code) {
       pc = Mips::run(&cfg, code);
       //printf("PC: %x\n", pc);
-      /*if (ram[0x6a32] != dcc) {
-        printf("6a32 is now %x\n", ram[0x6a32]);
-        dcc = ram[0x6a32];
+      /*if (ram[0x27596a] != dcc) {
+        printf("27596a is now %x\n", ram[0x27596a]);
+        dcc = ram[0x27596a];
       }*/
       if (!(broke |= breaks[pc])) continue;
       step = Debugger::update(&dbg);
