@@ -87,7 +87,7 @@ uint read_rgba16(uint enc) {
 
 uint16_t write_rgba16(uint dec) {
   // ABGR8888 to bswapped RGBA5551
-  uint enc = (dec & (0xff << 24)) != 0;
+  uint enc = (dec >> 30) & 0x1;
   enc |= (dec >> 18) & 0x3e;
   enc |= (dec >> 5) & 0x7c0;
   enc |= (dec << 8) & 0xf800;
@@ -418,34 +418,53 @@ uint2 combine(uint tex0, uint tex1, uint shade, uint noise_, uint2 prev, RDPComm
   if (cycle == 0) {
     a.w = unpacka(sel((mux0 >> 12) & 0x7, i1, i2));
     b.w = unpacka(sel((mux1 >> 12) & 0x7, i1, i2));
-    c.w = unpacka(sel((mux0 >> 9) & 0x7, i1, i2));
     d.w = unpacka(sel((mux1 >> 9) & 0x7, i1, i2));
+    uint4 tmp1 = uint4(0, tex0, tex1, cmd.prim);
+    uint4 tmp2 = uint4(shade, cmd.env, cmd.lodf, 0);
+    c.w = unpacka(sel((mux0 >> 9) & 0x7, tmp1, tmp2));
   } else {
     a.w = unpacka(sel((mux1 >> 21) & 0x7, i1, i2));
     b.w = unpacka(sel((mux1 >> 3) & 0x7, i1, i2));
-    c.w = unpacka(sel((mux1 >> 18) & 0x7, i1, i2));
     d.w = unpacka(sel((mux1 >> 0) & 0x7, i1, i2));
+    uint4 tmp1 = uint4(0, tex0, tex1, cmd.prim);
+    uint4 tmp2 = uint4(shade, cmd.env, cmd.lodf, 0);
+    c.w = unpacka(sel((mux1 >> 18) & 0x7, tmp1, tmp2));
   }
   // combine selected inputs
-  int4 res = (a - b) * (c >> 16);
-  res = d + (res + 0x8000) / 256;
+  int4 res = ((a - b) >> 16) * (c >> 16);
+  res = d + ((res + 0x80) << 8);
   return uint2(pack32(res), pack32(res >> 8));
 }
 
-uint blend(uint pixel, uint color, inout uint zmem, uint oz, uint cvg, bool far, RDPCommand cmd) {
-  // multiply 3-bit coverage and 5-bit alpha
-  uint mux = cmd.modes[1], alpha = color >> 27, ocvg = pixel >> 29;
-  alpha += ((alpha + 1) >> 5);
-  if (mux & M1_ALPHA2CVG) cvg = (alpha * cvg + 4) >> 5; 
-  if (mux & M1_CVG2ALPHA) alpha = cvg << 2;
+void mix_alpha_cvg(inout uint alpha, inout uint cvg, RDPCommand cmd) {
+  // mix 8-bit alpha and 3-bit coverage
+  int mode = cmd.modes[1], cvg8 = cvg << 5;
+  alpha >>= 16, alpha = alpha + (alpha + 1) / 256;
+  if (mode & M1_ALPHA2CVG) cvg8 = (alpha * cvg + 4) / 8;
+  alpha = (mode & M1_CVG2ALPHA) ? cvg8 : alpha + 0;
+  alpha = clamp(alpha, 0, 0xff) << 16; cvg = cvg8 >> 5;
+}
+
+uint blend(uint pixel, uint color, uint shade, uint alpha, inout uint zmem, uint oz,
+    uint cvg, bool far, RDPCommand cmd, uint cycle) {
+  int mux = cmd.modes[1], ocvg = pixel >> 29;
+  // alpha test if enabled
+  mix_alpha_cvg(alpha, cvg, cmd);
   if (cvg == 0) { zmem = oz; return pixel; }
-  //alpha = clamp(alpha, 0, 0x1f);
-  if ((mux & M1_ALPHA) && alpha < (cmd.blend >> 27)) { zmem = oz; return pixel; }
+  if (cycle == 0 && (mux & M1_ALPHA) && alpha < unpacka(cmd.blend)) { zmem = oz; return pixel; }
   // select blender inputs
-  uint p = sel(mux >> 30, uint4(color, pixel, cmd.blend, cmd.fog));  // 3 0
-  uint a = sel(mux >> 26, uint4(alpha, cmd.fog >> 27, alpha, 0x0));  // 2 0
-  uint m = sel(mux >> 22, uint4(color, pixel, cmd.blend, cmd.fog));  // 0 1
-  uint b = sel(mux >> 18, uint4(a ^ 0x1f, pixel >> 29, 0x1f, 0x0)) + 1;  // 0 1
+  uint p, a, m, b;
+  if (cycle == 0) {
+    p = sel(mux >> 30, uint4(color, pixel, cmd.blend, cmd.fog));
+    a = sel(mux >> 26, uint4(alpha >> 19, cmd.fog >> 27, shade >> 27, 0x0));
+    m = sel(mux >> 22, uint4(color, pixel, cmd.blend, cmd.fog));
+    b = sel(mux >> 18, uint4(~a & 0x1f, pixel >> 27, 0x1f, 0x0)) + 1;
+  } else {
+    p = sel(mux >> 28, uint4(color, pixel, cmd.blend, cmd.fog));
+    a = sel(mux >> 24, uint4(alpha >> 19, cmd.fog >> 27, shade >> 27, 0x0));
+    m = sel(mux >> 20, uint4(color, pixel, cmd.blend, cmd.fog));
+    b = sel(mux >> 16, uint4(~a & 0x1f, pixel >> 27, 0x1f, 0x0)) + 1;
+  }
   //if (copy) return (full && alpha ? color : pixel);
   // blend selected inputs
   uint4 p4 = unpack32(p), m4 = unpack32(m);
@@ -500,15 +519,17 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       }
       uint shade = sample_shade(dxy, cmd);
       uint2 color = combine(tex0, tex1, shade, noise_, 0, cmd, 0);
+      uint alpha = unpacka(color.y) ? 0 : unpacka(color.x);
       if (cmd.modes[0] & M0_2CYCLE) {
         color = combine(tex1, tex1, shade, noise_, color, cmd, 1);
       }
-      pixel = blend(pixel, color.x, zmem, oz, cvg, depth.y, cmd);
+      //color.x = pack32(unpack32(color.y) ? 0xff : unpack32(color.x));
       if (cmd.modes[0] & M0_2CYCLE) {
+        color.x = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, depth.y, cmd, 0);
         cmd.modes[0] &= ~M0_2CYCLE;
-        uint mux = (cmd.modes[1] & 0x33330000) << 2;
-        cmd.modes[1] = mux | (cmd.modes[1] & 0xffff);
-        pixel = blend(pixel, color.x, zmem, oz, cvg, depth.y, cmd);
+        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, depth.y, cmd, 1);
+      } else {
+        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, depth.y, cmd, 0);
       }
     }
   }
