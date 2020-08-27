@@ -286,6 +286,11 @@ uint read_noise(uint seed) {
   return 0xff000000 | (i << 16) | (i << 8) | i;
 }
 
+int4 quantize_x(int4 x) {
+  bool4 sticky = (x & 0x3fff) != 0;
+  return ((x >> 13) & ~1) | sticky;
+}
+
 uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
   // check pixel within y bounds
   int y1 = max(cmd.yh, cmd.syh);
@@ -293,27 +298,33 @@ uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
   if (!(y1 / 4 <= pos.y && pos.y <= y2 / 4)) return 0;
   // compute edges at each sub-scanline
   int4 y = pos.y * 4 + int4(0, 1, 2, 3);
-  int4 x1 = cmd.xh + cmd.sh * (y - cmd.yh) / 4;
-  int4 xm = cmd.xm + cmd.sm * (y - cmd.yh) / 4;
-  int4 xl = cmd.xl + cmd.sl * (y - cmd.ym) / 4;
+  int4 x1 = cmd.xh + cmd.sh / 4 * (y - (cmd.yh & ~3));
+  int4 xm = cmd.xm + cmd.sm / 4 * (y - (cmd.yh & ~3));
+  int4 xl = cmd.xl + cmd.sl / 4 * (y - cmd.ym);
+  // get horizontal bounds, quantize
   int4 x2 = y < (int4)cmd.ym ? xm : xl;
-  // compute valid sub-scanlines
   bool lft = cmd.type & (T_LMAJOR | T_RECT);
-  int4 xa = (lft ? x1 : x2), xb = (lft ? x2 : x1);
-  if (cmd.modes[0] & M0_COPY) y2 += 1, xb += 1 << 14;
-  bool4 vy = (int4)y1 <= y && y < (int4)y2 && xa < xb;
-  dxy = pos * 4, dxy.x -= (x1.x >> 14), dxy.y -= cmd.yh;
+  int4 xa = quantize_x(lft ? x1 : x2);
+  int4 xb = quantize_x(lft ? x2 : x1);
+  // compute valid sub-scanlines
+  //if (cmd.modes[0] & M0_COPY) y2 += 1, xb += 1 << 14;
+  bool4 vx = (xa / 2) < (xb / 2);
+  bool4 vy = vx && (int4)y1 <= y && y < (int4)y2;
+  dxy = pos * 4 - int2(x1.x >> 14, cmd.yh & ~3);
+  // apply scissor boundaries
+  int4 sxh = (uint4)cmd.sxh >> 13;
+  int4 sxl = (uint4)cmd.sxl >> 13;
+  xa = min(max(xa, sxh), sxl);
+  xb = min(max(xb, sxh), sxl);
   // check x bounds at every other subpixel
-  xa = max(xa, (int4)cmd.sxh) >> 14;
-  xb = min(xb, (int4)cmd.sxl) >> 14;
-  int4 x = pos.x * 4 + int4(0, 1, 0, 1);
-  uint cvg = dot(vy && xa <= x + 2 && x + 2 < xb, 1);
-  return cvg + dot(vy && xa <= x && x < xb, 1);
+  int4 x = pos.x * 8 + int4(0, 2, 0, 2);
+  uint cvg = dot(xa <= x + 4 && x + 4 < xb, vy);
+  return cvg + dot(xa <= x && x < xb, vy);
 }
 
 bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out int4 stwz) {
-  stwz = cmd.tex + (cmd.tde / 4) * dxy.y;
-  stwz = stwz + (cmd.tdx / 4) * dxy.x;
+  stwz = cmd.tex + dxy.y / 4 * cmd.tde;
+  stwz = stwz + dxy.x / 4 * cmd.tdx;
   // read old z, dz from zbuf
   bool skip = (~cmd.type & T_ZBUF) || (~cmd.modes[1] & M1_ZCMP);
   skip = skip || (cmd.modes[0] & M0_COPY);
@@ -371,8 +382,8 @@ uint sample_tex(int3 stw, uint tile_off, RDPCommand cmd) {
 
 uint sample_shade(int2 dxy, RDPCommand cmd) {
   if (~cmd.type & T_SHADE) return 0;
-  int4 rgba = cmd.shade + cmd.sde * dxy.y / 4;
-  return pack32(max(rgba + cmd.sdx * dxy.x / 4, 0));
+  int4 rgba = cmd.shade + dxy.y / 4 * cmd.sde;
+  return pack32(max(rgba + dxy.x / 4 * cmd.sdx, 0));
 }
 
 int4 sext(uint4 val) {
@@ -488,6 +499,18 @@ uint clamp_color16(uint2 inp) {
   color = (((color - 0x800000) << 7) >> 7) + 0x800000;
   return pack32(clamp(color, 0, 0xff0000));
 }
+
+static const int dith_matrix[16] = { 0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0 };
+
+uint dither(uint enc, uint2 pos) {
+  uint di = (pos.y & 3) * 4 + (pos.x & 3);
+  int4 orig = (unpack32(enc) & 0xff0000);
+  int4 rgb = unpack32(enc);
+  rgb = rgb > 0xf70000 ? 0xff0000 : (rgb & 0xf80000) + 0x80000;
+  int4 diff = rgb - orig;
+  int4 dith = ((int4)(dith_matrix[di] << 16) - (orig & 0x70000)) >> 31;
+  return pack32((orig + (diff & dith)) & 0xff0000);
+}
   
 
 [numthreads(8, 8, 1)]
@@ -518,7 +541,12 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
         tex1 = sample_tex(stwz.xyz, 1, cmd);
       }
       uint shade = sample_shade(dxy, cmd);
-      uint2 color = combine(tex0, tex1, shade, noise_, 0, cmd, 0);
+      uint2 color;
+      if (cmd.modes[0] & M0_2CYCLE) {
+        color = combine(tex0, tex1, shade, noise_, 0, cmd, 0);
+      } else {
+        color = combine(tex0, tex1, shade, noise_, 0, cmd, 1);
+      }
       uint alpha = unpacka(color.y) ? 0 : unpacka(color.x);
       if (cmd.modes[0] & M0_2CYCLE) {
         color = combine(tex1, tex1, shade, noise_, color, cmd, 1);
@@ -529,8 +557,9 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
         cmd.modes[0] &= ~M0_2CYCLE;
         pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, depth.y, cmd, 1);
       } else {
-        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, depth.y, cmd, 0);
+        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, depth.y, cmd, 1);
       }
+      pixel = dither(pixel, GlobalID.xy);
     }
   }
   

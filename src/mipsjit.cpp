@@ -2149,6 +2149,58 @@ struct MipsJit {
     as.movdqu(x86::dqword_ptr(x86::rax, x86::rcx), x86::xmm2);
   }
 
+  void ltv(uint32_t instr) {
+    // compute load address
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    int32_t off = sext(instr, 7) * 16;
+    as.add(x86::ecx, off), as.mov(x86::edx, x86::ecx);
+    as.and_(x86::edx, 0xff8), as.and_(x86::ecx, 0x7);
+    // find affected registers and lanes
+    as.mov(x86::rax, (uint64_t)cfg.mem);
+    as.add(x86::rax, x86::rdx);
+    uint32_t rti = (rt(instr) & ~0x7) * 2;
+    uint8_t elem = (sa(instr) >> 2) & 0x7;
+    for (uint8_t i = 0; i < 8; ++i, rti += 2) {
+      // load byte-swapped data from address
+      uint8_t rtx = x86_reg(rti + cfg.cop2);
+      as.movbe(x86::dx, x86::word_ptr(x86::rax, x86::rcx));
+      uint8_t idx = 0x7 - ((i - elem) & 0x7);
+      uint32_t dst = (rti + cfg.cop2) * 8 + idx * 2;
+      // insert data into correct lanes
+      if (rtx) as.pinsrw(x86::xmm(rtx), x86::dx, idx);
+      else as.mov(x86::word_ptr(x86::rbp, dst), x86::dx);
+      as.add(x86::ecx, 0x2), as.and_(x86::ecx, 0xf);
+    }
+  }
+
+  void stv(uint32_t instr) {
+    // compute store address
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    int32_t off = sext(instr, 7) * 16;
+    as.add(x86::ecx, off), as.mov(x86::edx, x86::ecx);
+    as.and_(x86::edx, 0xff8), as.and_(x86::ecx, 0x7);
+    // find affected registers and lanes
+    as.mov(x86::rax, (uint64_t)cfg.mem);
+    as.add(x86::rax, x86::rdx);
+    uint32_t rti = (rt(instr) & ~0x7) * 2;
+    uint8_t elem = (sa(instr) >> 2) & 0x7;
+    for (uint8_t i = 0; i < 8; ++i) {
+      // extract data from correct lanes
+      uint32_t idx = rti + ((elem + i) & 0x7) * 2;
+      uint8_t rtx = x86_reg(idx + cfg.cop2);
+      uint32_t src = (idx + cfg.cop2) * 8 + (7 - i) * 2;
+      if (rtx) as.pextrw(x86::dx, x86::xmm(rtx), 7 - i);
+      else as.mov(x86::dx, x86::word_ptr(x86::rbp, src));
+      // store byte-swapped data from address
+      as.movbe(x86::word_ptr(x86::rax, x86::rcx), x86::dx);
+      as.add(x86::ecx, 0x2), as.and_(x86::ecx, 0xf);
+    }
+  }
+
   void lwc2(uint32_t instr) {
     switch (rd(instr)) {
       case 0x0: ldv<uint8_t>(instr); break;
@@ -2161,7 +2213,7 @@ struct MipsJit {
       case 0x7: lpv<LUV>(instr); break;
       case 0x8: lpv<LHV>(instr); break;
       case 0x9: lpv<LFV>(instr); break;
-      case 0xb: printf("COP2 instruction LTV\n"); break;
+      case 0xb: ltv(instr); break;
       default: invalid(instr); break;
     }
   }
@@ -2178,7 +2230,7 @@ struct MipsJit {
       case 0x7: spv<LUV>(instr); break;
       case 0x8: spv<LHV>(instr); break;
       case 0x9: spv<LFV>(instr); break;
-      case 0xb: printf("COP2 instruction STV\n"); break;
+      case 0xb: stv(instr); break;
       default: invalid(instr); break;
     }
   }

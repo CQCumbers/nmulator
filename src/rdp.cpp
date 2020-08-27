@@ -675,10 +675,11 @@ namespace RDP {
     uint32_t t = type | ((instr[0] >> 19) & 0x10);
     RDPCommand cmd = {
       .type = t, .tile = (instr[0] >> 16) & 0x7,
-      .xh = sext(instr[4], 30), .xm = sext(instr[6], 30),
-      .xl = sext(instr[2], 30), .yh = sext(instr[1], 14),
+      .xh = sext(instr[4] & ~1, 28), .xm = sext(instr[6] & ~1, 28),
+      .xl = sext(instr[2] & ~1, 28), .yh = sext(instr[1], 14),
       .ym = sext(instr[1] >> 16, 14), .yl = sext(instr[0], 14),
-      .sh = sext(instr[5]), .sm = sext(instr[7]), .sl = sext(instr[3]),
+      .sh = sext(instr[5] & ~7, 30), .sm = sext(instr[7] & ~7, 30),
+      .sl = sext(instr[3] & ~7, 30),
     };
     cmd.state = state;
     if (type & 0x4) shade_triangle(cmd);
