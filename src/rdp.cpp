@@ -97,11 +97,19 @@ namespace Vulkan {
   const VkDeviceSize pixels_size = 320 * 240 * sizeof(uint32_t);
   uint8_t *pixels_ptr() { return mapped_mem + pixels_offset; }
 
-  const VkDeviceSize zbuf_offset = align(pixels_offset + pixels_size);
+  const VkDeviceSize hpixels_offset = align(pixels_offset + pixels_size);
+  const VkDeviceSize hpixels_size = 320 * 240 * sizeof(uint32_t);
+  uint8_t *hpixels_ptr() { return mapped_mem + hpixels_offset; }
+
+  const VkDeviceSize zbuf_offset = align(hpixels_offset + hpixels_size);
   const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint16_t);
   uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
 
-  const VkDeviceSize total_size = zbuf_offset + zbuf_size;
+  const VkDeviceSize hzbuf_offset = align(zbuf_offset + zbuf_size);
+  const VkDeviceSize hzbuf_size = 320 * 240 * sizeof(uint16_t);
+  uint8_t *hzbuf_ptr() { return mapped_mem + hzbuf_offset; }
+
+  const VkDeviceSize total_size = hzbuf_offset + hzbuf_size;
   VkBuffer buffer = VK_NULL_HANDLE;
 
   /* === Vulkan Initialization == */
@@ -177,11 +185,13 @@ namespace Vulkan {
       {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
       {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
       {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
-      {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0}
+      {6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
+      {7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0},
+      {8, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0}
     };
     const VkDescriptorSetLayoutCreateInfo desc_layout_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = 7, .pBindings = bindings
+      .bindingCount = 9, .pBindings = bindings
     };
     vkCreateDescriptorSetLayout(device, &desc_layout_info, 0, desc_layout);
     // create compute pipeline with shader and descriptor set layout
@@ -235,7 +245,7 @@ namespace Vulkan {
   void init_compute_desc(const VkDescriptorSetLayout &layout, VkDescriptorSet *descriptors) {
     // allocate descriptor set from descriptor pool
     const VkDescriptorPoolSize pool_size = {
-      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 7
+      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 9
     };
     const VkDescriptorPoolCreateInfo pool_info = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -256,10 +266,12 @@ namespace Vulkan {
       { .buffer = buffer, .offset = globals_offset, .range = globals_size },
       { .buffer = buffer, .offset = tmem_offset, .range = tmem_size },
       { .buffer = buffer, .offset = pixels_offset, .range = pixels_size },
-      { .buffer = buffer, .offset = zbuf_offset, .range = zbuf_size }
+      { .buffer = buffer, .offset = hpixels_offset, .range = hpixels_size },
+      { .buffer = buffer, .offset = zbuf_offset, .range = zbuf_size },
+      { .buffer = buffer, .offset = hzbuf_offset, .range = hzbuf_size }
     };
-    VkWriteDescriptorSet write_descriptors[7];
-    for (uint8_t i = 0; i < 7; ++i) {
+    VkWriteDescriptorSet write_descriptors[9];
+    for (uint8_t i = 0; i < 9; ++i) {
       write_descriptors[i] = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = *descriptors, .dstBinding = i, .descriptorCount = 1,
@@ -267,7 +279,7 @@ namespace Vulkan {
         .pBufferInfo = &buffer_info[i]
       };
     }
-    vkUpdateDescriptorSets(device, 7, write_descriptors, 0, 0);
+    vkUpdateDescriptorSets(device, 9, write_descriptors, 0, 0);
   }
   
   void record_compute(const VkPipelineLayout &layout, const VkPipeline &pipeline,
@@ -369,7 +381,8 @@ namespace Vulkan {
     fclose(file), RDP::dump = false;
   }
 
-  void render(uint8_t *img, uint32_t img_len, uint8_t *zbuf, uint32_t zbuf_len) {
+  void render(uint8_t *img, uint8_t *himg, uint32_t img_len,
+      uint8_t *zbuf, uint8_t *hzbuf, uint32_t zbuf_len) {
     if (!img || n_cmds == 0) return;
 
     uint8_t *last_tmem = tmem_ptr();
@@ -379,9 +392,15 @@ namespace Vulkan {
     memcpy(texes_ptr(), last_texes, sizeof(RDPTex) * 8);
 
     globals_ptr()->n_cmds = n_cmds;
-    if (zbuf) memcpy(zbuf_ptr(), zbuf, zbuf_len);
-    else memset(zbuf_ptr(), 0xff, zbuf_len);
+    if (zbuf) {
+      memcpy(zbuf_ptr(), zbuf, zbuf_len);
+      memcpy(hzbuf_ptr(), hzbuf, zbuf_len);
+    } else {
+      //memset(zbuf_ptr(), 0xff, zbuf_len);
+      //memset(hzbuf_ptr(), 0xff, zbuf_len);
+    }
     memcpy(pixels_ptr(), img, img_len);
+    memcpy(hpixels_ptr(), himg, img_len);
 
     /*bool dump = RDP::dump;
     if (dump && img[1] != 0xff) {
@@ -392,8 +411,12 @@ namespace Vulkan {
 
     run_compute();
     n_cmds = 0, memset(tiles_ptr(), 0, tiles_size);
-    if (zbuf) memcpy(zbuf, zbuf_ptr(), zbuf_len);
+    if (zbuf) {
+      memcpy(zbuf, zbuf_ptr(), zbuf_len);
+      memcpy(hzbuf, hzbuf_ptr(), zbuf_len);
+    }
     memcpy(img, pixels_ptr(), img_len);
+    memcpy(himg, hpixels_ptr(), img_len);
     
     /*if (dump && img[1] != 0x0 && img[1] != 0xff) {
       dump = false;
@@ -409,7 +432,7 @@ namespace RDP {
   uint64_t offset;
 
   uint32_t img_size, img_width, height;
-  uint8_t *img_addr, *zbuf_addr;
+  uint32_t img_addr, zbuf_addr;
   uint32_t tex_nibs, tex_width, tex_addr;
   RDPState state;
 
@@ -446,12 +469,13 @@ namespace RDP {
   }
 
   void render() {
-    //printf("RDP render to %x, %x\n", img_addr - R4300::ram, zbuf_addr - R4300::ram);
     uint32_t img_len = img_width * height * img_size;
     uint32_t zbuf_len = img_width * height * 2;
     if (img_len > Vulkan::pixels_size) img_len = Vulkan::pixels_size;
     if (zbuf_len > Vulkan::zbuf_size) zbuf_len = Vulkan::zbuf_size;
-    Vulkan::render(img_addr, img_len, zbuf_addr, zbuf_len);
+    uint8_t *img = R4300::ram + img_addr, *himg = R4300::hram + img_addr;
+    uint8_t *zbuf = R4300::ram + zbuf_addr, *hzbuf = R4300::hram + zbuf_addr;
+    Vulkan::render(img, himg, img_len, zbuf, hzbuf, zbuf_len);
   }
 
   /* === Instruction Translations === */
@@ -461,8 +485,7 @@ namespace RDP {
     std::array<uint32_t, 2> instr = fetch<2>(pc);
     img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
     img_width = (instr[0] & 0x3ff) + 1;
-    img_addr = R4300::ram + (instr[1] & 0x3ffffff);
-    //printf("IMG_ADDR is now %x\n", img_addr);
+    img_addr = instr[1] & 0x3ffffff;
 
     GlobalData *globals = Vulkan::globals_ptr();
     globals->width = img_width, globals->size = img_size;
@@ -517,7 +540,7 @@ namespace RDP {
   }
 
   void set_zbuf() {
-    zbuf_addr = R4300::ram + (fetch<2>(pc)[1] & 0x3ffffff);
+    zbuf_addr = fetch<2>(pc)[1] & 0x3ffffff;
   }
 
   void set_key_r() {

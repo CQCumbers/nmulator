@@ -88,6 +88,7 @@ namespace R4300 {
   void update();
 
   extern uint8_t *ram;
+  extern uint8_t *hram;
   const uint32_t mask = 0x1fffffff;
   void set_irqs(uint32_t mask);
   void unset_irqs(uint32_t mask);

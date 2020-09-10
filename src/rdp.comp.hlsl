@@ -11,6 +11,7 @@
 #define M1_CVG2ALPHA 0x00002000
 #define M1_ALPHA2CVG 0x00001000
 #define M1_ZMODE     0x00000c00
+#define ZINTRA       0x00000400
 #define ZTRANS       0x00000800
 #define ZDECAL       0x00000c00
 #define M1_ON_CVG    0x00000080
@@ -72,7 +73,9 @@ struct RDPTex {
 
 [[vk::binding(4)]] StructuredBuffer<uint16_t> tmem;
 [[vk::binding(5)]] RWStructuredBuffer<uint16_t> pix16;
-[[vk::binding(6)]] RWStructuredBuffer<uint16_t> zbuf;
+[[vk::binding(6)]] RWStructuredBuffer<uint16_t> hpix16;
+[[vk::binding(7)]] RWStructuredBuffer<uint16_t> zbuf;
+[[vk::binding(8)]] RWStructuredBuffer<uint16_t> hzbuf;
 
 /* === Format Conversions === */
 
@@ -85,13 +88,26 @@ uint read_rgba16(uint enc) {
   return dec | ((enc & 0xf800) >> 8);
 }
 
+uint read_rgba16(uint enc, uint henc) {
+  enc = ((enc << 8) | (enc >> 8)) & 0xffff;
+  uint dec = (enc & 0x1) << 31;
+  dec |= (henc & 0x3) << 29;
+  dec |= (enc & 0x3e) << 18;
+  dec |= (enc & 0x7c0) << 5;
+  return dec | ((enc & 0xf800) >> 8);
+}
+
 uint16_t write_rgba16(uint dec) {
   // ABGR8888 to bswapped RGBA5551
-  uint enc = (dec >> 30) & 0x1;
+  uint enc = (dec >> 31) & 0x1;
   enc |= (dec >> 18) & 0x3e;
   enc |= (dec >> 5) & 0x7c0;
   enc |= (dec << 8) & 0xf800;
   return (uint16_t)((enc << 8) | (enc >> 8));
+}
+
+uint hwrite_rgba16(uint dec) {
+  return (dec >> 29) & 0x3;
 }
 
 uint read_ia16(uint enc) {
@@ -156,15 +172,15 @@ uint unpacka(uint color) {
   return (color >> 24) << 16;
 }
 
-uint unpackz(uint enc) {
+uint unpackz(uint enc, uint henc) {
   enc = ((enc << 8) | (enc >> 8)) & 0xffff;
   // 14-bit float Z to 18-bit uint
   int mant = (enc >> 2) & 0x7ff, exp_ = enc >> 13;
   uint shift = max(6 - exp_, 0);
   uint base = 0x40000 - (0x40000 >> exp_);
   uint dec = (mant << shift) + base;
-  // load upper 2 bits of dz only
-  uint dz = (enc & 0x3) << 2;
+  // load 4-bit dz from hidden ram
+  uint dz = ((enc & 0x3) << 2) | (henc & 0x3);
   return ((dec & 0x3ffff) << 4) | dz;
 }
 
@@ -177,6 +193,10 @@ uint packz(uint dec) {
   uint dz = (dec >> 2) & 0x3;
   uint enc = (exp_ << 13) | (mant << 2) | dz;
   return ((enc << 8) | (enc >> 8)) & 0xffff;
+}
+
+uint hpackz(uint dec) {
+  return dec & 0x3;
 }
 
 uint tmem4r(uint pos, uint off, uint idx) {
@@ -322,12 +342,12 @@ uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
   return cvg + dot(xa <= x && x < xb, vy);
 }
 
-bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out int4 stwz) {
+bool2 compare_z(inout uint zmem, inout uint cvg, bool full, int2 dxy, RDPCommand cmd, out int4 stwz) {
   stwz = cmd.tex + dxy.y / 4 * cmd.tde;
   stwz = stwz + dxy.x / 4 * cmd.tdx;
   // read old z, dz from zbuf
   bool skip = (~cmd.type & T_ZBUF) || (~cmd.modes[1] & M1_ZCMP);
-  skip = skip || (cmd.modes[0] & M0_COPY);
+  //skip = skip || (cmd.modes[0] & M0_COPY);
   if (cvg == 0 || skip) return (bool2)true;
   uint oz = zmem >> 4, odz = zmem & 0xf;
   bool zmax = (oz == 0x3ffff);
@@ -336,21 +356,32 @@ bool2 compare_z(inout uint zmem, uint cvg, int2 dxy, RDPCommand cmd, out int4 st
   if (~cmd.modes[1] & M1_ZSRC) nz = stwz.w >> 14;
   // increase dz at greater floating point depths
   int precision = (packz(zmem) >> 5) & 0x7;
-  if (precision < 3) odz = max(odz + 1, 4 - precision);
+  bool coplanar = false;
+  if (precision < 3) {
+    if (odz == 0xf) coplanar = true;
+    else odz = max(odz + 1, 4 - precision);
+  }
   // get new dz from prim_z
   uint ndz = firstbithigh(max(cmd.zprim & 0xffff, 1));
   uint dz = 0x8 << max(ndz, odz);
-  uint mode = cmd.modes[1] & M1_ZMODE;
-  if (mode == ZTRANS || (mode != ZDECAL && cvg > 7)) dz = 0;
   // compare new z with old z
-  bool zle = int((nz - dz) << 14) <= int(oz << 14);
-  bool zge = int((nz + dz) << 14) >= int(oz << 14);
-  if (mode != ZDECAL) zle = zmax || zle;
-  else zle = zge && zle && !zmax;
+  bool zle = coplanar || nz - dz <= oz;
+  bool zge = coplanar || nz + dz >= oz;
+  bool zlt = full ? nz < oz : zle;
+  bool zin = full && nz < oz && zge;
+  // depth test based on mode
+  uint mode = cmd.modes[1] & M1_ZMODE;
+  if (mode == ZINTRA && zin) {
+    /*uint mdz = max(ndz, odz);
+    uint cmul = ((oz >> mdz) - (nz >> mdz)) & 0xf;
+    cvg = min(cvg * cmul / 8, 8), */zlt = true;
+  }
+  if (mode == ZTRANS) zlt = zmax || nz < oz;
+  if (mode == ZDECAL) zlt = !zmax && zge && zle;
   // write new z/dz if closer
   bool write = cmd.modes[1] & M1_ZWRITE;
-  if (zle && write) zmem = (nz << 4) | ndz;
-  return bool2(zle, zge);
+  if (zlt && write) zmem = (nz << 4) | ndz;
+  return bool2(zlt, zge);
 }
 
 uint sample_tex(int3 stw, uint tile_off, RDPCommand cmd) {
@@ -457,12 +488,12 @@ void mix_alpha_cvg(inout uint alpha, inout uint cvg, RDPCommand cmd) {
 }
 
 uint blend(uint pixel, uint color, uint shade, uint alpha, inout uint zmem, uint oz,
-    uint cvg, bool far, RDPCommand cmd, uint cycle) {
+    uint cvg, bool full, bool far, RDPCommand cmd, uint cycle) {
   int mux = cmd.modes[1], ocvg = pixel >> 29;
   // alpha test if enabled
   mix_alpha_cvg(alpha, cvg, cmd);
   if (cvg == 0) { zmem = oz; return pixel; }
-  if (cycle == 0 && (mux & M1_ALPHA) && alpha < unpacka(cmd.blend)) { zmem = oz; return pixel; }
+  //if (cycle == 0 && (mux & M1_ALPHA) && alpha < unpacka(cmd.blend)) { zmem = oz; return pixel; }
   // select blender inputs
   uint p, a, m, b;
   if (cycle == 0) {
@@ -485,12 +516,12 @@ uint blend(uint pixel, uint color, uint shade, uint alpha, inout uint zmem, uint
   int c1 = clamp(cvg + ocvg, 0, 7), c2 = (cvg + ocvg) & 7;
   uint output = sel(mux >> 8, uint4(c1, c2, 7, ocvg)) << 29;
   // skip inputs based on flags
-  bool copy = cmd.modes[0] & M0_COPY;
+  bool copy = cmd.modes[0] & M0_COPY, aa = mux & M1_AA;
   bool on_cvg = mux & M1_ON_CVG, force = mux & M1_BLEND;
-  bool full = cvg + ocvg > 7, aa = mux & M1_AA;
   if (on_cvg && !full) return output | (m & 0x1fffffff);
-  if (!(force || (!full && aa && far))) return output | (p & 0x1fffffff);
-  return (pack32(res) & 0xffffff) | output;
+  if (force || (/*!full && */aa && far)) {
+    return (pack32(res) & 0xffffff) | output;
+  } else return output | (p & 0x1fffffff);
 }
 
 uint clamp_color16(uint2 inp) {
@@ -520,8 +551,8 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   if (GlobalID.y >= 240) return;
 
   uint pos = GlobalID.y * global.width + GlobalID.x;
-  uint pixel = read_rgba16(pix16[pos]);
-  uint zmem = unpackz(zbuf[pos]);
+  uint pixel = read_rgba16(pix16[pos], hpix16[pos]);
+  uint zmem = unpackz(zbuf[pos], hzbuf[pos]);
   uint noise_ = 0xff888888;
 
   TileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
@@ -534,7 +565,8 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
 
       int2 dxy; int4 stwz; uint oz = zmem;
       uint cvg = visible(GlobalID.xy, cmd, dxy);
-      bool2 depth = compare_z(zmem, cvg, dxy, cmd, stwz);
+      bool full = cvg + (pixel >> 29) > 7;
+      bool2 depth = compare_z(zmem, cvg, full, dxy, cmd, stwz);
       if (cvg == 0 || !depth.x) continue;
       uint tex0 = sample_tex(stwz.xyz, 0, cmd), tex1 = 0;
       if (cmd.modes[0] & M0_2CYCLE) {
@@ -553,16 +585,18 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       }
       //color.x = pack32(unpack32(color.y) ? 0xff : unpack32(color.x));
       if (cmd.modes[0] & M0_2CYCLE) {
-        color.x = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, depth.y, cmd, 0);
+        color.x = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, full, depth.y, cmd, 0);
         cmd.modes[0] &= ~M0_2CYCLE;
-        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, depth.y, cmd, 1);
+        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, full, depth.y, cmd, 1);
       } else {
-        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, depth.y, cmd, 1);
+        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, full, depth.y, cmd, 1);
       }
       pixel = dither(pixel, GlobalID.xy);
     }
   }
   
   zbuf[pos] = (uint16_t)packz(zmem);
+  hzbuf[pos] = (uint16_t)hpackz(zmem);
   pix16[pos] = write_rgba16(pixel);
+  hpix16[pos] = hwrite_rgba16(pixel);
 }

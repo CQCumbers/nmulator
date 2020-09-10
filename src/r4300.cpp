@@ -20,7 +20,7 @@
 #include <nmmintrin.h>
 #include "nmulator.h"
 
-namespace R4300 { uint8_t *ram; }
+namespace R4300 { uint8_t *ram, *hram; }
 static uint32_t pages[0x100000];
 static uint32_t tlb[0x20][4];
 
@@ -998,6 +998,7 @@ void R4300::update() {
 void R4300::init(const char *name) {
   // allocate memory, setup change detection
   ram = cfg.mem = alloc_pages(0x20000000);
+  hram = alloc_pages(0x800000);
   setup_fault_handler();
 
   // (paddr >> 17) == 0x7 for invalid regions
