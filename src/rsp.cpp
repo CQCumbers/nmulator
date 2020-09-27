@@ -6,7 +6,7 @@
 #include "robin_hood.h"
 
 static uint8_t *imem;
-static uint64_t regs[200];
+static uint64_t regs[148 + 52];
 
 namespace RSP {
   uint8_t *mem = NULL;
@@ -128,6 +128,8 @@ void RSP::update() {
       //for (uint32_t i = 0; i < 32; ++i)
       //  printf("Reg %d: %llx\n", i, regs[i]);
       //printf("RSP PC: %x | %x %x\n", pc, read32(imem + pc), read32(imem + pc + 4));
+      //printf("VCO: %llx %llx %llx %llx\n", regs[134], regs[135], regs[136], regs[137]);
+      //printf("RSP PC: %x | %x %x\n", pc, read32(imem + pc), read32(imem + pc + 4));
       if ((cop0[4] & 0x42) == 0x42) R4300::set_irqs(0x1);
     } else {
       // search backup blocks for matching hash
@@ -159,4 +161,49 @@ void RSP::init(uint8_t *mem) {
   imem = mem + 0x1000;
   cop0[4] = 0x1, cop0[11] = 0x80;
   Mips::init(&cfg);
+}
+
+void RSP::test(const char *filename) {
+  uint32_t inp_size = 40;
+  uint32_t out_size = 1376;
+
+  // load imem instructions
+  init((uint8_t*)malloc(0x2800));
+  char *name = strdup(filename);
+  FILE *instrs = fopen(name, "r");
+  fread(imem, 1, 0x1000, instrs);
+
+  // open input/output files
+  strcpy(name + strlen(name) - 4, ".inp");
+  FILE *input = fopen(name, "r");
+  strcpy(name + strlen(name) - 4, ".gol");
+  FILE *output = fopen(name, "r");
+
+  // run RSP and print results
+  uint8_t *gol = mem + 0x2000;
+  uint8_t *out = mem + 0x800;
+  uint32_t idx = 0;
+  while (fread(mem, inp_size, 1, input)) {
+    for (uint32_t i = 0; i < inp_size; i += 4)
+      write32(mem + i, *(uint32_t*)(mem + i));
+    fread(gol, out_size, 1, output);
+    Sched::until = INT64_MAX;
+    cop0[4] = pc = 0, update();
+
+    for (uint32_t i = 0; i < out_size; i += 16) {
+      printf("%04x: ", i);
+      for (uint32_t j = 0; j < 16; j += 4)
+        printf("%08x", read32(out + i + j));
+      printf("  ");
+      for (uint32_t j = 0; j < 16; j += 4)
+        printf("%08x", read32(gol + i + j));
+      printf("\n");
+    }
+
+    bool pass = memcmp(out, gol, out_size) == 0;
+    const char *msg = pass ? "passed" : "failed";
+    printf("Test %d %s\n\n", idx++, msg);
+    if (!pass) exit(1);
+  }
+  printf("All tests passed\n"), exit(0);
 }

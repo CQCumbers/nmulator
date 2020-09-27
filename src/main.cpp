@@ -2,6 +2,7 @@
 #include "nmulator.h"
 
 int main(int argc, char* argv[]) {
+  //RSP::test(argv[1]);
   // initialize system components
   R4300::init(argv[1]);
   if (argc == 3) {

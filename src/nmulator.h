@@ -106,6 +106,7 @@ namespace RSP {
   void dma(uint32_t val, bool to_ram);
   void set_status(uint32_t mask);
   void init(uint8_t *mem);
+  void test(const char *filename);
 }
 
 namespace RDP {
