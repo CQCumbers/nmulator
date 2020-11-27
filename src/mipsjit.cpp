@@ -85,7 +85,7 @@ struct MipsJit {
     ACC_HI = 64, ACC_MD = 66, ACC_LO = 68,
     VCO_LO = 70, VCO_HI = 72, VCC_LO = 74,
     VCC_HI = 76, VCE_LO = 78, VCE_HI = 80,
-    DIV_IN = 82, DIV_OUT = 83,
+    DIV_IN = 82, DIV_OUT = 83, DIV_H = 84,
   };
 
   void x86_load_acc() {
@@ -275,7 +275,7 @@ struct MipsJit {
     as.pshufb(x86::xmm15, x86_spillq((10 + e) * 2 + cfg.pool));
   }
 
-  void update_acc(bool high) {
+  void update_acc(bool high, bool frac) {
     // assuming old accumulator values stored in spillq
     // adds them to new accumulator values in xmm13-15
     as.pxor(x86::xmm1, x86::xmm1);
@@ -291,6 +291,7 @@ struct MipsJit {
       as.psubw(x86::xmm14, x86::xmm0);
       as.movdqa(x86::xmm13, x86::xmm14);
       as.psraw(x86::xmm13, 15);
+      if (frac) as.pxor(x86::xmm13, x86::xmm2);
     }
     // calc middle accumulator overflow mask
     as.movdqa(x86::xmm0, x86_spillq(ACC_MD + cfg.cop2));
@@ -311,8 +312,6 @@ struct MipsJit {
   }
 
   /* === Instruction Translations === */
-
-  //enum LW_Type { LB, LH, LW, LD, LBU, LHU, LWU };
 
   inline void x86_paddr(Label miss) {
     as.mov(x86::edx, x86::ecx), as.shr(x86::edx, 12);
@@ -449,13 +448,13 @@ struct MipsJit {
     sign ? x86_read_s<T>(pc) : x86_read<T>(pc);
     if (right) as.dec(x86::ecx);
     as.and_(x86::ecx, (uint8_t)sizeof(T) - 1);
-    right ? as.not_(x86::rcx) : as.neg(x86::rcx);
     uint8_t rtx = x86_reg(rt(instr));
     // mask according to alignment
     if (rtx) as.xor_(x86::rax, x86::gpq(rtx));
     else as.xor_(x86::rax, x86_spilld(rt(instr)));
-    uint32_t mask = cfg.pool * 8 + (3 - right) * 16;
-    as.and_(x86::rax, x86::qword_ptr(x86::rbp, x86::rcx, 0, mask));
+    if (right) as.xor_(x86::ecx, 7); as.shl(x86::ecx, 3);
+    right ? as.shl(x86::rax, x86::cl) : as.shr(x86::rax, x86::cl);
+    right ? as.shr(x86::rax, x86::cl) : as.shl(x86::rax, x86::cl);
     if (rtx) as.xor_(x86::gpq(rtx), x86::rax);
     else as.xor_(x86_spilld(rt(instr)), x86::rax);
     if (sizeof(T) < 8) to_eax(rt(instr)), from_eax(rt(instr));
@@ -472,19 +471,18 @@ struct MipsJit {
     // load byte-swapped data from address
     constexpr bool sign = T(-1) < T(0);
     sign ? x86_read_s<T>(pc) : x86_read<T>(pc);
-    as.mov(x86::esi, x86::ecx);
-    if (right) as.dec(x86::esi);
-    as.and_(x86::esi, (uint8_t)sizeof(T) - 1);
-    right ? as.not_(x86::rsi) : as.neg(x86::rsi);
+    as.mov(x86::rsi, x86::rax), as.mov(x86::edx, x86::ecx);
+    if (right) as.dec(x86::ecx);
+    as.and_(x86::ecx, (uint8_t)sizeof(T) - 1);
     uint8_t rtx = x86_reg(rt(instr));
     // mask according to alignment
-    if (rtx) as.xor_(x86::rax, x86::gpq(rtx));
-    else as.xor_(x86::rax, x86_spilld(rt(instr)));
-    uint32_t mask = cfg.pool * 8 + (2 + right) * 16;
-    as.and_(x86::rax, x86::qword_ptr(x86::rbp, x86::rsi, 0, mask));
-    if (rtx) as.xor_(x86::rax, x86::gpq(rtx));
-    else as.xor_(x86::rax, x86_spilld(rt(instr)));
-    as.mov(x86::rsi, x86::rax), x86_write<T, true>(0);
+    if (rtx) as.xor_(x86::rsi, x86::gpq(rtx));
+    else as.xor_(x86::rsi, x86_spilld(rt(instr)));
+    if (right) as.xor_(x86::ecx, 7); as.shl(x86::ecx, 3);
+    right ? as.shl(x86::rsi, x86::cl) : as.shr(x86::rsi, x86::cl);
+    right ? as.shr(x86::rsi, x86::cl) : as.shl(x86::rsi, x86::cl);
+    as.xor_(x86::rsi, x86::rax), as.mov(x86::ecx, x86::edx);
+    x86_write<T, true>(0);
   }
 
   void lui(uint32_t instr) {
@@ -1281,6 +1279,9 @@ struct MipsJit {
   void mfc0(uint32_t instr) {
     if (rt(instr) == 0) return;
     move(rt(instr), rd(instr) + cfg.cop0);
+    if (cfg.is_rsp && rt(instr) == 7) {
+      as.mov(x86_spilld(rd(instr) + cfg.cop0), 1);
+    }
   }
 
   void mtc0(uint32_t instr) {
@@ -1591,24 +1592,73 @@ struct MipsJit {
     printf("Invalid %s instruction %x\n", name, instr), exit(1);
   }
 
-  enum VMUDN_Type { VMULF, VMULU, VMUDL, VMUDM, VMUDN, VMUDH };
+  enum VMULF_Type { VMULF, VMULU };
 
-  template <VMUDN_Type type, bool accumulate>
-  void vmudn(uint32_t instr) {
-    bool type_frac = (type == VMULF || type == VMULU);
-    printf("COP2 Multiply of $%d and $%d to $%d\n", rt(instr), rd(instr), sa(instr));
-    // add rounding value
-    if (type_frac && !accumulate) {
-      as.pcmpeqd(x86::xmm15, x86::xmm15); as.psllw(x86::xmm15, 15);
-      as.pxor(x86::xmm14, x86::xmm14); as.pxor(x86::xmm13, x86::xmm13);
-    }
-    // save old accumulator values
-    if (accumulate || type_frac) x86_store_acc();
+  template <VMULF_Type type, bool acc>
+  void vmulf(uint32_t instr) {
+    if (acc) x86_store_acc();
     // move vt into accumulator
     uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + cfg.cop2));
     elem_spec(rs(instr)), as.movdqa(x86::xmm14, x86::xmm15);
+    // move vs into temp register
+    uint8_t rdx = x86_reg(rd(instr) * 2 + cfg.cop2);
+    if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
+    else as.movdqa(x86::xmm0, x86_spillq(rd(instr) * 2 + cfg.cop2));
+    // multiply signed vt by signed vs
+    as.movdqa(x86::xmm1, x86::xmm15);
+    as.pmullw(x86::xmm15, x86::xmm0);
+    as.pmulhw(x86::xmm14, x86::xmm0);
+    // shift product up by 1 bit
+    as.movdqa(x86::xmm0, x86::xmm15); as.psrlw(x86::xmm0, 15);
+    as.paddw(x86::xmm14, x86::xmm14); as.por(x86::xmm14, x86::xmm0);
+    as.paddw(x86::xmm15, x86::xmm15);
+    if (!acc) {
+      // add rounding value
+      as.movdqa(x86::xmm0, x86::xmm15); as.psrlw(x86::xmm0, 15);
+      as.paddw(x86::xmm14, x86::xmm0); as.pcmpeqd(x86::xmm0, x86::xmm0);
+      as.psllw(x86::xmm0, 15); as.pxor(x86::xmm15, x86::xmm0);
+      // handle overflow case
+      as.pcmpeqw(x86::xmm1, x86::xmm0);
+      if (rdx) as.pcmpeqw(x86::xmm0, x86::xmm(rdx));
+      else as.pcmpeqw(x86::xmm0, x86_spillq(rd(instr) * 2 + cfg.cop2));
+      as.pand(x86::xmm0, x86::xmm1); as.movdqa(x86::xmm13, x86::xmm14);
+      as.psraw(x86::xmm13, 15); as.pxor(x86::xmm13, x86::xmm0);
+    } else {
+      // handle overflow case
+      as.pcmpeqd(x86::xmm2, x86::xmm2); as.psllw(x86::xmm2, 15);
+      as.pcmpeqw(x86::xmm1, x86::xmm2);
+      if (rdx) as.pcmpeqw(x86::xmm2, x86::xmm(rdx));
+      else as.pcmpeqw(x86::xmm2, x86_spillq(rd(instr) * 2 + cfg.cop2));
+      as.pand(x86::xmm2, x86::xmm1); update_acc(false, true);
+    }
+    // saturate signed value
+    as.movdqa(x86::xmm0, x86::xmm14); as.punpcklwd(x86::xmm0, x86::xmm13);
+    as.movdqa(x86::xmm1, x86::xmm14); as.punpckhwd(x86::xmm1, x86::xmm13);
+    as.packssdw(x86::xmm0, x86::xmm1);
+    // handle unsigned clamping
+    if (type == VMULU) {
+      as.movdqa(x86::xmm1, x86::xmm0); as.movdqa(x86::xmm2, x86::xmm0);
+      as.pcmpgtw(x86::xmm2, x86::xmm14); as.psraw(x86::xmm0, 15);
+      as.pandn(x86::xmm0, x86::xmm1); as.por(x86::xmm0, x86::xmm2);
+    }
+    // move accumulator section into vd
+    uint8_t sax = x86_reg(sa(instr) * 2 + cfg.cop2);
+    if (sax) as.movdqa(x86::xmm(sax), x86::xmm0);
+    else as.movdqa(x86_spillq(sa(instr) * 2 + cfg.cop2), x86::xmm0);
+  }
+
+  enum VMUDN_Type { VMUDL, VMUDM, VMUDN, VMUDH };
+
+  template <VMUDN_Type type, bool acc>
+  void vmudn(uint32_t instr) {
+    if (acc) x86_store_acc();
+    // move vt into accumulator
+    uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
+    if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
+    else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + cfg.cop2));
+    elem_spec(rs(instr)); as.movdqa(x86::xmm14, x86::xmm15);
     // move vs into xmm temp register
     uint8_t rdx = x86_reg(rd(instr) * 2 + cfg.cop2);
     if (rdx) as.movdqa(x86::xmm0, x86::xmm(rdx));
@@ -1618,26 +1668,15 @@ struct MipsJit {
       as.movdqa(x86::xmm13, x86::xmm14);
       as.pmullw(x86::xmm14, x86::xmm0);
       as.pmulhw(x86::xmm13, x86::xmm0);
-      as.pxor(x86::xmm15, x86::xmm15);
+      if (!acc) as.pxor(x86::xmm15, x86::xmm15);
     } else if (type == VMUDL) {
       // multiply unsigned vt by unsigned vs
       as.pmulhuw(x86::xmm15, x86::xmm0);
       as.pxor(x86::xmm14, x86::xmm14);
-      as.pxor(x86::xmm13, x86::xmm13);
-    } else if (type == VMULF || type == VMULU) {
-      // multiply signed vt by signed vs
-      as.pmullw(x86::xmm15, x86::xmm0);
-      as.pmulhw(x86::xmm14, x86::xmm0);
-      // shift product up by 1 bit
-      as.psllw(x86::xmm14, 1);
-      as.movdqa(x86::xmm0, x86::xmm15); as.psrlw(x86::xmm0, 15);
-      as.por(x86::xmm14, x86::xmm0);
-      as.psllw(x86::xmm15, 1); update_acc(false);
-      as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
+      if (!acc) as.pxor(x86::xmm13, x86::xmm13);
     } else if (type == VMUDM || type == VMUDN) {
-      // save sign of vt, to fix unsigned multiply
-      as.movdqa(x86::xmm1, x86::xmm15);
       // multiply unsigned vt by unsigned vs
+      as.movdqa(x86::xmm1, x86::xmm15);
       as.pmullw(x86::xmm15, x86::xmm0);
       as.pmulhuw(x86::xmm14, x86::xmm0);
       // subtract vs where vt was negative
@@ -1645,10 +1684,10 @@ struct MipsJit {
       else as.psraw(x86::xmm0, 15);
       as.pand(x86::xmm1, x86::xmm0);
       as.psubw(x86::xmm14, x86::xmm1);
-      // sign extend to upper accumulator
-      as.movdqa(x86::xmm13, x86::xmm14); as.psraw(x86::xmm13, 15);
+      if (!acc) as.movdqa(x86::xmm13, x86::xmm14);
+      if (!acc) as.psraw(x86::xmm13, 15);
     }
-    if (accumulate && !type_frac) update_acc(type == VMUDH);
+    if (acc) update_acc(type == VMUDH, false);
     if (type == VMUDN || type == VMUDL) {
       // saturate unsigned value
       as.movdqa(x86::xmm0, x86::xmm14); as.psraw(x86::xmm0, 15);
@@ -1657,12 +1696,11 @@ struct MipsJit {
       as.pcmpeqw(x86::xmm0, x86::xmm13); as.movdqa(x86::xmm1, x86::xmm15);
       as.pand(x86::xmm1, x86::xmm0); as.pandn(x86::xmm0, x86::xmm2);
       as.por(x86::xmm0, x86::xmm1);
-    } else {
+    } else if (type == VMUDH || type == VMUDM) {
       // saturate signed value
-      as.movdqa(x86::xmm0, x86::xmm14); as.movdqa(x86::xmm1, x86::xmm14);
-      as.punpcklwd(x86::xmm0, x86::xmm13); as.punpckhwd(x86::xmm1, x86::xmm13);
-      if (type == VMULU) as.packusdw(x86::xmm0, x86::xmm1);
-      else as.packssdw(x86::xmm0, x86::xmm1);
+      as.movdqa(x86::xmm0, x86::xmm14); as.punpcklwd(x86::xmm0, x86::xmm13);
+      as.movdqa(x86::xmm1, x86::xmm14); as.punpckhwd(x86::xmm1, x86::xmm13);
+      as.packssdw(x86::xmm0, x86::xmm1);
     }
     // move accumulator section into vd
     uint8_t sax = x86_reg(sa(instr) * 2 + cfg.cop2);
@@ -1728,15 +1766,22 @@ struct MipsJit {
 
   template <VMOV_Type type, bool low>
   void vmov(uint32_t instr) {
-    uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2), e = rs(instr) & 0x7;
+    uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
     if (rtx) as.movdqa(x86::xmm15, x86::xmm(rtx));
     else as.movdqa(x86::xmm15, x86_spillq(rt(instr) * 2 + cfg.cop2));
-    elem_spec(rs(instr)), as.pextrw(x86::eax, x86::xmm15, 7 - e);
+    uint8_t se = rs(instr) & 0x7, de = rd(instr) & 0x7;
+    uint8_t elem = 7 - (type == VMOV && low ? de : se);
+    elem_spec(rs(instr)), as.pextrw(x86::eax, x86::xmm15, elem);
     printf("COP2 MOV of $%d to $%d\n", rt(instr), sa(instr));
     if (type == VRCP || type == VRSQ) {
       printf("VRCP/VRSQ Operation\n");
-      if (low) as.or_(x86::eax, x86_spill(DIV_IN + cfg.cop2));
-      else as.movsx(x86::eax, x86::ax);
+      Label after_sext = as.newLabel();
+      if (low) {
+        as.or_(x86::eax, x86_spill(DIV_IN + cfg.cop2));
+        as.test(x86_spill(DIV_H + cfg.cop2), 1), as.jnz(after_sext);
+      }
+      as.movsx(x86::eax, x86::ax); as.bind(after_sext);
+      as.mov(x86_spill(DIV_H + cfg.cop2), 0);
       Label after_recip = as.newLabel();
       // check for special cases, absolute value
       as.mov(x86::ecx, 0xffff0000); as.cmp(x86::eax, 0xffff8000);
@@ -1759,11 +1804,11 @@ struct MipsJit {
       as.xor_(x86::eax, x86::edx); as.bind(after_recip);
       as.mov(x86_spill(DIV_OUT + cfg.cop2), x86::eax);
     } else if (!low) {
-      printf("VRCPH/VRSQH Operation\n");
       as.shl(x86::eax, 16); as.mov(x86_spill(DIV_IN + cfg.cop2), x86::eax);
-      as.mov(x86::eax, x86_spill(DIV_OUT + cfg.cop2)); as.sar(x86::eax, 16);
+      as.mov(x86::eax, x86_spill(DIV_OUT + cfg.cop2));
+      as.sar(x86::eax, 16); as.mov(x86_spill(DIV_H + cfg.cop2), 1);
     }
-    uint8_t sax = x86_reg(sa(instr) * 2 + cfg.cop2), de = rd(instr) & 0x7;
+    uint8_t sax = x86_reg(sa(instr) * 2 + cfg.cop2);
     auto result = (sax ? x86::xmm(sax) : x86::xmm0);
     if (!sax) as.movdqa(x86::xmm0, x86_spillq(sa(instr) * 2 + cfg.cop2));
     as.pinsrw(result, x86::eax, 7 - de);
@@ -2073,18 +2118,19 @@ struct MipsJit {
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
-    int32_t off = (sext(instr, 7) - right) * 16;
+    int32_t off = sext(instr, 7) * 16;
     as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
     // load byte-swapped data from address
-    as.mov(x86::rax, (uint64_t)cfg.mem);
+    as.mov(x86::rax, (uint64_t)cfg.mem - right * 16);
     as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rax, x86::rcx));
     as.pshufb(x86::xmm1, x86_spillq(cfg.pool));
     // mask loaded data based on alignment
     as.and_(x86::ecx, 0xf), as.neg(x86::rcx);
-    uint32_t mask = cfg.pool * 8 + (2 + right) * 16;
+    uint32_t mask = cfg.pool * 8 + (3 - right) * 16 + (sa(instr) >> 1);
     as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rbp, x86::rcx, 0, mask));
     uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
     // merge with old register values (assumes e=0)
+    if (sa(instr)) as.psrldq(x86::xmm1, sa(instr) >> 1);
     if (rtx) as.pblendvb(x86::xmm1, x86::xmm(rtx));
     else as.pblendvb(x86::xmm1, x86_spillq(rt(instr) * 2 + cfg.cop2));
     if (rtx) as.movdqa(x86::xmm(rtx), x86::xmm1);
@@ -2097,20 +2143,21 @@ struct MipsJit {
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
-    int32_t off = (sext(instr, 7) - right) * 16;
+    int32_t off = sext(instr, 7) * 16;
     as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
-    as.mov(x86::esi, x86::ecx), as.and_(x86::ecx, 0xf);
+    as.mov(x86::rsi, x86::rcx), as.and_(x86::ecx, 0xf);
     // load data from address
-    as.mov(x86::rax, (uint64_t)cfg.mem);
+    as.mov(x86::rax, (uint64_t)cfg.mem - right * 16);
     as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rax, x86::rsi));
     // mask loaded data based on alignment
-    uint32_t mask = cfg.pool * 8 + (1 + right) * 16;
+    uint32_t mask = cfg.pool * 8 + (2 - right) * 16;
     as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rbp, x86::rcx, 0, mask));
     uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
     // merge with byte-swapped register values (assumes e=0)
     if (rtx) as.movdqa(x86::xmm2, x86::xmm(rtx));
     else as.movdqa(x86::xmm2, x86_spillq(rt(instr) * 2 + cfg.cop2));
     as.pshufb(x86::xmm2, x86_spillq(cfg.pool));
+    if (sa(instr)) as.palignr(x86::xmm2, x86::xmm2, sa(instr) >> 1);
     as.pblendvb(x86::xmm1, x86::xmm2);
     as.movdqu(x86::dqword_ptr(x86::rax, x86::rsi), x86::xmm1);
   }
@@ -2123,26 +2170,33 @@ struct MipsJit {
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
-    bool packed = (type == LPV || type == LUV);
-    int32_t off = sext(instr, 7) * (packed ? 8 : 16);
-    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
-    // load data from address
+    int32_t off = sext(instr, 7) * (type < 2 ? 8 : 16);
+    int32_t elem  = (sa(instr) >> 1) & 0xf;
+    as.add(x86::ecx, off), as.mov(x86::esi, x86::ecx);
+    as.and_(x86::ecx, 0xff8), as.and_(x86::esi, 0x7);
+    // load byte-swapped data from address
+    as.mov(x86::edx, elem), as.sub(x86::edx, x86::esi);
+    as.and_(x86::edx, 0xf), as.mov(x86::rax, (uint64_t)cfg.mem);
+    as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rbp, x86::rdx, 0, cfg.pool * 8));
+    as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rax, x86::rcx));
+    as.pshufb(x86::xmm0, x86::xmm1);
+    // load into lanes depending on stride
+    constexpr uint8_t masks[] = { 8, 8, 10, 12 };
+    as.pshufb(x86::xmm0, x86_spillq(cfg.pool + masks[type]));
+    if (type != LPV) as.psrlw(x86::xmm0, 1);
+    // merge with old register if LFV
     uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
-    auto result = (rtx ? x86::xmm(rtx) : x86::xmm0);
-    bool upper = (type == LFV && (sa(instr) >> 4));
     if (type == LFV) {
-      if (rtx) as.pextrq(x86::rdx, x86::xmm(rtx), upper);
-      else as.mov(x86::rdx, x86_spilld(rt(instr) * 2 + cfg.cop2 + upper));
+      uint32_t base = rt(instr) * 16 + cfg.cop2 * 8;
+      for (int32_t e = elem; e < elem + 8 && e < 16; ++e) {
+        as.pextrb(x86::al, x86::xmm0, 15 - e);
+        if (rtx) as.pinsrb(x86::xmm(rtx), x86::al, 15 - e);
+        else as.mov(x86::byte_ptr(x86::rbp, base + 15 - e), x86::al);
+      }
+    } else {
+      if (rtx) as.movdqa(x86::xmm(rtx), x86::xmm0);
+      else as.movdqa(x86_spillq(rt(instr) * 2 + cfg.cop2), x86::xmm0);
     }
-    as.mov(x86::rax, (uint64_t)cfg.mem);
-    as.movdqu(result, x86::dqword_ptr(x86::rax, x86::rcx));
-    // shuffle into correct lanes
-    uint32_t mask = type + (type == LPV || upper);
-    as.pshufb(result, x86_spillq((3 + mask) * 2 + cfg.pool));
-    if (type != LPV) as.psrlw(result, 1);
-    // merge old register if LFV (assumes e=0/8)
-    if (type == LFV) as.pinsrq(result, x86::rdx, upper);
-    if (!rtx) as.movdqa(x86_spillq(rt(instr) * 2 + cfg.cop2), x86::xmm0);
   }
 
   template <LPV_Type type>
@@ -2151,62 +2205,76 @@ struct MipsJit {
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
-    bool packed = (type == LPV || type == LUV);
-    int32_t off = sext(instr, 7) * (packed ? 8 : 16);
-    as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
-    // load data from address
-    as.mov(x86::rax, (uint64_t)cfg.mem);
-    as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rax, x86::rcx));
-    // mask loaded data based on type
-    bool upper = (type == LFV && (sa(instr) >> 4));
-    uint32_t mask = type + (type == LPV || upper);
-    as.movdqu(x86::xmm0, x86_spillq((7 + mask) * 2 + cfg.pool));
+    int32_t off = sext(instr, 7) * (type < 2 ? 8 : 16);
+    int32_t elem = (sa(instr) >> 1) & 0xf;
+    // copy register values
     uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
-    // shuffle into correct lanes
-    if (rtx) as.movdqa(x86::xmm2, x86::xmm(rtx));
-    else as.movdqa(x86::xmm2, x86_spillq(rt(instr) * 2 + cfg.cop2));
-    if (type != LPV) as.psllw(x86::xmm2, 1);
-    as.pshufb(x86::xmm2, x86::xmm0), as.pblendvb(x86::xmm2, x86::xmm1);
-    as.movdqu(x86::dqword_ptr(x86::rax, x86::rcx), x86::xmm2);
+    if (rtx) as.movdqa(x86::xmm1, x86::xmm(rtx));
+    else as.movdqa(x86::xmm1, x86_spillq(rt(instr) * 2 + cfg.cop2));
+    as.mov(x86::rax, (uint64_t)cfg.mem);
+    if (type == LPV || type == LUV) {
+      // unpack depending on stride
+      as.add(x86::ecx, off), as.and_(x86::ecx, 0xfff);
+      auto temp = type ^ (elem < 8) ? x86::xmm1 : x86::xmm2;
+      as.movdqa(x86::xmm2, x86::xmm1), as.psllw(temp, 1);
+      as.palignr(x86::xmm2, x86::xmm1, 16 - ((elem * 2) & 0xf));
+      as.pshufb(x86::xmm2, x86_spillq(16 + cfg.pool));
+      as.pextrq(x86::rsi, x86::xmm2, 0);
+      as.mov(x86::qword_ptr(x86::rax, x86::rcx), x86::rsi);
+    } else if (type == LHV) {
+      // compute store address
+      as.add(x86::ecx, off), as.mov(x86::esi, x86::ecx);
+      as.and_(x86::ecx, 0xff9), as.and_(x86::esi, 0x6);
+      as.mov(x86::edx, elem), as.sub(x86::edx, x86::esi);
+      // left shift register values
+      as.and_(x86::edx, 0xf), as.movdqa(x86::xmm2, x86::xmm1);
+      as.psllq(x86::xmm1, 1), as.pslldq(x86::xmm2, 8);
+      as.psrlq(x86::xmm2, 63), as.por(x86::xmm1, x86::xmm2);
+      // unpack depending on stride
+      as.movdqu(x86::xmm2, x86::dqword_ptr(x86::rax, x86::rcx));
+      as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rbp, x86::rdx, 0, cfg.pool * 8));
+      as.pshufb(x86::xmm1, x86::xmm0), as.pcmpeqw(x86::xmm0, x86::xmm0);
+      as.psllw(x86::xmm0, 8), as.pblendvb(x86::xmm1, x86::xmm2);
+      as.movdqu(x86::dqword_ptr(x86::rax, x86::rcx), x86::xmm1);
+    } else printf("COP2 SFV unsupported\n");
   }
 
   void ltv(uint32_t instr) {
+    printf("COP2 LTV\n");
     // compute load address
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
     int32_t off = sext(instr, 7) * 16;
-    as.add(x86::ecx, off), as.mov(x86::edx, x86::ecx);
-    as.and_(x86::edx, 0xff8), as.and_(x86::ecx, 0x7);
-    // find affected registers and lanes
+    as.add(x86::ecx, off), as.and_(x86::ecx, 0xff8);
+    // load byte-swapped data from address
     as.mov(x86::rax, (uint64_t)cfg.mem);
-    as.add(x86::rax, x86::rdx);
+    as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rax, x86::rcx));
+    as.pshufb(x86::xmm0, x86_spillq(cfg.pool));
+    as.palignr(x86::xmm0, x86::xmm0, -(sa(instr) >> 1) & 0xf);
     uint32_t rti = (rt(instr) & ~0x7) * 2;
-    uint8_t elem = (sa(instr) >> 2) & 0x7;
-    for (uint8_t i = 0; i < 8; ++i, rti += 2) {
-      // load byte-swapped data from address
+    uint32_t elem = (sa(instr) >> 2) & 0x7;
+    // insert data into correct lanes
+    for (uint8_t i = 0; i < 8; ++i) {
+      uint32_t idx = rti + ((elem + i) & 0x7) * 2;
       uint8_t rtx = x86_reg(rti + cfg.cop2);
-      as.movbe(x86::dx, x86::word_ptr(x86::rax, x86::rcx));
-      uint8_t idx = 0x7 - ((i - elem) & 0x7);
-      uint32_t dst = (rti + cfg.cop2) * 8 + idx * 2;
-      // insert data into correct lanes
-      if (rtx) as.pinsrw(x86::xmm(rtx), x86::dx, idx);
+      uint32_t dst = (idx + cfg.cop2) * 8 + (7 - i) * 2;
+      as.pextrw(x86::dx, x86::xmm0, 7 - i);
+      if (rtx) as.pinsrw(x86::xmm(rtx), x86::dx, 7 - i);
       else as.mov(x86::word_ptr(x86::rbp, dst), x86::dx);
-      as.add(x86::ecx, 0x2), as.and_(x86::ecx, 0xf);
     }
   }
 
   void stv(uint32_t instr) {
+    printf("COP2 STV\n");
     // compute store address
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
     int32_t off = sext(instr, 7) * 16;
-    as.add(x86::ecx, off), as.mov(x86::edx, x86::ecx);
-    as.and_(x86::edx, 0xff8), as.and_(x86::ecx, 0x7);
+    as.add(x86::ecx, off), as.and_(x86::ecx, 0xff8);
     // find affected registers and lanes
     as.mov(x86::rax, (uint64_t)cfg.mem);
-    as.add(x86::rax, x86::rdx);
     uint32_t rti = (rt(instr) & ~0x7) * 2;
     uint8_t elem = (sa(instr) >> 2) & 0x7;
     for (uint8_t i = 0; i < 8; ++i) {
@@ -2217,8 +2285,7 @@ struct MipsJit {
       if (rtx) as.pextrw(x86::dx, x86::xmm(rtx), 7 - i);
       else as.mov(x86::dx, x86::word_ptr(x86::rbp, src));
       // store byte-swapped data from address
-      as.movbe(x86::word_ptr(x86::rax, x86::rcx), x86::dx);
-      as.add(x86::ecx, 0x2), as.and_(x86::ecx, 0xf);
+      as.movbe(x86::word_ptr(x86::rax, x86::rcx, 0, i * 2), x86::dx);
     }
   }
 
@@ -2251,6 +2318,7 @@ struct MipsJit {
       case 0x7: spv<LUV>(instr); break;
       case 0x8: spv<LHV>(instr); break;
       case 0x9: spv<LFV>(instr); break;
+      case 0xa: stv(instr); break; // SWV (for test cart)
       case 0xb: stv(instr); break;
       default: invalid(instr); break;
     }
@@ -2271,10 +2339,10 @@ struct MipsJit {
       case 0x09: next_pc = jalr(instr, pc); break;
       case 0x0d: next_pc = break_(pc); break;
       case 0x0f: printf("SYNC\n"); break;
-      case 0x10: mfhi<GPR_HI>(instr);  break;
-      case 0x11: mthi<GPR_HI>(instr);  break;
-      case 0x12: mfhi<GPR_LO>(instr);  break;
-      case 0x13: mthi<GPR_LO>(instr);  break;
+      case 0x10: mfhi<GPR_HI>(instr); break;
+      case 0x11: mthi<GPR_HI>(instr); break;
+      case 0x12: mfhi<GPR_LO>(instr); break;
+      case 0x13: mthi<GPR_LO>(instr); break;
       case 0x14: dsllv<SLL>(instr); break;
       case 0x16: dsllv<SRL>(instr); break;
       case 0x17: dsllv<SRA>(instr); break;
@@ -2441,14 +2509,14 @@ struct MipsJit {
         break;
       case 0x2: case 0x3: // COP2/2
         switch (instr & 0x3f) {
-          case 0x00: vmudn<VMULF, false>(instr); break;
-          case 0x01: vmudn<VMULU, false>(instr); break;
+          case 0x00: vmulf<VMULF, false>(instr); break;
+          case 0x01: vmulf<VMULU, false>(instr); break;
           case 0x04: vmudn<VMUDL, false>(instr); break;
           case 0x05: vmudn<VMUDM, false>(instr); break;
           case 0x06: vmudn<VMUDN, false>(instr); break;
           case 0x07: vmudn<VMUDH, false>(instr); break;
-          case 0x08: vmudn<VMULF, true>(instr); break;
-          case 0x09: vmudn<VMULU, true>(instr); break;
+          case 0x08: vmulf<VMULF, true>(instr); break;
+          case 0x09: vmulf<VMULU, true>(instr); break;
           case 0x0c: vmudn<VMUDL, true>(instr); break;
           case 0x0d: vmudn<VMUDM, true>(instr); break;
           case 0x0e: vmudn<VMUDN, true>(instr); break;
@@ -2615,14 +2683,14 @@ static JitRuntime runtime;
 static const uint16_t pool[26 * 8] = {
   // unaligned load/store
   0x0e0f, 0x0c0d, 0x0a0b, 0x0809, 0x0607, 0x0405, 0x0203, 0x0001,
+  0x0e0f, 0x0c0d, 0x0a0b, 0x0809, 0x0607, 0x0405, 0x0203, 0x0001,
   0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-  0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
   // packed load
-  0x07ff, 0x06ff, 0x05ff, 0x04ff, 0x03ff, 0x02ff, 0x01ff, 0x00ff,
-  0x0eff, 0x0cff, 0x0aff, 0x08ff, 0x06ff, 0x04ff, 0x02ff, 0x00ff,
-  0xffff, 0xffff, 0xffff, 0xffff, 0x0cff, 0x08ff, 0x04ff, 0x00ff,
-  0x0cff, 0x08ff, 0x04ff, 0x00ff, 0xffff, 0xffff, 0xffff, 0xffff,
+  0x08ff, 0x09ff, 0x0aff, 0x0bff, 0x0cff, 0x0dff, 0x0eff, 0x0fff,
+  0x01ff, 0x03ff, 0x05ff, 0x07ff, 0x09ff, 0x0bff, 0x0dff, 0x0fff,
+  0x0bff, 0x0fff, 0x03ff, 0x07ff, 0x03ff, 0x07ff, 0x0bff, 0x0fff,
+  0x00ff, 0x00ff, 0x00ff, 0x00ff, 0x00ff, 0x00ff, 0x00ff, 0x00ff,
   // packed store
   0x0d0f, 0x090b, 0x0507, 0x0103, 0xffff, 0xffff, 0xffff, 0xffff,
   0xff0f, 0xff0d, 0xff0b, 0xff09, 0xff07, 0xff05, 0xff03, 0xff01,
@@ -2663,7 +2731,7 @@ uint32_t Mips::run(MipsConfig *cfg, CodePtr block) {
 
 void Mips::init(MipsConfig *cfg) {
   void *ptr = cfg->regs + cfg->pool;
-  memcpy(ptr, pool, sizeof(pool));
+  if (cfg->pool) memcpy(ptr, pool, sizeof(pool));
   CodeHolder code;
   code.init(runtime.codeInfo());
   MipsJit jit(cfg, code);

@@ -6,7 +6,7 @@
 #include "robin_hood.h"
 
 static uint8_t *imem;
-static uint64_t regs[148 + 52];
+static uint64_t regs[150 + 52];
 
 namespace RSP {
   uint8_t *mem = NULL;
@@ -44,19 +44,16 @@ void RSP::dma(uint32_t val, bool to_ram) {
   len = (len > max ? max : len), cop0[0] &= 0x1ff8, cop0[1] &= 0x7ffff8;
 
   // repeatedly DMA bytes from RDRAM to DMEM/IMEM, or vice-versa
-  //printf("fd8: %llx\n", read32(mem + 0xfd8));
   for (uint32_t i = 0; i <= count; ++i) {
     uint8_t *src = to_ram ? mem + cop0[0] : R4300::ram + cop0[1];
     uint8_t *dst = to_ram ? R4300::ram + cop0[1] : mem + cop0[0];
     if (!to_ram && (cop0[0] >> 12)) unprotect(cop0[0], src, len);
     memcpy(dst, src, len), cop0[0] += len, cop0[1] += len + skip;
   }
-  //printf("fd8: %llx\n", read32(mem + 0xfd8));
 }
 
 void RSP::set_status(uint32_t val) {
   // update status flags, unhalt RSP
-  //printf("Setting RSP status to %x\n", val);
   if (cop0[4] & val & 0x1) Sched::add(TASK_RSP, 0);
   cop0[4] &= ~(val & 0x1), cop0[4] |= (val >> 1) & 0x2;
   cop0[4] &= ~(val & 0x4) >> 1;
@@ -99,12 +96,12 @@ static void mtc0(uint32_t idx, uint64_t val) {
 
 static int64_t stop_at(uint32_t addr) {
   if (!(addr & 0xff)) return true;
-  return true;  // true to single-step
+  return false;  // true to single-step
 }
 
 static MipsConfig cfg = {
   .regs = regs, .cop0 = 32,
-  .cop2 = 64, .pool = 148,
+  .cop2 = 64, .pool = 150,
   .lookup = lookup, .fetch = fetch,
   .mtc0 = mtc0, .stop_at = stop_at,
   .mtc0_mask = 0x0b1f, .is_rsp = true
@@ -125,11 +122,6 @@ void RSP::update() {
     CodePtr code = lookup[pc / 4];
     if (code) {
       pc = Mips::run(&cfg, code) & 0xffc;
-      //for (uint32_t i = 0; i < 32; ++i)
-      //  printf("Reg %d: %llx\n", i, regs[i]);
-      //printf("RSP PC: %x | %x %x\n", pc, read32(imem + pc), read32(imem + pc + 4));
-      //printf("VCO: %llx %llx %llx %llx\n", regs[134], regs[135], regs[136], regs[137]);
-      //printf("RSP PC: %x | %x %x\n", pc, read32(imem + pc), read32(imem + pc + 4));
       if ((cop0[4] & 0x42) == 0x42) R4300::set_irqs(0x1);
     } else {
       // search backup blocks for matching hash

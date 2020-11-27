@@ -25,7 +25,7 @@ static uint32_t pages[0x100000];
 static uint32_t tlb[0x20][4];
 
 static uint32_t pc = 0xbfc00000;
-static uint64_t regs[99 + 52];
+static uint64_t regs[99];
 static uint64_t *const cop0 = regs + 34;
 static uint64_t *const cop1 = regs + 66;
 
@@ -953,14 +953,13 @@ static int64_t stop_at(uint32_t addr) {
 // mem pointer filled in on init()
 static MipsConfig cfg = {
   .regs = regs, .cop0 = 34,
-  .cop1 = 66, .pool = 99,
-  .lookup = lookup, .fetch = fetch,
-  .mtc0 = mtc0, .stop_at = stop_at,
+  .cop1 = 66, .lookup = lookup,
+  .fetch = fetch, .mtc0 = mtc0,
   .mtc0_mask = 0x0a00,
 
   .pages = pages, .tlb = tlb[0],
   .read = read, .write = write,
-  .tlbwi = tlb_write
+  .tlbwi = tlb_write, .stop_at = stop_at
 };
 
 static uint32_t crc32(uint8_t *bytes, uint32_t len) {

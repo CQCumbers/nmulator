@@ -16,7 +16,7 @@ nmulator is a work-in-progress Nintendo 64 emulator for PCs. It currently boots 
 - Optimize RSP fallback block lookup
 - Link direct branches in R4300 code
 - Detect and accelerate idle loops
-- Add watchpointsa and RSP support to debugger
+- Add watchpoints and RSP support to debugger
 - Switch to xbyak and statically link dependencies
 
 ## Building
