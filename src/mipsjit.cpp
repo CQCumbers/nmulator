@@ -272,7 +272,7 @@ struct MipsJit {
 
   void elem_spec(uint8_t e) {
     e &= 0xf; if (e <= 1) return; // element scalars from xmm15
-    as.pshufb(x86::xmm15, x86_spillq((10 + e) * 2 + cfg.pool));
+    as.pshufb(x86::xmm15, x86_spillq(14 + e * 2 + cfg.pool));
   }
 
   void update_acc(bool high, bool frac) {
@@ -2218,7 +2218,7 @@ struct MipsJit {
       auto temp = type ^ (elem < 8) ? x86::xmm1 : x86::xmm2;
       as.movdqa(x86::xmm2, x86::xmm1), as.psllw(temp, 1);
       as.palignr(x86::xmm2, x86::xmm1, 16 - ((elem * 2) & 0xf));
-      as.pshufb(x86::xmm2, x86_spillq(16 + cfg.pool));
+      as.pshufb(x86::xmm2, x86_spillq(14 + cfg.pool));
       as.pextrq(x86::rsi, x86::xmm2, 0);
       as.mov(x86::qword_ptr(x86::rax, x86::rcx), x86::rsi);
     } else if (type == LHV) {
@@ -2236,11 +2236,21 @@ struct MipsJit {
       as.pshufb(x86::xmm1, x86::xmm0), as.pcmpeqw(x86::xmm0, x86::xmm0);
       as.psllw(x86::xmm0, 8), as.pblendvb(x86::xmm1, x86::xmm2);
       as.movdqu(x86::dqword_ptr(x86::rax, x86::rcx), x86::xmm1);
-    } else printf("COP2 SFV unsupported\n");
+    } else if (type == LFV) {
+      as.add(x86::ecx, off), as.mov(x86::esi, x86::ecx);
+      as.and_(x86::ecx, 0xff8), as.and_(x86::esi, 0x7);
+      as.psllq(x86::xmm1, 1), as.add(x86::rax, x86::rcx);
+      as.pshufb(x86::xmm1, x86_spillq(16 + cfg.pool));
+      for (int32_t i = 0; i < 4; ++i) {
+        uint8_t e = elem + elem / 8 + i * 4;
+        as.pextrb(x86::cl, x86::xmm1, e & 0xf);
+        as.mov(x86::byte_ptr(x86::rax, x86::rsi), x86::cl);
+        as.add(x86::esi, 4), as.and_(x86::esi, 0xf);
+      }
+    }
   }
 
   void ltv(uint32_t instr) {
-    printf("COP2 LTV\n");
     // compute load address
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
@@ -2250,15 +2260,16 @@ struct MipsJit {
     // load byte-swapped data from address
     as.mov(x86::rax, (uint64_t)cfg.mem);
     as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rax, x86::rcx));
-    as.pshufb(x86::xmm0, x86_spillq(cfg.pool));
-    as.palignr(x86::xmm0, x86::xmm0, -(sa(instr) >> 1) & 0xf);
-    uint32_t rti = (rt(instr) & ~0x7) * 2;
-    uint32_t elem = (sa(instr) >> 2) & 0x7;
+    as.and_(x86::ecx, 0x8), as.sub(x86::ecx, sa(instr) >> 1); as.and_(x86::ecx, 0xf);
+    as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rbp, x86::rcx, 0, cfg.pool * 8));
+    as.pshufb(x86::xmm0, x86::xmm1);
+    uint8_t base = (rt(instr) & 0x18) * 2;
+    uint8_t elem = (sa(instr) >> 2) & 0x7;
     // insert data into correct lanes
     for (uint8_t i = 0; i < 8; ++i) {
-      uint32_t idx = rti + ((elem + i) & 0x7) * 2;
+      uint8_t rti = base + ((elem + i) & 0x7) * 2;
       uint8_t rtx = x86_reg(rti + cfg.cop2);
-      uint32_t dst = (idx + cfg.cop2) * 8 + (7 - i) * 2;
+      uint32_t dst = (rti + cfg.cop2) * 8 + (7 - i) * 2;
       as.pextrw(x86::dx, x86::xmm0, 7 - i);
       if (rtx) as.pinsrw(x86::xmm(rtx), x86::dx, 7 - i);
       else as.mov(x86::word_ptr(x86::rbp, dst), x86::dx);
@@ -2266,7 +2277,6 @@ struct MipsJit {
   }
 
   void stv(uint32_t instr) {
-    printf("COP2 STV\n");
     // compute store address
     uint8_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
@@ -2275,18 +2285,38 @@ struct MipsJit {
     as.add(x86::ecx, off), as.and_(x86::ecx, 0xff8);
     // find affected registers and lanes
     as.mov(x86::rax, (uint64_t)cfg.mem);
-    uint32_t rti = (rt(instr) & ~0x7) * 2;
+    uint8_t base = (rt(instr) & ~0x7) * 2;
     uint8_t elem = (sa(instr) >> 2) & 0x7;
     for (uint8_t i = 0; i < 8; ++i) {
       // extract data from correct lanes
-      uint32_t idx = rti + ((elem + i) & 0x7) * 2;
-      uint8_t rtx = x86_reg(idx + cfg.cop2);
-      uint32_t src = (idx + cfg.cop2) * 8 + (7 - i) * 2;
+      uint8_t rti = base + ((elem + i) & 0x7) * 2;
+      uint8_t rtx = x86_reg(rti + cfg.cop2);
+      uint32_t src = (rti + cfg.cop2) * 8 + (7 - i) * 2;
       if (rtx) as.pextrw(x86::dx, x86::xmm(rtx), 7 - i);
       else as.mov(x86::dx, x86::word_ptr(x86::rbp, src));
       // store byte-swapped data from address
       as.movbe(x86::word_ptr(x86::rax, x86::rcx, 0, i * 2), x86::dx);
     }
+  }
+
+  void swv(uint32_t instr) {
+    // compute store address
+    uint8_t rsx = x86_reg(rs(instr));
+    if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
+    else as.mov(x86::ecx, x86_spill(rs(instr)));
+    int32_t off = sext(instr, 7) * 16;
+    as.add(x86::ecx, off), as.mov(x86::esi, x86::ecx);
+    as.and_(x86::ecx, 0xff8), as.and_(x86::esi, 0x7);
+    // copy register values
+    uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
+    if (rtx) as.movdqa(x86::xmm1, x86::xmm(rtx));
+    else as.movdqa(x86::xmm1, x86_spillq(rt(instr) * 2 + cfg.cop2));
+    // rotate based on alignment
+    as.mov(x86::edx, sa(instr) >> 1); as.sub(x86::edx, x86::esi);
+    as.and_(x86::edx, 0xf), as.mov(x86::rax, (uint64_t)cfg.mem);
+    as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rbp, x86::rdx, 0, cfg.pool * 8));
+    as.pshufb(x86::xmm1, x86::xmm0); as.mov(x86::rax, (uint64_t)cfg.mem);
+    as.movdqu(x86::dqword_ptr(x86::rax, x86::rcx), x86::xmm1);
   }
 
   void lwc2(uint32_t instr) {
@@ -2318,7 +2348,7 @@ struct MipsJit {
       case 0x7: spv<LUV>(instr); break;
       case 0x8: spv<LHV>(instr); break;
       case 0x9: spv<LFV>(instr); break;
-      case 0xa: stv(instr); break; // SWV (for test cart)
+      case 0xa: swv(instr); break;
       case 0xb: stv(instr); break;
       default: invalid(instr); break;
     }
@@ -2680,7 +2710,7 @@ struct MipsJit {
 typedef uint32_t (*RunPtr)(CodePtr ptr);
 static JitRuntime runtime;
 
-static const uint16_t pool[26 * 8] = {
+static const uint16_t pool[23 * 8] = {
   // unaligned load/store
   0x0e0f, 0x0c0d, 0x0a0b, 0x0809, 0x0607, 0x0405, 0x0203, 0x0001,
   0x0e0f, 0x0c0d, 0x0a0b, 0x0809, 0x0607, 0x0405, 0x0203, 0x0001,
@@ -2690,12 +2720,9 @@ static const uint16_t pool[26 * 8] = {
   0x08ff, 0x09ff, 0x0aff, 0x0bff, 0x0cff, 0x0dff, 0x0eff, 0x0fff,
   0x01ff, 0x03ff, 0x05ff, 0x07ff, 0x09ff, 0x0bff, 0x0dff, 0x0fff,
   0x0bff, 0x0fff, 0x03ff, 0x07ff, 0x03ff, 0x07ff, 0x0bff, 0x0fff,
-  0x00ff, 0x00ff, 0x00ff, 0x00ff, 0x00ff, 0x00ff, 0x00ff, 0x00ff,
   // packed store
   0x0d0f, 0x090b, 0x0507, 0x0103, 0xffff, 0xffff, 0xffff, 0xffff,
-  0xff0f, 0xff0d, 0xff0b, 0xff09, 0xff07, 0xff05, 0xff03, 0xff01,
-  0xff0f, 0xffff, 0xff0d, 0xffff, 0xff0b, 0xffff, 0xff09, 0xffff,
-  0xff07, 0xffff, 0xff05, 0xffff, 0xff03, 0xffff, 0xff01, 0xffff,
+  0x030f, 0xffff, 0x010d, 0xffff, 0x070b, 0xffff, 0x0509, 0xffff,
   // scalar quarter
   0x0302, 0x0302, 0x0706, 0x0706, 0x0b0a, 0x0b0a, 0x0f0e, 0x0f0e,
   0x0100, 0x0100, 0x0504, 0x0504, 0x0908, 0x0908, 0x0d0c, 0x0d0c,

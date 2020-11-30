@@ -6,7 +6,7 @@
 #include "robin_hood.h"
 
 static uint8_t *imem;
-static uint64_t regs[150 + 52];
+static uint64_t regs[150 + 46];
 
 namespace RSP {
   uint8_t *mem = NULL;
