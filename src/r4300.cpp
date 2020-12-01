@@ -66,7 +66,7 @@ static void vi_init() {
   SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER);
   SDL_SetHint(SDL_HINT_RENDER_VSYNC, "0");
   const uint32_t flags = SDL_WINDOW_ALLOW_HIGHDPI;
-  SDL_CreateWindowAndRenderer(640, 480, flags, &window, &renderer);
+  SDL_CreateWindowAndRenderer(640, 474, flags, &window, &renderer);
   SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
   SDL_RenderClear(renderer), SDL_SetWindowTitle(window, title);
   for (int32_t i = 0; i < SDL_NumJoysticks(); ++i) SDL_GameControllerOpen(i);

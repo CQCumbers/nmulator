@@ -110,7 +110,6 @@ namespace RSP {
 }
 
 namespace RDP {
-  extern bool dump;
   void update();
   void init();
 }
