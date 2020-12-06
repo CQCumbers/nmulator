@@ -17,7 +17,7 @@ struct TileData {
 
 struct GlobalData {
   uint32_t width, size;
-  uint32_t n_cmds, pad;
+  uint32_t n_cmds, fmt;
 };
 
 struct RDPState {
@@ -75,7 +75,7 @@ namespace Vulkan {
   void *vmems[2];
   uint8_t *mapped_mem = nullptr;
   const uint32_t group_size = 8, max_cmds = 2048, max_copies = 4095;
-  uint32_t gwidth = 640 / group_size, gheight = 480 / group_size;
+  uint32_t gwidth = 440 / group_size, gheight = 240 / group_size;
   uint32_t n_cmds = 0, n_tmems = 0, mem_idx = 1;
 
   const VkDeviceSize cmds_offset = 0;
@@ -99,19 +99,19 @@ namespace Vulkan {
   uint8_t *tmem_ptr() { return mapped_mem + tmem_offset + (n_tmems << 12); }
 
   const VkDeviceSize pixels_offset = align(tmem_offset + tmem_size);
-  const VkDeviceSize pixels_size = 320 * 240 * sizeof(uint32_t);
+  const VkDeviceSize pixels_size = 440 * 240 * sizeof(uint32_t);
   uint8_t *pixels_ptr() { return mapped_mem + pixels_offset; }
 
   const VkDeviceSize hpixels_offset = align(pixels_offset + pixels_size);
-  const VkDeviceSize hpixels_size = 320 * 240 * sizeof(uint32_t);
+  const VkDeviceSize hpixels_size = 440 * 240 * sizeof(uint32_t);
   uint8_t *hpixels_ptr() { return mapped_mem + hpixels_offset; }
 
   const VkDeviceSize zbuf_offset = align(hpixels_offset + hpixels_size);
-  const VkDeviceSize zbuf_size = 320 * 240 * sizeof(uint16_t);
+  const VkDeviceSize zbuf_size = 440 * 240 * sizeof(uint16_t);
   uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
 
   const VkDeviceSize hzbuf_offset = align(zbuf_offset + zbuf_size);
-  const VkDeviceSize hzbuf_size = 320 * 240 * sizeof(uint16_t);
+  const VkDeviceSize hzbuf_size = 440 * 240 * sizeof(uint16_t);
   uint8_t *hzbuf_ptr() { return mapped_mem + hzbuf_offset; }
 
   const VkDeviceSize total_size = hzbuf_offset + hzbuf_size;
@@ -495,6 +495,7 @@ static void set_color_image(uint32_t *instr) {
 
   GlobalData *globals = Vulkan::globals_ptr();
   globals->width = img_width, globals->size = img_size;
+  globals->fmt = (instr[0] >> 19) & 0x1;
   Vulkan::gwidth = img_width / Vulkan::group_size;
 }
 

@@ -6,6 +6,7 @@
 #define M0_PERSP     0x00080000
 #define M0_TLUT_EN   0x00008000
 #define M0_TLUT_IA   0x00004000
+#define M0_DITH      0x000000c0
 
 #define M1_BLEND     0x00004000
 #define M1_CVG2ALPHA 0x00002000
@@ -35,9 +36,7 @@ struct TileData {
 
 struct GlobalData {
   uint width, size;
-  uint n_cmds, pad;
-  uint2 zenc[128];
-  uint2 zdec[8];
+  uint n_cmds, fmt;
 };
 
 struct RDPCommand {
@@ -72,12 +71,88 @@ struct RDPTex {
 [[vk::binding(3)]] StructuredBuffer<GlobalData> globals;
 
 [[vk::binding(4)]] StructuredBuffer<uint16_t> tmem;
-[[vk::binding(5)]] RWStructuredBuffer<uint16_t> pix16;
-[[vk::binding(6)]] RWStructuredBuffer<uint16_t> hpix16;
+[[vk::binding(5)]] RWStructuredBuffer<uint16_t> cbuf;
+[[vk::binding(6)]] RWStructuredBuffer<uint16_t> hcbuf;
 [[vk::binding(7)]] RWStructuredBuffer<uint16_t> zbuf;
 [[vk::binding(8)]] RWStructuredBuffer<uint16_t> hzbuf;
 
-/* === Format Conversions === */
+/* === Common utilities === */
+
+uint16_t bswap16(uint val) {
+  return uint16_t((val << 8) | (val >> 8));
+}
+
+uint pack32(int4 color) {
+  uint4 c = clamp(color, 0, 0xff);
+  return (c.w << 24) | (c.z << 16) | (c.y << 8) | c.x;
+}
+
+int4 unpack32(uint color) {
+  int r = color >>  0, g = color >>  8;
+  int b = color >> 16, a = color >> 24;
+  return int4(r, g, b, a) & 0xff;
+}
+
+uint a(uint color) {
+  return (color >> 24) * 0x01010101;
+}
+
+void seta(inout uint color, uint alpha) {
+  color = (color & 0x00ffffff) | (alpha & 0xff000000);
+}
+
+/* === Framebuffer interface === */
+
+void load(uint2 pos, out uint color, out uint depth) {
+  uint idx = pos.y * globals[0].width + pos.x;
+  if (globals[0].fmt) {
+    // load 24-bit color, 8-bit cvg
+    color  = cbuf[idx * 2 + 0] <<  0;
+    color |= cbuf[idx * 2 + 1] << 16;
+  } else {
+    // load 15-bit color, 3-bit cvg
+    uint cval = bswap16(cbuf[idx]);
+    color = (hcbuf[idx] & 3) << 29;
+    color |= (cval & 0x0001) << 31;
+    color |= (cval & 0x003e) << 18;
+    color |= (cval & 0x07c0) <<  5;
+  }
+
+  // load 14-bit depth, 4-bit dz
+  uint zval = bswap16(zbuf[idx]);
+  int mant = (zval >> 2) & 0x7ff;
+  int expn = (zval >> 13) & 0x07;
+  uint base = 0x40000 - (0x40000 >> expn);
+  depth  = (mant << max(6 - expn, 0)) + base;
+  depth |= (zval << 30) | (hzbuf[idx] << 28);
+}
+
+void store(uint2 pos, uint color, uint depth) {
+  uint idx = pos.y * globals[0].width + pos.x;
+  if (globals[0].fmt) {
+    // store 24-bit color, 8-bit cvg
+    cbuf[idx * 2 + 0] = uint16_t(color >>  0);
+    cbuf[idx * 2 + 1] = uint16_t(color >> 16);
+  } else {
+    // store 15-bit color, 3-bit cvg
+    uint cval = (color >> 31) & 0x1;
+    cval |= (color >> 18) & 0x003e;
+    cval |= (color >>  5) & 0x07c0;
+    cval |= (color <<  8) & 0xf800;
+    cbuf[idx] = bswap16(cval);
+    hcbuf[idx] = uint16_t(color >> 29) & 3;
+  }
+
+  // store 14-bit depth, 4-bit dz
+  int expn = (depth ^ 0x3ffff) | 0x400;
+  expn = 31 - firstbithigh(expn << 14);
+  int mant = (depth >> max(6 - expn, 0)) & 0x7ff;
+  uint zval = (expn << 13) | (mant << 2);
+  zbuf[idx] = bswap16(zval | (depth >> 30));
+  hzbuf[idx] = uint16_t(depth >> 28) & 3;
+}
+
+/* === Format conversions === */
 
 uint read_rgba16(uint enc) {
   // bswapped RGBA5551 to ABGR8888
@@ -86,28 +161,6 @@ uint read_rgba16(uint enc) {
   dec |= (enc & 0x3e) << 18;
   dec |= (enc & 0x7c0) << 5;
   return dec | ((enc & 0xf800) >> 8);
-}
-
-uint read_rgba16(uint enc, uint henc) {
-  enc = ((enc << 8) | (enc >> 8)) & 0xffff;
-  uint dec = (enc & 0x1) << 31;
-  dec |= (henc & 0x3) << 29;
-  dec |= (enc & 0x3e) << 18;
-  dec |= (enc & 0x7c0) << 5;
-  return dec | ((enc & 0xf800) >> 8);
-}
-
-uint16_t write_rgba16(uint dec) {
-  // ABGR8888 to bswapped RGBA5551
-  uint enc = (dec >> 31) & 0x1;
-  enc |= (dec >> 18) & 0x3e;
-  enc |= (dec >> 5) & 0x7c0;
-  enc |= (dec << 8) & 0xf800;
-  return (uint16_t)((enc << 8) | (enc >> 8));
-}
-
-uint hwrite_rgba16(uint dec) {
-  return (dec >> 29) & 0x3;
 }
 
 uint read_ia16(uint enc) {
@@ -123,81 +176,6 @@ uint read_i4(uint enc) {
 }
 
 /* === Utility Functions === */
-
-uint4 usadd(uint4 a, uint4 b) {
-  return b == 0 ? a : a + max(b, -a);
-}
-
-int mul16(int a, int b) {
-   // multiply 16.16 ints, with 16.16 result
-   int a1 = a >> 16, a2 = a & 0xffff;
-   int b1 = b >> 16, b2 = b & 0xffff;
-   return (a1 * b1 << 16) + a1 * b2 + a2 * b1;
-}
-
-uint sel(uint idx, uint4 inputs) {
-  switch (idx & 0x3) {
-    default: return inputs.x;
-    case 1: return inputs.y;
-    case 2: return inputs.z;
-    case 3: return inputs.w;
-  }
-}
-
-uint sel(uint idx, uint4 i0, uint4 i1) {
-   if (idx >= 8) return 0;
-   uint4 inp = (idx & 0x4) ? i1 : i0;
-   return sel(idx, inp);
-}
-
-uint sel(uint idx, uint4 i0, uint4 i1, uint4 i2, uint4 i3) {
-   if (idx >= 16) return 0;
-   uint4 inp0 = (idx & 0x8) ? i2 : i0;
-   uint4 inp1 = (idx & 0x8) ? i3 : i1;
-   return sel(idx & 0x7, inp0, inp1);
-}
-
-uint pack32(uint4 color) {
-  uint4 c = (color >> 16) & 0xff;
-  return (c.w << 24) | (c.z << 16) | (c.y << 8) | c.x;
-}
-
-uint4 unpack32(uint color) {
-  uint a = color >> 24, b = color >> 16;
-  uint4 c = uint4(color, color >> 8, b, a);
-  return (c & 0xff) << 16;
-}
-
-uint unpacka(uint color) {
-  return (color >> 24) << 16;
-}
-
-uint unpackz(uint enc, uint henc) {
-  enc = ((enc << 8) | (enc >> 8)) & 0xffff;
-  // 14-bit float Z to 18-bit uint
-  int mant = (enc >> 2) & 0x7ff, exp_ = enc >> 13;
-  uint shift = max(6 - exp_, 0);
-  uint base = 0x40000 - (0x40000 >> exp_);
-  uint dec = (mant << shift) + base;
-  // load 4-bit dz from hidden ram
-  uint dz = ((enc & 0x3) << 2) | (henc & 0x3);
-  return ((dec & 0x3ffff) << 4) | dz;
-}
-
-uint packz(uint dec) {
-  int exp_ = firstbithigh(max(dec ^ 0x3fffff, 1));
-  exp_ = clamp(21 - exp_, 0, 7);
-  uint shift = max(10 - exp_, 4);
-  uint mant = (dec >> shift) & 0x7ff;
-  // only upper 2 bits of dz are stored
-  uint dz = (dec >> 2) & 0x3;
-  uint enc = (exp_ << 13) | (mant << 2) | dz;
-  return ((enc << 8) | (enc >> 8)) & 0xffff;
-}
-
-uint hpackz(uint dec) {
-  return dec & 0x3;
-}
 
 uint tmem4r(uint pos, uint off, uint idx) {
   pos = (pos & 0xfff) | (idx << 12);
@@ -218,19 +196,16 @@ uint tmem16r(uint pos, uint idx) {
   return tmem[pos >> 1];
 }
 
-/* === Pipeline Stages === */
-
 uint texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
   // apply mirror/mask to ST coords
   if (cmd.modes[0] & M0_TLUT_EN) tex.format = 2;
   bool2 mst = tex.shift & 0x100, en = (mask != 0);
   st ^= -(en & (st >> mask) & mst), st &= (en << mask) - 1;
-
   // see manual 13.8 for tmem layouts
   uint s = st.x, t = st.y, wd = tex.width;
   uint flip = (st.y & 0x1) << 2;
   bool ia = cmd.modes[0] & M0_TLUT_IA;
-
+  // switch on format and size
   if (tex.format == 0 && tex.size == 0) {        // 4 bit RGBA
     uint pos = (tex.addr + t * wd + s / 2) ^ flip;
     return read_i4(tmem4r(pos, s, cmd.tmem));
@@ -298,6 +273,8 @@ uint texel(uint2 st, uint2 mask, RDPTex tex, RDPCommand cmd) {
   return 0xffff00ff;
 }
 
+/* === Pipeline Stages === */
+
 uint read_noise(uint seed) {
   seed = (seed ^ 61) ^ (seed >> 16);
   seed *= 9, seed = seed ^ (seed >> 4);
@@ -307,255 +284,207 @@ uint read_noise(uint seed) {
 }
 
 int4 quantize_x(int4 x) {
-  bool4 sticky = (x & 0x3fff) != 0;
-  return ((x >> 13) & ~1) | sticky;
+  bool4 sticky = (x & 0xfff) != 0;
+  return (x >> 12) | sticky;
 }
 
-uint visible(uint2 pos, RDPCommand cmd, out int2 dxy) {
+uint visible(uint2 pos, RDPCommand cmd, out int2 dxy, out uint cvbit) {
   // check pixel within y bounds
   int y1 = max(cmd.yh, cmd.syh);
   int y2 = min(cmd.yl, cmd.syl);
   if (!(y1 / 4 <= pos.y && pos.y <= y2 / 4)) return 0;
   // compute edges at each sub-scanline
   int4 y = pos.y * 4 + int4(0, 1, 2, 3);
-  int4 x1 = cmd.xh + cmd.sh / 4 * (y - (cmd.yh & ~3));
-  int4 xm = cmd.xm + cmd.sm / 4 * (y - (cmd.yh & ~3));
-  int4 xl = cmd.xl + cmd.sl / 4 * (y - cmd.ym);
+  int4 x1 = cmd.xh + cmd.sh * (y - (cmd.yh & ~3));
+  int4 xm = cmd.xm + cmd.sm * (y - (cmd.yh & ~3));
+  int4 xl = cmd.xl + cmd.sl * (y - cmd.ym);
   // get horizontal bounds, quantize
   int4 x2 = y < (int4)cmd.ym ? xm : xl;
   bool lft = cmd.type & (T_LMAJOR | T_RECT);
   int4 xa = quantize_x(lft ? x1 : x2);
   int4 xb = quantize_x(lft ? x2 : x1);
   // compute valid sub-scanlines
-  //if (cmd.modes[0] & M0_COPY) y2 += 1, xb += 1 << 14;
-  bool4 vx = (xa / 2) < (xb / 2);
+  bool4 vx = (xa / 2) <= (xb / 2);
   bool4 vy = vx && (int4)y1 <= y && y < (int4)y2;
-  dxy = pos * 4 - int2(x1.x >> 14, cmd.yh & ~3);
+  // compute interpolation deltas
+  bool offset = lft == ((cmd.sh >> 31) & 1);
+  if (offset) x1.x += 3 * cmd.sh;
+  dxy = pos * 256 - int2(x1.x >> 7, cmd.yh >> 2 << 8);
+  if (offset) dxy.y += 3 << 6;
   // apply scissor boundaries
-  int4 sxh = (uint4)cmd.sxh >> 13;
-  int4 sxl = (uint4)cmd.sxl >> 13;
+  int4 sxh = (uint4)cmd.sxh * 2;
+  int4 sxl = (uint4)cmd.sxl * 2;
   xa = min(max(xa, sxh), sxl);
   xb = min(max(xb, sxh), sxl);
   // check x bounds at every other subpixel
   int4 x = pos.x * 8 + int4(0, 2, 0, 2);
+  cvbit = vy.x && xa.x <= x.x && x.x < xb.x;
   uint cvg = dot(xa <= x + 4 && x + 4 < xb, vy);
   return cvg + dot(xa <= x && x < xb, vy);
 }
 
-bool2 compare_z(inout uint zmem, inout uint cvg, bool full, int2 dxy, RDPCommand cmd, out int4 stwz) {
-  stwz = cmd.tex + dxy.y / 4 * cmd.tde;
-  stwz = stwz + dxy.x / 4 * cmd.tdx;
-  // read old z, dz from zbuf
-  bool skip = (~cmd.type & T_ZBUF) || (~cmd.modes[1] & M1_ZCMP);
-  //skip = skip || (cmd.modes[0] & M0_COPY);
-  if (cvg == 0 || skip) return (bool2)true;
-  uint oz = zmem >> 4, odz = zmem & 0xf;
-  bool zmax = (oz == 0x3ffff);
-  // calculate new z from slopes
-  uint nz = (cmd.zprim >> 14) & 0x3fffc;
-  if (~cmd.modes[1] & M1_ZSRC) nz = stwz.w >> 14;
-  // increase dz at greater floating point depths
-  int precision = (packz(zmem) >> 5) & 0x7;
-  bool coplanar = false;
-  if (precision < 3) {
-    if (odz == 0xf) coplanar = true;
-    else odz = max(odz + 1, 4 - precision);
-  }
-  // get new dz from prim_z
-  uint ndz = firstbithigh(max(cmd.zprim & 0xffff, 1));
-  uint dz = 0x8 << max(ndz, odz);
+int2 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
+  if (~cmd.modes[1] & M1_ZCMP) return int2(1, depth);
+  // extract old/new z and dz
+  bool zsrc = cmd.modes[1] & M1_ZSRC;
+  int oz = depth & 0x3ffff, odz = depth >> 28;
+  int nz = zsrc ? (cmd.zprim >> 16) * 8 : z_in >> 13;
+  int ndz = zsrc ? cmd.zprim : abs(cmd.tdx.w) >> 16;
+  ndz = firstbithigh((ndz & 0xffff) | 0x1) + 1;
+  // adjust dz at greater depth
+  int expn = (depth ^ 0x3ffff) | 0x400;
+  expn = 31 - firstbithigh(expn << 14);
+  bool dzm = (expn < 3 && odz == 0xf);
+  if (expn < 3) odz = max(odz + 1, 4 - expn);
+  int dz = (ndz | odz) ? 0x8 << max(ndz, odz) : 0;
   // compare new z with old z
-  bool zle = coplanar || nz - dz <= oz;
-  bool zge = coplanar || nz + dz >= oz;
-  bool zlt = full ? nz < oz : zle;
-  bool zin = full && nz < oz && zge;
+  bool ovf = cvg + (pixel >> 29) > 7;
+  bool zmx = oz == 0x3ffff;
+  bool zle = dzm || nz - dz <= oz;
+  bool zge = dzm || nz + dz >= oz;
+  bool zlt = zmx || (ovf ? nz < oz : zle);
+  bool zeq = ovf && nz < oz && zge;
   // depth test based on mode
   uint mode = cmd.modes[1] & M1_ZMODE;
-  if (mode == ZINTRA && zin) {
-    /*uint mdz = max(ndz, odz);
-    uint cmul = ((oz >> mdz) - (nz >> mdz)) & 0xf;
-    cvg = min(cvg * cmul / 8, 8), */zlt = true;
-  }
-  if (mode == ZTRANS) zlt = zmax || nz < oz;
-  if (mode == ZDECAL) zlt = !zmax && zge && zle;
-  // write new z/dz if closer
-  bool write = cmd.modes[1] & M1_ZWRITE;
-  if (zlt && write) zmem = (nz << 4) | ndz;
-  return bool2(zlt, zge);
+  if (mode == ZINTRA && zeq) zlt = true;
+  if (mode == ZTRANS) zlt = zmx || nz < oz;
+  if (mode == ZDECAL) zlt = !zmx && zge && zle;
+  return int2(zlt, (max(ndz, odz) << 28) | nz);
 }
 
-uint sample_tex(int3 stw, uint tile_off, RDPCommand cmd) {
+uint calc_shade(int2 dxy, RDPCommand cmd) {
+  if (~cmd.type & T_SHADE) return 0;
+  int4 rgba = cmd.shade + (dxy.y / 256 * cmd.sde) + (dxy.x / 256 * cmd.sdx);
+  rgba += cmd.sde / 256 * (dxy.y & 0xff) + cmd.sdx / 256 * (dxy.x & 0xff);
+  return pack32(rgba >> 16);
+}
+
+int4 calc_coord(int2 dxy, RDPCommand cmd) {
+  int4 stwz = cmd.tex + (dxy.y / 256 * cmd.tde) + (dxy.x / 256 * cmd.tdx);
+  stwz += cmd.tde / 256 * (dxy.y & 0xff) + cmd.tdx / 256 * (dxy.x & 0xff);
+  if (cmd.modes[0] & M0_PERSP) stwz.xy *= 32768.0 / (float2)(stwz.z >> 16);
+  stwz.w = clamp(stwz.w, 0, 0x3ffff << 13); return stwz;
+}
+
+uint sample_tex(int2 st_in, RDPCommand cmd, uint cycle) {
+  uint cyc = cmd.modes[0] & M0_FILL;
   if (~cmd.type & T_TEX) return 0;
-  uint mode = cmd.modes[0]; stw >>= 16;
-  RDPTex tex = texes[cmd.tmem * 8 + cmd.tile + tile_off];
-  // correct perspective, apply shift
-  //if (stw.z > 0) {
-  if (mode & M0_PERSP) stw = 32768.0 * stw / (float3)stw.z;
-  //} else stw = (int3)0x7fff;
-  int2 shl = tex.shift & 0xf, st = stw.xy;
+  if (cyc != M0_2CYCLE && cycle) return 0;
+  // read tex attributes, shift coords
+  RDPTex tex = texes[cmd.tmem * 8 + cmd.tile + cycle];
+  int2 shl = tex.shift & 0xf, st = st_in >> 16;
   st = shl > 10 ? st << (16 - shl) : st >> shl;
   // get mask, clamp coords to tex bounds
   uint2 mask = min((tex.shift >> 4) & 0xf, 10);
-  bool2 cst = (tex.shift >> 9) || (mask == 0);
+  bool2 clmp = (tex.shift >> 9) || (mask == 0);
   int2 stl = tex.stl << 3, sth = tex.sth << 3;
-  st = cst ? clamp(st - stl, 0, sth - stl) : st - stl;
+  st = clmp ? clamp(st - stl, 0, sth - stl) : st - stl;
   // read appropriate texels
-  int2 stfrac = st & 0x1f; st >>= 5;
+  int2 stfrac = st & 0x1f, sti = st >> 5;
   bool up = (stfrac.x + stfrac.y) & 0x20;
-  int4 c1 = unpack32(texel(st + (int2)up, mask, tex, cmd));
-  int4 c2 = unpack32(texel(st + int2(1, 0), mask, tex, cmd));
-  int4 c3 = unpack32(texel(st + int2(0, 1), mask, tex, cmd));
+  int4 c1 = unpack32(texel(sti + (int2)(up), mask, tex, cmd));
+  int4 c2 = unpack32(texel(sti + int2(1, 0), mask, tex, cmd));
+  int4 c3 = unpack32(texel(sti + int2(0, 1), mask, tex, cmd));
   // 3-tap bilinear filter
   stfrac = up ? 0x20 - stfrac.yx : stfrac.xy;
   int4 mix = stfrac.x * (c2 - c1) + stfrac.y * (c3 - c1);
   return pack32(c1 + (mix + 0x10) / 0x20);
 }
 
-uint sample_shade(int2 dxy, RDPCommand cmd) {
-  if (~cmd.type & T_SHADE) return 0;
-  int4 rgba = cmd.shade + dxy.y / 4 * cmd.sde;
-  return pack32(max(rgba + dxy.x / 4 * cmd.sdx, 0));
+uint fill(RDPCommand cmd) {
+  if (globals[0].fmt) return cmd.fill;
+  else return read_rgba16(cmd.fill);
 }
 
-int4 sext(uint4 val) {
-  uint sgn = 1 << 25, mask = (1 << 26) - 1;
-  return ((val & mask) ^ sgn) - sgn;
+uint combine(uint tex0, uint tex1, uint shade, uint rand,
+    inout uint cvg, uint color, RDPCommand cmd, uint cycle) {
+  uint cyc = cmd.modes[0] & M0_FILL;
+  if (cyc != M0_2CYCLE && !cycle) return 0;
+  if (cyc == M0_COPY) return tex0;
+  if (cyc == M0_FILL) return fill(cmd);
+  // organize combiner inputs
+  uint prim = cmd.prim, env = cmd.env, lod = cmd.lodf << 24;
+  uint mux0[16] = { color, tex0, tex1, prim, shade, env, -1, rand, 0, 0, 0, 0, 0, 0, 0, 0 };
+  uint mux1[16] = { color, tex0, tex1, prim, shade, env, cmd.keyc, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+  uint mux2[32] = { color, tex0, tex1, prim, shade, env, cmd.keys, 0, a(tex0), a(tex1),
+    a(prim), a(shade), a(env), -1, a(lod), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+  uint mux3[8] = { color, tex0, tex1, prim, shade, env, -1, 0 };
+  uint mux4[8] = { -1, tex0, tex1, prim, shade, env, lod, 0 };
+  // get color combiner setting
+  uint m0 = cmd.mux[0], m1 = cmd.mux[1];
+  uint c0 = mux0[(cycle ? m0 >>  5 : m0 >> 20) & 0x0f];
+  uint c1 = mux1[(cycle ? m1 >> 24 : m1 >> 28) & 0x0f];
+  uint c2 = mux2[(cycle ? m0 >>  0 : m0 >> 15) & 0x1f];
+  uint c3 = mux3[(cycle ? m1 >>  6 : m1 >> 15) & 0x07];
+  // get alpha combiner setting
+  seta(c0, mux3[(cycle ? m1 >> 21 : m0 >> 12) & 0x07]);
+  seta(c1, mux3[(cycle ? m1 >>  3 : m1 >> 12) & 0x07]);
+  seta(c2, mux4[(cycle ? m1 >> 18 : m0 >>  9) & 0x07]);
+  seta(c3, mux3[(cycle ? m1 >>  0 : m1 >>  9) & 0x07]);
+  // evaluate combiner equation
+  int4 a = unpack32(c0), b = unpack32(c1);
+  int4 c = unpack32(c2), d = unpack32(c3);
+  return pack32(((a - b) * c + 0x80) / 256 + d);
 }
 
-uint2 combine(uint tex0, uint tex1, uint shade, uint noise_, uint2 prev, RDPCommand cmd, uint cycle) {
-  uint cycle_ = cmd.modes[0] & M0_FILL;
-  if (cycle_ == M0_COPY) return tex0;
-  if (cycle_ == M0_FILL) return read_rgba16(cmd.fill);
-  // setup input options
-  uint4 i1 = uint4(prev.x, tex0, tex1, cmd.prim);
-  uint4 i2 = uint4(shade, cmd.env, -1, 0);
-  uint4 i3 = uint4(tex0, tex1, cmd.prim, shade);
-  uint4 ia2 = uint4(shade, cmd.env, -1, noise_);
-  uint4 ib2 = uint4(shade, cmd.env, cmd.keyc, 0);
-  uint4 ic2 = uint4(shade, cmd.env, cmd.keys, 0);
-  // select packed inputs
-  uint mux0 = cmd.mux[0], mux1 = cmd.mux[1];
-  uint mc, pa, pb, pc, pd;
-  if (cycle == 0) {
-    mc = (mux0 >> 15) & 0x1f;
-    pa = sel((mux0 >> 20) & 0xf, i1, ia2);
-    pb = sel((mux1 >> 28) & 0xf, i1, ib2);
-    pc = sel(mc, i1, ic2, i3, uint4(cmd.env, 0, cmd.lodf, 0));
-    pd = sel((mux1 >> 15) & 0x7, i1, i2);
-  } else {
-    mc = (mux0 >> 0) & 0x1f;
-    pa = sel((mux0 >> 5) & 0xf, i1, ia2);
-    pb = sel((mux1 >> 24) & 0xf, i1, ib2);
-    pc = sel(mc, i1, ic2, i3, uint4(cmd.env, 0, cmd.lodf, 0));
-    pd = sel((mux1 >> 6) & 0x7, i1, i2);
-  }
-  // unpack input channels
-  int4 a = unpack32(pa), b = unpack32(pb);
-  int4 c = unpack32(pc), d = unpack32(pd);
-  if (cycle != 0 && mc == 0) {
-    c |= unpack32(prev.y) << 8;
-  }
-  if (mc >= 7) c = c.wwww;
-  // select alpha inputs
-  if (cycle == 0) {
-    a.w = unpacka(sel((mux0 >> 12) & 0x7, i1, i2));
-    b.w = unpacka(sel((mux1 >> 12) & 0x7, i1, i2));
-    d.w = unpacka(sel((mux1 >> 9) & 0x7, i1, i2));
-    uint4 tmp1 = uint4(0, tex0, tex1, cmd.prim);
-    uint4 tmp2 = uint4(shade, cmd.env, cmd.lodf, 0);
-    c.w = unpacka(sel((mux0 >> 9) & 0x7, tmp1, tmp2));
-  } else {
-    a.w = unpacka(sel((mux1 >> 21) & 0x7, i1, i2));
-    b.w = unpacka(sel((mux1 >> 3) & 0x7, i1, i2));
-    d.w = unpacka(sel((mux1 >> 0) & 0x7, i1, i2));
-    uint4 tmp1 = uint4(0, tex0, tex1, cmd.prim);
-    uint4 tmp2 = uint4(shade, cmd.env, cmd.lodf, 0);
-    c.w = unpacka(sel((mux1 >> 18) & 0x7, tmp1, tmp2));
-  }
-  // combine selected inputs
-  int4 res = ((a - b) >> 16) * (c >> 16);
-  res = d + ((res + 0x80) << 8);
-  return uint2(pack32(res), pack32(res >> 8));
+uint mix_alpha_cvg(uint color, inout uint cvg, RDPCommand cmd) {
+  uint cvg8 = cvg << 5, m1 = cmd.modes[1];
+  uint alph = (color >> 24) + ((color >> 24) + 1) / 256;
+  if (m1 & M1_ALPHA2CVG) cvg8 = (alph * cvg + 4) / 8;
+  if (m1 & M1_CVG2ALPHA) seta(color, min(cvg8, 255) << 24);
+  cvg = cvg8 >> 5; return color;
 }
 
-void mix_alpha_cvg(inout uint alpha, inout uint cvg, RDPCommand cmd) {
-  // mix 8-bit alpha and 3-bit coverage
-  int mode = cmd.modes[1], cvg8 = cvg << 5;
-  alpha >>= 16, alpha = alpha + (alpha + 1) / 256;
-  if (mode & M1_ALPHA2CVG) cvg8 = (alpha * cvg + 4) / 8;
-  alpha = (mode & M1_CVG2ALPHA) ? cvg8 : alpha + 0;
-  alpha = clamp(alpha, 0, 0xff) << 16; cvg = cvg8 >> 5;
+uint blend(uint pixel, uint color, uint shade, int2 zcmp,
+    out uint depth, uint cvg, uint cvbit, RDPCommand cmd, uint cycle) {
+  uint cyc = cmd.modes[0] & M0_FILL, m1 = cmd.modes[1];
+  if (cyc != M0_2CYCLE && cycle) return pixel;
+  // alpha, coverage, depth test
+  if (!(color >> 24) && (m1 & M1_ALPHA)) return pixel;
+  if (cyc == M0_COPY || cyc == M0_FILL) return cvg ? color : pixel;
+  if (!zcmp.x || (m1 & M1_AA ? !cvg : !cvbit)) return pixel;
+  // get blender input setting
+  uint mux0[4] = { color, pixel, cmd.blend, cmd.fog  };
+  uint mux1[4] = { a(color), a(cmd.fog), a(shade), 0 };
+  uint c0 = mux0[(cycle ? m1 >> 28 : m1 >> 30) & 0x03];
+  uint c1 = mux1[(cycle ? m1 >> 24 : m1 >> 26) & 0x03];
+  uint c2 = mux0[(cycle ? m1 >> 20 : m1 >> 22) & 0x03];
+  uint mux2[4] = { ~c1, a(pixel), -1, 0 };
+  uint c3 = mux2[(cycle ? m1 >> 16 : m1 >> 18) & 0x03];
+  // evaluate blender equation
+  int4 p = unpack32(c0), a = ((unpack32(c1) / 8) & 31) + 0;
+  int4 m = unpack32(c2), b = ((unpack32(c3) / 8) & 31) + 1;
+  uint r = pack32((a * p + b * m) / (a + b));
+  if (cyc == M0_2CYCLE && !cycle) return r;
+  if (cmd.modes[1] & M1_ZWRITE) depth = zcmp.y;
+  // write blended coverage value
+  uint ocvg = pixel >> 29, ovf = cvg + ocvg > 7;
+  bool enabled = !ovf && (m1 & M1_AA);
+  if (!enabled && !(m1 & M1_BLEND)) r = c0;
+  uint muxc[4] = { max(cvg + ocvg, 7), (cvg + ocvg) & 7, 7, ocvg };
+  seta(r, muxc[(m1 >> 8) & 0x03] << 29); return r;
 }
 
-uint blend(uint pixel, uint color, uint shade, uint alpha, inout uint zmem, uint oz,
-    uint cvg, bool full, bool far, RDPCommand cmd, uint cycle) {
-  int mux = cmd.modes[1], ocvg = pixel >> 29;
-  // alpha test if enabled
-  mix_alpha_cvg(alpha, cvg, cmd);
-  if (cvg == 0) { zmem = oz; return pixel; }
-  //if (cycle == 0 && (mux & M1_ALPHA) && alpha < unpacka(cmd.blend)) { zmem = oz; return pixel; }
-  // select blender inputs
-  uint p, a, m, b;
-  if (cycle == 0) {
-    p = sel(mux >> 30, uint4(color, pixel, cmd.blend, cmd.fog));
-    a = sel(mux >> 26, uint4(alpha >> 19, cmd.fog >> 27, shade >> 27, 0x0));
-    m = sel(mux >> 22, uint4(color, pixel, cmd.blend, cmd.fog));
-    b = sel(mux >> 18, uint4(~a & 0x1f, pixel >> 27, 0x1f, 0x0)) + 1;
-  } else {
-    p = sel(mux >> 28, uint4(color, pixel, cmd.blend, cmd.fog));
-    a = sel(mux >> 24, uint4(alpha >> 19, cmd.fog >> 27, shade >> 27, 0x0));
-    m = sel(mux >> 20, uint4(color, pixel, cmd.blend, cmd.fog));
-    b = sel(mux >> 16, uint4(~a & 0x1f, pixel >> 27, 0x1f, 0x0)) + 1;
-  }
-  //if (copy) return (full && alpha ? color : pixel);
-  // blend selected inputs
-  uint4 p4 = unpack32(p), m4 = unpack32(m);
-  uint4 res = (a * p4 + b * m4) / (a + b);
-  if (cmd.modes[0] & M0_2CYCLE) return pack32(res);
-  // blend coverage
-  int c1 = clamp(cvg + ocvg, 0, 7), c2 = (cvg + ocvg) & 7;
-  uint output = sel(mux >> 8, uint4(c1, c2, 7, ocvg)) << 29;
-  // skip inputs based on flags
-  bool copy = cmd.modes[0] & M0_COPY, aa = mux & M1_AA;
-  bool on_cvg = mux & M1_ON_CVG, force = mux & M1_BLEND;
-  if (on_cvg && !full) return output | (m & 0x1fffffff);
-  if (force || (/*!full && */aa && far)) {
-    return (pack32(res) & 0xffffff) | output;
-  } else return output | (p & 0x1fffffff);
+uint dither(uint color, uint2 pos, RDPCommand cmd) {
+  if ((cmd.modes[0] & M0_DITH) == M0_DITH) return color;
+  uint dith[16] = { 7, 1, 6, 0, 3, 5, 2, 4, 4, 2, 5, 3, 0, 6, 1, 7 };
+  uint off = dith[(pos.y & 3) * 4 + (pos.x & 3)];
+  return pack32((off + unpack32(color)) & ~0x7);
 }
 
-uint clamp_color16(uint2 inp) {
-  int4 color = unpack32(inp.x);
-  color |= unpack32(inp.y) << 8;
-  color = (((color - 0x800000) << 7) >> 7) + 0x800000;
-  return pack32(clamp(color, 0, 0xff0000));
-}
-
-static const int dith_matrix[16] = { 0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0 };
-
-uint dither(uint enc, uint2 pos) {
-  uint di = (pos.y & 3) * 4 + (pos.x & 3);
-  int4 orig = (unpack32(enc) & 0xff0000);
-  int4 rgb = unpack32(enc);
-  rgb = rgb > 0xf70000 ? 0xff0000 : (rgb & 0xf80000) + 0x80000;
-  int4 diff = rgb - orig;
-  int4 dith = ((int4)(dith_matrix[di] << 16) - (orig & 0x70000)) >> 31;
-  return pack32((orig + (diff & dith)) & 0xff0000);
-}
-  
 
 [numthreads(8, 8, 1)]
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
-  GlobalData global = globals[0];
-  if (GlobalID.x >= global.width) return;
-  if (GlobalID.y >= 240) return;
+  uint width = globals[0].width;
+  if (GlobalID.x >= width) return;
+  if (GlobalID.y >=   240) return;
 
-  uint pos = GlobalID.y * global.width + GlobalID.x;
-  uint pixel = read_rgba16(pix16[pos], hpix16[pos]);
-  uint zmem = unpackz(zbuf[pos], hzbuf[pos]);
-  uint noise_ = 0xff888888;
+  uint pixel, depth;
+  load(GlobalID.xy, pixel, depth);
+  uint rand = 0xff888888;
 
-  TileData tile = tiles[GroupID.y * (global.width / 8) + GroupID.x];
+  uint tid = GroupID.y * width / 8 + GroupID.x;
+  TileData tile = tiles[tid];
   for (uint i = 0; i < 64; ++i) {
     uint bitmask = tile.cmd_idxs[i];
     while (bitmask != 0) {
@@ -563,40 +492,25 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
       RDPCommand cmd = cmds[(i << 5) | lsb];
       bitmask &= ~(0x1 << lsb);
 
-      int2 dxy; int4 stwz; uint oz = zmem;
-      uint cvg = visible(GlobalID.xy, cmd, dxy);
-      bool full = cvg + (pixel >> 29) > 7;
-      bool2 depth = compare_z(zmem, cvg, full, dxy, cmd, stwz);
-      if (cvg == 0 || !depth.x) continue;
-      uint tex0 = sample_tex(stwz.xyz, 0, cmd), tex1 = 0;
-      if (cmd.modes[0] & M0_2CYCLE) {
-        tex1 = sample_tex(stwz.xyz, 1, cmd);
-      }
-      uint shade = sample_shade(dxy, cmd);
-      uint2 color;
-      if (cmd.modes[0] & M0_2CYCLE) {
-        color = combine(tex0, tex1, shade, noise_, 0, cmd, 0);
-      } else {
-        color = combine(tex0, tex1, shade, noise_, 0, cmd, 1);
-      }
-      uint alpha = unpacka(color.y) ? 0 : unpacka(color.x);
-      if (cmd.modes[0] & M0_2CYCLE) {
-        color = combine(tex1, tex1, shade, noise_, color, cmd, 1);
-      }
-      //color.x = pack32(unpack32(color.y) ? 0xff : unpack32(color.x));
-      if (cmd.modes[0] & M0_2CYCLE) {
-        color.x = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, full, depth.y, cmd, 0);
-        cmd.modes[0] &= ~M0_2CYCLE;
-        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, full, depth.y, cmd, 1);
-      } else {
-        pixel = blend(pixel, color.x, shade, alpha, zmem, oz, cvg, full, depth.y, cmd, 1);
-      }
-      pixel = dither(pixel, GlobalID.xy);
+      uint cvbit = 0, color = 0; int2 dxy;
+      uint cvg = visible(GlobalID.xy, cmd, dxy, cvbit);
+      if (cvg == 0) continue;
+
+      uint shade = calc_shade(dxy, cmd);
+      int4 coord = calc_coord(dxy, cmd);
+      int2 zcmp  = calc_depth(coord.w, depth, cvg, pixel, cmd);
+      uint tex0  = sample_tex(coord.xy, cmd, 0);
+      uint tex1  = sample_tex(coord.xy, cmd, 1);
+
+      color = combine(tex0, tex1, shade, rand, cvg, color, cmd, 0);
+      color = combine(tex0, tex1, shade, rand, cvg, color, cmd, 1);
+      color = mix_alpha_cvg(color, cvg, cmd);
+
+      pixel = blend(pixel, color, shade, zcmp, depth, cvg, cvbit, cmd, 0);
+      pixel = blend(pixel, color, shade, zcmp, depth, cvg, cvbit, cmd, 1);
+      pixel = dither(pixel, GlobalID.xy, cmd);
     }
   }
-  
-  zbuf[pos] = (uint16_t)packz(zmem);
-  hzbuf[pos] = (uint16_t)hpackz(zmem);
-  pix16[pos] = write_rgba16(pixel);
-  hpix16[pos] = hwrite_rgba16(pixel);
+
+  store(GlobalID.xy, pixel, depth);
 }
