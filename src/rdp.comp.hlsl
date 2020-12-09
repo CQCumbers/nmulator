@@ -101,6 +101,10 @@ void seta(inout uint color, uint alpha) {
   color = (color & 0x00ffffff) | (alpha & 0xff000000);
 }
 
+int abs1(int val) {
+  return (val >> 31) ^ val;
+}
+
 /* === Framebuffer interface === */
 
 void load(uint2 pos, out uint color, out uint depth) {
@@ -112,7 +116,7 @@ void load(uint2 pos, out uint color, out uint depth) {
   } else {
     // load 15-bit color, 3-bit cvg
     uint cval = bswap16(cbuf[idx]);
-    color = (hcbuf[idx] & 3) << 29;
+    color = uint(hcbuf[idx]) << 29;
     color |= (cval & 0x0001) << 31;
     color |= (cval & 0x003e) << 18;
     color |= (cval & 0x07c0) <<  5;
@@ -124,7 +128,7 @@ void load(uint2 pos, out uint color, out uint depth) {
   int expn = (zval >> 13) & 0x07;
   uint base = 0x40000 - (0x40000 >> expn);
   depth  = (mant << max(6 - expn, 0)) + base;
-  depth |= (zval << 30) | (hzbuf[idx] << 28);
+  depth |= (zval << 30) | (uint(hzbuf[idx]) << 28);
 }
 
 void store(uint2 pos, uint color, uint depth) {
@@ -323,20 +327,30 @@ uint visible(uint2 pos, RDPCommand cmd, out int2 dxy, out uint cvbit) {
   return cvg + dot(xa <= x && x < xb, vy);
 }
 
+int roundz(int depth) {
+  int expn = (depth ^ 0x3ffff) | 0x400;
+  expn = 31 - firstbithigh(expn << 14);
+  int mant = (depth >> max(6 - expn, 0)) & 0x7ff;
+  uint zval = (expn << 13) | (mant << 2);
+
+  uint base = 0x40000 - (0x40000 >> expn);
+  return (mant << max(6 - expn, 0)) + base;
+}
+
 int2 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
   if (~cmd.modes[1] & M1_ZCMP) return int2(1, depth);
   // extract old/new z and dz
   bool zsrc = cmd.modes[1] & M1_ZSRC;
-  int oz = depth & 0x3ffff, odz = depth >> 28;
+  int oz = roundz(depth & 0x3ffff), odz = depth >> 28;
   int nz = zsrc ? (cmd.zprim >> 16) * 8 : z_in >> 13;
-  int ndz = zsrc ? cmd.zprim : abs(cmd.tdx.w) >> 16;
-  ndz = firstbithigh((ndz & 0xffff) | 0x1) + 1;
+  int ndz = zsrc ? cmd.zprim / 2 : abs1(cmd.tdx.w >> 16);
+  ndz = firstbithigh(ndz & 0x7fff) + 1;
   // adjust dz at greater depth
   int expn = (depth ^ 0x3ffff) | 0x400;
   expn = 31 - firstbithigh(expn << 14);
   bool dzm = (expn < 3 && odz == 0xf);
   if (expn < 3) odz = max(odz + 1, 4 - expn);
-  int dz = (ndz | odz) ? 0x8 << max(ndz, odz) : 0;
+  int dz = 0x8 << max(ndz, odz);
   // compare new z with old z
   bool ovf = cvg + (pixel >> 29) > 7;
   bool zmx = oz == 0x3ffff;
@@ -349,7 +363,7 @@ int2 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
   if (mode == ZINTRA && zeq) zlt = true;
   if (mode == ZTRANS) zlt = zmx || nz < oz;
   if (mode == ZDECAL) zlt = !zmx && zge && zle;
-  return int2(zlt, (max(ndz, odz) << 28) | nz);
+  return int2(zlt, (ndz << 28) | nz);
 }
 
 uint calc_shade(int2 dxy, RDPCommand cmd) {
@@ -403,7 +417,7 @@ uint combine(uint tex0, uint tex1, uint shade, uint rand,
   if (cyc == M0_COPY) return tex0;
   if (cyc == M0_FILL) return fill(cmd);
   // organize combiner inputs
-  uint prim = cmd.prim, env = cmd.env, lod = cmd.lodf << 24;
+  uint prim = cmd.prim, env = cmd.env, lod = cmd.lodf;
   uint mux0[16] = { color, tex0, tex1, prim, shade, env, -1, rand, 0, 0, 0, 0, 0, 0, 0, 0 };
   uint mux1[16] = { color, tex0, tex1, prim, shade, env, cmd.keyc, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
   uint mux2[32] = { color, tex0, tex1, prim, shade, env, cmd.keys, 0, a(tex0), a(tex1),
@@ -449,11 +463,11 @@ uint blend(uint pixel, uint color, uint shade, int2 zcmp,
   uint c0 = mux0[(cycle ? m1 >> 28 : m1 >> 30) & 0x03];
   uint c1 = mux1[(cycle ? m1 >> 24 : m1 >> 26) & 0x03];
   uint c2 = mux0[(cycle ? m1 >> 20 : m1 >> 22) & 0x03];
-  uint mux2[4] = { ~c1, a(pixel), -1, 0 };
+  uint mux2[4] = { c1 ^ 0xffffffff, a(pixel), -1, 0  };
   uint c3 = mux2[(cycle ? m1 >> 16 : m1 >> 18) & 0x03];
   // evaluate blender equation
-  int4 p = unpack32(c0), a = ((unpack32(c1) / 8) & 31) + 0;
-  int4 m = unpack32(c2), b = ((unpack32(c3) / 8) & 31) + 1;
+  int4 p = unpack32(c0), a = unpack32(c1) / 8 + 0;
+  int4 m = unpack32(c2), b = unpack32(c3) / 8 + 1;
   uint r = pack32((a * p + b * m) / (a + b));
   if (cyc == M0_2CYCLE && !cycle) return r;
   if (cmd.modes[1] & M1_ZWRITE) depth = zcmp.y;
