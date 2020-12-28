@@ -6,7 +6,9 @@
 #define M0_PERSP     0x00080000
 #define M0_TLUT_EN   0x00008000
 #define M0_TLUT_IA   0x00004000
-#define M0_DITH      0x000000c0
+#define M0_SAMPLE    0x00002000
+#define M0_CDITH     0x000000c0
+#define M0_ADITH     0x00000030
 
 #define M1_BLEND     0x00004000
 #define M1_CVG2ALPHA 0x00002000
@@ -102,7 +104,7 @@ void seta(inout uint color, uint alpha) {
 }
 
 int abs1(int val) {
-  return (val >> 31) ^ val;
+  return (val >> 31) ^ (val >> 16);
 }
 
 /* === Framebuffer interface === */
@@ -120,6 +122,7 @@ void load(uint2 pos, out uint color, out uint depth) {
     color |= (cval & 0x0001) << 31;
     color |= (cval & 0x003e) << 18;
     color |= (cval & 0x07c0) <<  5;
+    color |= (cval & 0xf800) >>  8;
   }
 
   // load 14-bit depth, 4-bit dz
@@ -322,6 +325,8 @@ uint visible(uint2 pos, RDPCommand cmd, out int2 dxy, out uint cvbit) {
   xb = min(max(xb, sxh), sxl);
   // check x bounds at every other subpixel
   int4 x = pos.x * 8 + int4(0, 2, 0, 2);
+  bool span = xa.x <= x.x && x.x <= xb.x;
+  if (cmd.modes[0] & M0_COPY) return span;
   cvbit = vy.x && xa.x <= x.x && x.x < xb.x;
   uint cvg = dot(xa <= x + 4 && x + 4 < xb, vy);
   return cvg + dot(xa <= x && x < xb, vy);
@@ -343,7 +348,7 @@ int2 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
   bool zsrc = cmd.modes[1] & M1_ZSRC;
   int oz = roundz(depth & 0x3ffff), odz = depth >> 28;
   int nz = zsrc ? (cmd.zprim >> 16) * 8 : z_in >> 13;
-  int ndz = zsrc ? cmd.zprim / 2 : abs1(cmd.tdx.w >> 16);
+  int ndz = zsrc ? cmd.zprim / 2 : abs1(cmd.tdx.w) + abs1(cmd.tde.w);
   ndz = firstbithigh(ndz & 0x7fff) + 1;
   // adjust dz at greater depth
   int expn = (depth ^ 0x3ffff) | 0x400;
@@ -354,8 +359,8 @@ int2 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
   // compare new z with old z
   bool ovf = cvg + (pixel >> 29) > 7;
   bool zmx = oz == 0x3ffff;
-  bool zle = dzm || nz - dz <= oz;
-  bool zge = dzm || nz + dz >= oz;
+  bool zle = dzm || (nz - dz <= oz);
+  bool zge = dzm || (nz + dz >= oz);
   bool zlt = zmx || (ovf ? nz < oz : zle);
   bool zeq = ovf && nz < oz && zge;
   // depth test based on mode
@@ -392,10 +397,11 @@ uint sample_tex(int2 st_in, RDPCommand cmd, uint cycle) {
   uint2 mask = min((tex.shift >> 4) & 0xf, 10);
   bool2 clmp = (tex.shift >> 9) || (mask == 0);
   int2 stl = tex.stl << 3, sth = tex.sth << 3;
-  st = clmp ? clamp(st - stl, 0, sth - stl) : st - stl;
+  st = clmp ? (st < sth ? max(st - stl, 0) : sth - stl) : st - stl;
   // read appropriate texels
   int2 stfrac = st & 0x1f, sti = st >> 5;
   bool up = (stfrac.x + stfrac.y) & 0x20;
+  if ((~cmd.modes[0] & M0_SAMPLE) || cyc == M0_COPY) return texel(sti, mask, tex, cmd);
   int4 c1 = unpack32(texel(sti + (int2)(up), mask, tex, cmd));
   int4 c2 = unpack32(texel(sti + int2(1, 0), mask, tex, cmd));
   int4 c3 = unpack32(texel(sti + int2(0, 1), mask, tex, cmd));
@@ -441,20 +447,26 @@ uint combine(uint tex0, uint tex1, uint shade, uint rand,
   return pack32(((a - b) * c + 0x80) / 256 + d);
 }
 
-uint mix_alpha_cvg(uint color, inout uint cvg, RDPCommand cmd) {
+uint mix_alpha_cvg(uint color, inout uint cvg, uint2 pos, RDPCommand cmd) {
+  uint dith[16] = { 7, 1, 6, 0, 3, 5, 2, 4, 4, 2, 5, 3, 0, 6, 1, 7 };
+  uint off = dith[(pos.y & 3) * 4 + (pos.x & 3)] ^ 0x7;
+  if ((cmd.modes[0] & M0_ADITH) == M0_ADITH) off = 0;
+
   uint cvg8 = cvg << 5, m1 = cmd.modes[1];
   uint alph = (color >> 24) + ((color >> 24) + 1) / 256;
   if (m1 & M1_ALPHA2CVG) cvg8 = (alph * cvg + 4) / 8;
   if (m1 & M1_CVG2ALPHA) seta(color, min(cvg8, 255) << 24);
+  else seta(color, min((color >> 24) + off, 255) << 24);
   cvg = cvg8 >> 5; return color;
 }
 
 uint blend(uint pixel, uint color, uint shade, int2 zcmp,
     out uint depth, uint cvg, uint cvbit, RDPCommand cmd, uint cycle) {
   uint cyc = cmd.modes[0] & M0_FILL, m1 = cmd.modes[1];
-  if (cyc != M0_2CYCLE && cycle) return pixel;
+  if (cyc != M0_2CYCLE && cycle) return color;
   // alpha, coverage, depth test
-  if (!(color >> 24) && (m1 & M1_ALPHA)) return pixel;
+  uint alpha = color >> 24, limit = cmd.blend >> 24;
+  if ((m1 & M1_ALPHA) && alpha < limit) return pixel;
   if (cyc == M0_COPY || cyc == M0_FILL) return cvg ? color : pixel;
   if (!zcmp.x || (m1 & M1_AA ? !cvg : !cvbit)) return pixel;
   // get blender input setting
@@ -480,7 +492,7 @@ uint blend(uint pixel, uint color, uint shade, int2 zcmp,
 }
 
 uint dither(uint color, uint2 pos, RDPCommand cmd) {
-  if ((cmd.modes[0] & M0_DITH) == M0_DITH) return color;
+  if ((cmd.modes[0] & M0_CDITH) == M0_CDITH) return color;
   uint dith[16] = { 7, 1, 6, 0, 3, 5, 2, 4, 4, 2, 5, 3, 0, 6, 1, 7 };
   uint off = dith[(pos.y & 3) * 4 + (pos.x & 3)];
   return pack32((off + unpack32(color)) & ~0x7);
@@ -491,7 +503,7 @@ uint dither(uint color, uint2 pos, RDPCommand cmd) {
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   uint width = globals[0].width;
   if (GlobalID.x >= width) return;
-  if (GlobalID.y >=   240) return;
+  if (GlobalID.y >=   380) return;
 
   uint pixel, depth;
   load(GlobalID.xy, pixel, depth);
@@ -518,9 +530,9 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
 
       color = combine(tex0, tex1, shade, rand, cvg, color, cmd, 0);
       color = combine(tex0, tex1, shade, rand, cvg, color, cmd, 1);
-      color = mix_alpha_cvg(color, cvg, cmd);
+      color = mix_alpha_cvg(color, cvg, GlobalID.xy, cmd);
 
-      pixel = blend(pixel, color, shade, zcmp, depth, cvg, cvbit, cmd, 0);
+      color = blend(pixel, color, shade, zcmp, depth, cvg, cvbit, cmd, 0);
       pixel = blend(pixel, color, shade, zcmp, depth, cvg, cvbit, cmd, 1);
       pixel = dither(pixel, GlobalID.xy, cmd);
     }
