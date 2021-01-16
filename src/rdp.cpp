@@ -61,6 +61,9 @@ namespace RDP {
   void render(bool sync);
 }
 
+static const uint32_t gsize = 8;
+static uint32_t gwidth = 80, gheight = 60;
+
 namespace Vulkan {
   VkDevice device = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
@@ -74,8 +77,7 @@ namespace Vulkan {
 
   void *vmems[2];
   uint8_t *mapped_mem = nullptr;
-  const uint32_t group_size = 8, max_cmds = 2048, max_copies = 4095;
-  uint32_t gwidth = 640 / group_size, gheight = 380 / group_size;
+  const uint32_t max_cmds = 2048, max_copies = 4096;
   uint32_t n_cmds = 0, n_tmems = 0, mem_idx = 1;
 
   const VkDeviceSize cmds_offset = 0;
@@ -87,7 +89,7 @@ namespace Vulkan {
   TileData *tiles_ptr() { return (TileData*)(mapped_mem + tiles_offset); }
 
   const VkDeviceSize texes_offset = align(tiles_offset + tiles_size);
-  const VkDeviceSize texes_size = (max_copies + 1) * sizeof(RDPTex) * 8;
+  const VkDeviceSize texes_size = max_copies * sizeof(RDPTex) * 8;
   RDPTex *texes_ptr() { return (RDPTex*)(mapped_mem + texes_offset) + n_tmems * 8; }
 
   const VkDeviceSize globals_offset = align(texes_offset + texes_size);
@@ -95,23 +97,23 @@ namespace Vulkan {
   GlobalData *globals_ptr() { return (GlobalData*)(mapped_mem + globals_offset); }
 
   const VkDeviceSize tmem_offset = align(globals_offset + globals_size);
-  const VkDeviceSize tmem_size = (max_copies + 1) << 12;
+  const VkDeviceSize tmem_size = max_copies * 0x1000;
   uint8_t *tmem_ptr() { return mapped_mem + tmem_offset + (n_tmems << 12); }
 
   const VkDeviceSize pixels_offset = align(tmem_offset + tmem_size);
-  const VkDeviceSize pixels_size = 640 * 380 * sizeof(uint32_t);
+  const VkDeviceSize pixels_size = 640 * 480 * sizeof(uint32_t);
   uint8_t *pixels_ptr() { return mapped_mem + pixels_offset; }
 
   const VkDeviceSize hpixels_offset = align(pixels_offset + pixels_size);
-  const VkDeviceSize hpixels_size = 640 * 380 * sizeof(uint32_t);
+  const VkDeviceSize hpixels_size = 640 * 480 * sizeof(uint32_t);
   uint8_t *hpixels_ptr() { return mapped_mem + hpixels_offset; }
 
   const VkDeviceSize zbuf_offset = align(hpixels_offset + hpixels_size);
-  const VkDeviceSize zbuf_size = 640 * 380 * sizeof(uint16_t);
+  const VkDeviceSize zbuf_size = 640 * 480 * sizeof(uint16_t);
   uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
 
   const VkDeviceSize hzbuf_offset = align(zbuf_offset + zbuf_size);
-  const VkDeviceSize hzbuf_size = 640 * 380 * sizeof(uint16_t);
+  const VkDeviceSize hzbuf_size = 640 * 480 * sizeof(uint16_t);
   uint8_t *hzbuf_ptr() { return mapped_mem + hzbuf_offset; }
 
   const VkDeviceSize total_size = hzbuf_offset + hzbuf_size;
@@ -371,12 +373,12 @@ namespace Vulkan {
     state.tmem = ++n_tmems;
     memcpy(tmem_ptr(), last_tmem, 0x1000);
     memcpy(texes_ptr(), last_texes, sizeof(RDPTex) * 8);
-    if (n_tmems >= max_copies) RDP::render(0);
+    if (n_tmems >= max_copies - 1) RDP::render(0);
   }
 
   void add_rdp_cmd(RDPCommand cmd) {
-    uint32_t yh = (cmd.yh < 0 ? 0 : cmd.yh / (group_size << 2));
-    uint32_t yl = (cmd.yl < 0 ? 0 : cmd.yl / (group_size << 2));
+    uint32_t yh = (cmd.yh < 0 ? 0 : cmd.yh / (gsize * 4));
+    uint32_t yl = (cmd.yl < 0 ? 0 : cmd.yl / (gsize * 4));
     for (uint32_t i = yh; i <= yl && i < gheight; ++i) {
       for (uint32_t j = 0; j < gwidth; ++j) {
         TileData *tile = tiles_ptr() + i * gwidth + j;
@@ -408,20 +410,16 @@ namespace Vulkan {
     mapped_mem = (uint8_t*)vmems[mem_idx ^= 1];
     if (!wait_compute(mem_idx)) {
       RenderInfo *r = &renders[mem_idx];
-      if (r->zbuf) {
-        memcpy(r->zbuf, zbuf_ptr(), r->zbuf_len);
-        memcpy(r->hzbuf, hzbuf_ptr(), r->zbuf_len);
-      }
-      if (r->img) {
-        memcpy(r->img, pixels_ptr(), r->img_len);
-        memcpy(r->himg, hpixels_ptr(), r->img_len);
-      }
+      memcpy(r->zbuf, zbuf_ptr(), r->zbuf_len);
+      memcpy(r->hzbuf, hzbuf_ptr(), r->zbuf_len);
+      memcpy(r->img, pixels_ptr(), r->img_len);
+      memcpy(r->himg, hpixels_ptr(), r->img_len);
     }
     mapped_mem = (uint8_t*)vmems[mem_idx ^= 1];
   }
 
   void render(RenderInfo *r) {
-    if (!r->img || n_cmds == 0) return;
+    if (n_cmds == 0) return;
     if (r->img_len > pixels_size) r->img_len = pixels_size;
     if (r->zbuf_len > zbuf_size) r->zbuf_len = zbuf_size;
     memcpy(&renders[mem_idx], r, sizeof(RenderInfo));
@@ -432,18 +430,14 @@ namespace Vulkan {
 
     // upload current buffer to GPU
     globals_ptr()->n_cmds = n_cmds;
-    if (r->zbuf) {
-      memcpy(zbuf_ptr(), r->zbuf, r->zbuf_len);
-      memcpy(hzbuf_ptr(), r->hzbuf, r->zbuf_len);
-    }
+    memcpy(zbuf_ptr(), r->zbuf, r->zbuf_len);
+    memcpy(hzbuf_ptr(), r->hzbuf, r->zbuf_len);
     memcpy(pixels_ptr(), r->img, r->img_len);
     memcpy(hpixels_ptr(), r->himg, r->img_len);
     flush_compute(mem_idx);
 
     // change buffers and reset data
     n_cmds = 0, n_tmems = 0;
-    /*memcpy(tmem_ptr(), last_tmem, 0x1000);
-    memcpy(texes_ptr(), last_texes, sizeof(RDPTex) * 8);*/
     mapped_mem = (uint8_t*)vmems[mem_idx ^= 1];
     memset(tiles_ptr(), 0, tiles_size);
     memcpy(tmem_ptr(), last_tmem, 0x1000);
@@ -454,7 +448,7 @@ namespace Vulkan {
 /* === RDP Interface === */
 
 static uint32_t img_size, img_width, height;
-static uint32_t img_addr, zbuf_addr;
+static uint32_t img_addr, zbuf_addr, zwrite;
 static uint32_t tex_nibs, tex_width, tex_addr;
 static RDPState state;
 
@@ -481,41 +475,41 @@ void RDP::render(bool sync) {
     .img  = R4300::ram + img_addr,  .himg  = R4300::hram + img_addr,
     .zbuf = R4300::ram + zbuf_addr, .hzbuf = R4300::hram + zbuf_addr,
     .img_len = img_width * height * img_size,
-    .zbuf_len = img_width * height * 2,
+    .zbuf_len = img_width * height * 2 * zwrite,
   };
-  Vulkan::render(&render_info);
-  /*if (sync)*/ Vulkan::sync();
+  Vulkan::render(&render_info), zwrite = 0;
+  //if (sync) Vulkan::sync();
 }
 
 /* === Instruction translation === */
 
 static void set_color_image(uint32_t *instr) {
-  RDP::render(0);  // assume something changed
+  uint32_t addr = instr[1] & R4300::mask;
+  uint32_t width = (instr[0] & 0x3ff) + 1;
+  if (addr == img_addr && width == img_width) return;
+  RDP::render(0), img_width = width, img_addr = addr;
   img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
-  img_width = (instr[0] & 0x3ff) + 1;
-  img_addr = instr[1] & R4300::mask;
 
   GlobalData *globals = Vulkan::globals_ptr();
   globals->width = img_width, globals->size = img_size;
   globals->fmt = (instr[0] >> 19) & 0x1;
-  Vulkan::gwidth = img_width / Vulkan::group_size;
+  gwidth = (img_width + gsize - 1) / gsize;
 }
 
 static void set_depth_image(uint32_t *instr) {
-  RDP::render(0);  // assume something changed
-  zbuf_addr = instr[1] & R4300::mask;
+  if ((instr[1] & R4300::mask) == zbuf_addr) return;
+  RDP::render(0), zbuf_addr = instr[1] & R4300::mask;
 }
 
 static void set_scissor(uint32_t *instr) {
   state.sxh = zext(instr[0] >> 12, 12), state.syh = zext(instr[0], 12);
   state.sxl = zext(instr[1] >> 12, 12), state.syl = zext(instr[1], 12);
-  height = (state.syl >> 2) - (state.syh >> 2);
-  Vulkan::gheight = height / Vulkan::group_size + 1;
-  height = Vulkan::gheight * Vulkan::group_size;
+  height = (state.syl + 3) / 4, gheight = (height + gsize - 1) / gsize;
 }
 
 static void set_other_modes(uint32_t *instr) {
   memcpy(state.modes, instr, 8);
+  zwrite |= (state.modes[1] >> 5) & 1;
 }
 
 static void set_combine(uint32_t *instr) {

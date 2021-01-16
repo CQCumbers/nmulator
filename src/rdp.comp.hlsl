@@ -314,7 +314,7 @@ uint visible(uint2 pos, RDPCommand cmd, out int2 dxy, out uint cvbit) {
   bool4 vx = (xa / 2) <= (xb / 2);
   bool4 vy = vx && (int4)y1 <= y && y < (int4)y2;
   // compute interpolation deltas
-  bool offset = lft == ((cmd.sh >> 31) & 1);
+  bool offset = (cmd.sh >> 31) == -lft;
   if (offset) x1.x += 3 * cmd.sh;
   dxy = pos * 256 - int2(x1.x >> 7, cmd.yh >> 2 << 8);
   if (offset) dxy.y += 3 << 6;
@@ -342,8 +342,8 @@ int roundz(int depth) {
   return (mant << max(6 - expn, 0)) + base;
 }
 
-int2 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
-  if (~cmd.modes[1] & M1_ZCMP) return int2(1, depth);
+int3 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
+  if (~cmd.modes[1] & M1_ZCMP) return int3(1, 1, depth);
   // extract old/new z and dz
   bool zsrc = cmd.modes[1] & M1_ZSRC;
   int oz = roundz(depth & 0x3ffff), odz = depth >> 28;
@@ -368,7 +368,7 @@ int2 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
   if (mode == ZINTRA && zeq) zlt = true;
   if (mode == ZTRANS) zlt = zmx || nz < oz;
   if (mode == ZDECAL) zlt = !zmx && zge && zle;
-  return int2(zlt, (ndz << 28) | nz);
+  return int3(zlt, zge, (ndz << 28) | nz);
 }
 
 uint calc_shade(int2 dxy, RDPCommand cmd) {
@@ -460,7 +460,7 @@ uint mix_alpha_cvg(uint color, inout uint cvg, uint2 pos, RDPCommand cmd) {
   cvg = cvg8 >> 5; return color;
 }
 
-uint blend(uint pixel, uint color, uint shade, int2 zcmp,
+uint blend(uint pixel, uint color, uint shade, int3 zcmp,
     out uint depth, uint cvg, uint cvbit, RDPCommand cmd, uint cycle) {
   uint cyc = cmd.modes[0] & M0_FILL, m1 = cmd.modes[1];
   if (cyc != M0_2CYCLE && cycle) return color;
@@ -480,15 +480,19 @@ uint blend(uint pixel, uint color, uint shade, int2 zcmp,
   // evaluate blender equation
   int4 p = unpack32(c0), a = unpack32(c1) / 8 + 0;
   int4 m = unpack32(c2), b = unpack32(c3) / 8 + 1;
+  //uint r = pack32((a * p + b * m) >> 5);
   uint r = pack32((a * p + b * m) / (a + b));
+  //r = 0xffff00ff;
   if (cyc == M0_2CYCLE && !cycle) return r;
-  if (cmd.modes[1] & M1_ZWRITE) depth = zcmp.y;
+  if (cmd.modes[1] & M1_ZWRITE) depth = zcmp.z;
   // write blended coverage value
   uint ocvg = pixel >> 29, ovf = cvg + ocvg > 7;
-  bool enabled = !ovf && (m1 & M1_AA);
-  if (!enabled && !(m1 & M1_BLEND)) r = c0;
-  uint muxc[4] = { max(cvg + ocvg, 7), (cvg + ocvg) & 7, 7, ocvg };
-  seta(r, muxc[(m1 >> 8) & 0x03] << 29); return r;
+  bool blen = m1 & M1_BLEND, aaen = m1 & M1_AA;
+  if (!(blen |= (!ovf && aaen && zcmp.y))) r = c0;
+  if ((m1 & M1_ON_CVG) && !ovf) r = c2;
+  uint clmp = blen ? min(7, cvg + ocvg) : cvg - 1;
+  uint muxc[4] = { clmp, cvg + ocvg, 7, ocvg };
+  seta(r, muxc[(m1 >> 8) & 3] << 29); return r;
 }
 
 uint dither(uint color, uint2 pos, RDPCommand cmd) {
@@ -503,16 +507,15 @@ uint dither(uint color, uint2 pos, RDPCommand cmd) {
 void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
   uint width = globals[0].width;
   if (GlobalID.x >= width) return;
-  if (GlobalID.y >=   380) return;
+  if (GlobalID.y >=   480) return;
 
   uint pixel, depth;
   load(GlobalID.xy, pixel, depth);
   uint rand = 0xff888888;
 
   uint tid = GroupID.y * width / 8 + GroupID.x;
-  TileData tile = tiles[tid];
   for (uint i = 0; i < 64; ++i) {
-    uint bitmask = tile.cmd_idxs[i];
+    uint bitmask = tiles[tid].cmd_idxs[i];
     while (bitmask != 0) {
       uint lsb = firstbitlow(bitmask);
       RDPCommand cmd = cmds[(i << 5) | lsb];
@@ -524,7 +527,7 @@ void main(uint3 GlobalID : SV_DispatchThreadID, uint3 GroupID : SV_GroupID) {
 
       uint shade = calc_shade(dxy, cmd);
       int4 coord = calc_coord(dxy, cmd);
-      int2 zcmp  = calc_depth(coord.w, depth, cvg, pixel, cmd);
+      int3 zcmp  = calc_depth(coord.w, depth, cvg, pixel, cmd);
       uint tex0  = sample_tex(coord.xy, cmd, 0);
       uint tex1  = sample_tex(coord.xy, cmd, 1);
 
