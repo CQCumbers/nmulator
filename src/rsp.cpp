@@ -67,28 +67,29 @@ void RSP::set_status(uint32_t val) {
 
 // read instruction, mark code address
 static uint32_t fetch(uint32_t addr) {
-  //printf("RSP PC: %x\n", addr);
+  if (addr > 0xffc) return 0;
   write32(code_mask + addr, 0xffffffff);
   return read32(imem + addr);
 }
 
 /* === Recompiler config === */
 
+// read CPU-RSP semaphore
+static int64_t mfc0(uint32_t idx) {
+  return RSP::cop0[7] ? 1 : RSP::cop0[7]++;
+}
+
 // modify RSP and RDP status regs
 static void mtc0(uint32_t idx, uint64_t val) {
   switch (idx &= 0x1f) {
-    default: RSP::cop0[idx] = val;
+    default: return;
     case 0: RSP::cop0[0] = val & 0x1fff; return;
-    case 1:
-      //printf("[RSP] Writing %x to DMA_SRC at %x\n", val, RSP::pc);
-      RSP::cop0[1] = val & 0xffffff; return;
-    case 2:
-      //printf("[RSP] Writing %x to DMA_READ_LEN\n", val);
-      RSP::dma(val, false); return;
+    case 1: RSP::cop0[1] = val & 0xffffff; return;
+    case 2: RSP::dma(val, false); return;
     case 3: RSP::dma(val, true); return;
     case 4: RSP::set_status(val); return;
     case 8: RSP::cop0[10] = RSP::cop0[8] = val; return;
-    case 9: Sched::add(TASK_RDP, 0), RSP::cop0[9] = val; return;
+    case 9: Sched::move(TASK_RDP, 0), RSP::cop0[9] = val; return;
     case 11: RSP::cop0[11] &= ~pext(val >> 0, 0x7);
       RSP::cop0[11] |= pext(val >> 1, 0x7); return;
   }
@@ -103,8 +104,9 @@ static MipsConfig cfg = {
   .regs = regs, .cop0 = 32,
   .cop2 = 64, .pool = 150,
   .lookup = lookup, .fetch = fetch,
-  .mtc0 = mtc0, .stop_at = stop_at,
-  .mtc0_mask = 0x0b1f, .is_rsp = true
+  .mfc0 = mfc0, .mfc0_mask = 0x0080,
+  .mtc0 = mtc0, .mtc0_mask = 0xeb7f,
+  .stop_at = stop_at
 };
 
 robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
@@ -118,7 +120,7 @@ static uint32_t crc32(uint8_t *bytes, uint32_t len) {
 
 void RSP::update() {
   while (Sched::until >= 0) {
-    if (cop0[4] & 0x1) return;
+    if (cop0[4] & 0x1) { printf("Stopped RSP\n"); return; }
     CodePtr code = lookup[pc / 4];
     if (code) {
       pc = Mips::run(&cfg, code) & 0xffc;

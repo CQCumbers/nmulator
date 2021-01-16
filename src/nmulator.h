@@ -19,18 +19,19 @@ struct MipsConfig {
 
   uint8_t *mem;
   CodePtr *lookup;
+  ReadPtr mfc0;
   WritePtr mtc0;
+  uint32_t mfc0_mask;
   uint32_t mtc0_mask;
 
   uint32_t *pages, *tlb;
-  uint64_t fn[5];
+  uint64_t fn[6];
   ReadPtr read;
   WritePtr write;
   WritePtr tlbwi;
 
   FetchPtr fetch;
   ReadPtr stop_at;
-  bool is_rsp;
 };
 
 struct Block {
@@ -60,6 +61,7 @@ enum Task {
 
 namespace Sched {
   extern int64_t until;
+  uint64_t now();
   void init(uint8_t task, int64_t time);
   void add(uint8_t task, int64_t time);
   void move(uint8_t task, int64_t time); 

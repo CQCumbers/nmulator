@@ -45,6 +45,11 @@ static void move_up(uint64_t *ptr, uint64_t event) {
 
 /* === Public interface === */
 
+// Get current timestamp
+uint64_t Sched::now() {
+  return (events[0] >> 8) - until;
+}
+
 // Add first task to event queue
 void Sched::init(uint8_t task, int64_t time) {
   events[0] = (time << 8) | task, until = time;

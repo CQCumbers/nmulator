@@ -8,7 +8,7 @@ struct MipsJit {
   MipsConfig &cfg;
   x86::Assembler as;
 
-  Label end_label, exc_label;
+  Label end_label;
   bool cop1_checked;
   static constexpr uint32_t block_end = 0x04ffffff;
 
@@ -174,27 +174,47 @@ struct MipsJit {
     // TLB miss handler
     // assumes not in branch delay, EXL = 0
     cfg.fn[FN_TLB] = (uint32_t)as.offset();
-    // Cause
-    uint32_t reg = (13 + cfg.cop0) << 3;
-    as.mov(x86::byte_ptr(x86::rbp, reg), x86::eax);
-    // Status, EPC
+    Label exit = as.newLabel();
+    // Cause = eax, EPC = edi
+    as.and_(x86_spill(13 + cfg.cop0), 0xff00);
+    as.or_(x86_spill(13 + cfg.cop0), x86::eax);
     as.or_(x86_spill(12 + cfg.cop0), 0x2);
     as.mov(x86_spill(14 + cfg.cop0), x86::edi);
-    Label valid = as.newLabel();
-    as.bt(x86::ecx, 29), as.mov(x86::edi, 0x80000000);
-    as.jnc(valid), as.add(x86::edi, 0x180), as.bind(valid);
-    // BadVAddr
+    // Exception vector
+    as.xor_(x86::edi, x86::edi), as.mov(x86::eax, 0x180);
+    as.bt(x86::ecx, 29), as.cmovc(x86::edi, x86::eax);
+    // BadVAddr = (edx << 12) | (ecx & 0xfff)
     as.and_(x86::ecx, 0xfff), as.mov(x86::eax, x86::edx);
     as.shl(x86::eax, 12), as.or_(x86::ecx, x86::eax);
     as.mov(x86_spill(8 + cfg.cop0), x86::ecx);
     // Context
     as.mov(x86::eax, x86_spill(4 + cfg.cop0));
-    as.and_(x86::eax, 0xff000000), as.and_(x86::edx, 0xffffe);
+    as.and_(x86::eax, 0xff800000), as.and_(x86::edx, 0xffffe);
     as.shl(x86::edx, 3), as.or_(x86::eax, x86::edx);
     as.mov(x86_spill(4 + cfg.cop0), x86::eax);
     // EntryHi
     as.shl(x86::edx, 9);
     as.mov(x86_spill(10 + cfg.cop0), x86::edx);
+    // Next block (ignores scheduler)
+    as.mov(x86::rax, (uint64_t)cfg.lookup);
+    as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rdi, 1));
+    as.add(x86::edi, 0x80000000), as.cmp(x86::rdx, 0);
+    as.je(exit), as.jmp(x86::rdx);
+
+    // Non-TLB exception handler
+    cfg.fn[FN_EXC] = (uint32_t)as.offset();
+    // Cause = eax, EPC = edi
+    as.and_(x86_spill(13 + cfg.cop0), 0xff00);
+    as.or_(x86_spill(13 + cfg.cop0), x86::eax);
+    as.btr(x86_spilld(12 + cfg.cop0), 32);
+    as.or_(x86_spill(12 + cfg.cop0), 0x2);
+    as.mov(x86_spill(14 + cfg.cop0), x86::edi);
+    // Next block (ignores scheduler)
+    as.mov(x86::edi, 0x80000180);
+    as.mov(x86::rax, (uint64_t)cfg.lookup + 0x300);
+    as.mov(x86::rdx, x86::qword_ptr(x86::rax));
+    as.cmp(x86::rdx, 0), as.je(exit);
+    as.jmp(x86::rdx), as.bind(exit);
 
     // JIT return handler
     cfg.fn[FN_EXIT] = (uint32_t)as.offset();
@@ -306,7 +326,6 @@ struct MipsJit {
 
   uint32_t check_breaks(uint32_t pc, uint32_t next_pc) {
     if (!cfg.stop_at(pc)) return next_pc;
-    // ensure it actually returns to C++
     if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
     return block_end;
   }
@@ -333,7 +352,7 @@ struct MipsJit {
   template <typename T>
   inline void x86_read(uint32_t pc) {
     bool early = pc != block_end && cfg.pages;
-    if (early) as.mov(x86::edi, pc);
+    if (early) as.mov(x86::edi, pc - 4);
     // translate virtual address
     Label miss = as.newLabel();
     if (cfg.pages) x86_paddr(miss);
@@ -357,7 +376,7 @@ struct MipsJit {
   template <typename T>
   inline void x86_read_s(uint32_t pc) {
     bool early = pc != block_end && cfg.pages;
-    if (early) as.mov(x86::edi, pc);
+    if (early) as.mov(x86::edi, pc - 4);
     // translate virtual address
     Label miss = as.newLabel();
     if (cfg.pages) x86_paddr(miss);
@@ -382,7 +401,7 @@ struct MipsJit {
   template <typename T, bool phys=false>
   inline void x86_write(uint32_t pc) {
     bool early = pc != block_end && cfg.pages;
-    if (early && !phys) as.mov(x86::edi, pc);
+    if (early && !phys) as.mov(x86::edi, pc - 4);
     // translate virtual address
     Label miss = as.newLabel();
     if (cfg.pages && !phys) x86_paddr(miss);
@@ -1231,7 +1250,7 @@ struct MipsJit {
 
   uint32_t break_(uint32_t pc) {
     as.or_(x86_spilld(4 + cfg.cop0), 0x3);
-    as.mov(x86::edi, pc + 4);
+    as.mov(x86::edi, pc - 4), as.jmp(cfg.fn[FN_EXIT]);
     return block_end;
   }
 
@@ -1270,7 +1289,15 @@ struct MipsJit {
   }
 
   uint32_t eret() {
-    as.and_(x86_spill(12 + cfg.cop0), ~0x2);
+    // check cause and status registers
+    as.mov(x86::ecx, x86_spill(12 + cfg.cop0));
+    as.mov(x86::eax, x86_spill(13 + cfg.cop0));
+    as.and_(x86::eax, x86::ecx), as.and_(x86::ecx, ~0x2);
+    as.test(x86::ah, 0xff), as.setne(x86::al);
+    as.and_(x86::eax, x86::ecx);
+    // update status, return to EPC
+    as.sal(x86::rax, 32), as.or_(x86::rax, x86::rcx);
+    as.mov(x86_spilld(12 + cfg.cop0), x86::rax);
     as.mov(x86::edi, x86_spill(14 + cfg.cop0));
     as.jmp(end_label);
     return block_end;
@@ -1278,22 +1305,21 @@ struct MipsJit {
 
   void mfc0(uint32_t instr) {
     if (rt(instr) == 0) return;
-    move(rt(instr), rd(instr) + cfg.cop0);
-    if (cfg.is_rsp && rt(instr) == 7) {
-      as.mov(x86_spilld(rd(instr) + cfg.cop0), 1);
-    }
+    bool call = cfg.mfc0_mask & (1 << rd(instr));
+    if (!call) return move(rt(instr), rd(instr) + cfg.cop0);
+    x86_store_caller(), as.mov(x86::ecx, rd(instr));
+    x86_call((uint64_t)cfg.mfc0), x86_load_caller();
+    from_eax(rt(instr));
   }
 
   void mtc0(uint32_t instr) {
     bool call = cfg.mtc0_mask & (1 << rd(instr));
     if (!call) return move(rd(instr) + cfg.cop0, rt(instr));
-    // read register value parameter
     if (rt(instr) != 0) {
       uint32_t rtx = x86_reg(rt(instr));
       if (rtx) as.movsxd(x86::rsi, x86::gpd(rtx));
       else as.movsxd(x86::rsi, x86_spill(rt(instr)));
     } else as.xor_(x86::esi, x86::esi);
-    // pass cop0 index to callback
     x86_store_caller(), as.mov(x86::ecx, rd(instr));
     x86_call((uint64_t)cfg.mtc0), x86_load_caller();
   }
@@ -1588,7 +1614,7 @@ struct MipsJit {
   }
 
   void invalid(uint32_t instr) {
-    const char *name = cfg.is_rsp ? "RSP" : "R4300";
+    const char *name = cfg.pages ? "R4300" : "RSP";
     printf("Invalid %s instruction %x\n", name, instr), exit(1);
   }
 
@@ -2129,7 +2155,7 @@ struct MipsJit {
     uint32_t mask = cfg.pool * 8 + (3 - right) * 16 + (sa(instr) >> 1);
     as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rbp, x86::rcx, 0, mask));
     uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
-    // merge with old register values (assumes e=0)
+    // merge with old register values
     if (sa(instr)) as.psrldq(x86::xmm1, sa(instr) >> 1);
     if (rtx) as.pblendvb(x86::xmm1, x86::xmm(rtx));
     else as.pblendvb(x86::xmm1, x86_spillq(rt(instr) * 2 + cfg.cop2));
@@ -2153,7 +2179,7 @@ struct MipsJit {
     uint32_t mask = cfg.pool * 8 + (2 - right) * 16;
     as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rbp, x86::rcx, 0, mask));
     uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
-    // merge with byte-swapped register values (assumes e=0)
+    // merge with byte-swapped register values
     if (rtx) as.movdqa(x86::xmm2, x86::xmm(rtx));
     else as.movdqa(x86::xmm2, x86_spillq(rt(instr) * 2 + cfg.cop2));
     as.pshufb(x86::xmm2, x86_spillq(cfg.pool));
@@ -2171,31 +2197,34 @@ struct MipsJit {
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
     int32_t off = sext(instr, 7) * (type < 2 ? 8 : 16);
-    int32_t elem  = (sa(instr) >> 1) & 0xf;
+    int32_t elem = (sa(instr) >> 1) & 0xf;
     as.add(x86::ecx, off), as.mov(x86::esi, x86::ecx);
     as.and_(x86::ecx, 0xff8), as.and_(x86::esi, 0x7);
     // load byte-swapped data from address
-    as.mov(x86::edx, elem), as.sub(x86::edx, x86::esi);
-    as.and_(x86::edx, 0xf), as.mov(x86::rax, (uint64_t)cfg.mem);
-    as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rbp, x86::rdx, 0, cfg.pool * 8));
-    as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rax, x86::rcx));
-    as.pshufb(x86::xmm0, x86::xmm1);
-    // load into lanes depending on stride
+    as.mov(x86::rax, (uint64_t)cfg.mem);
+    as.pinsrq(x86::xmm1, x86::qword_ptr(x86::rax, x86::rcx), 0);
+    as.add(x86::ecx, 0x8), as.and_(x86::ecx, 0xff8);
+    as.pinsrq(x86::xmm1, x86::qword_ptr(x86::rax, x86::rcx), 1);
+    // rotate based on alignment
+    as.mov(x86::edx, elem), as.sub(x86::edx, x86::esi), as.and_(x86::edx, 0xf);
+    auto mask = x86::dqword_ptr(x86::rbp, x86::rdx, 0, cfg.pool * 8);
+    as.movdqu(x86::xmm0, mask), as.pshufb(x86::xmm1, x86::xmm0);
+    // insert data into correct lanes
     constexpr uint8_t masks[] = { 8, 8, 10, 12 };
-    as.pshufb(x86::xmm0, x86_spillq(cfg.pool + masks[type]));
-    if (type != LPV) as.psrlw(x86::xmm0, 1);
+    as.pshufb(x86::xmm1, x86_spillq(cfg.pool + masks[type]));
+    if (type != LPV) as.psrlw(x86::xmm1, 1);
     // merge with old register if LFV
     uint8_t rtx = x86_reg(rt(instr) * 2 + cfg.cop2);
     if (type == LFV) {
       uint32_t base = rt(instr) * 16 + cfg.cop2 * 8;
       for (int32_t e = elem; e < elem + 8 && e < 16; ++e) {
-        as.pextrb(x86::al, x86::xmm0, 15 - e);
+        as.pextrb(x86::al, x86::xmm1, 15 - e);
         if (rtx) as.pinsrb(x86::xmm(rtx), x86::al, 15 - e);
         else as.mov(x86::byte_ptr(x86::rbp, base + 15 - e), x86::al);
       }
     } else {
-      if (rtx) as.movdqa(x86::xmm(rtx), x86::xmm0);
-      else as.movdqa(x86_spillq(rt(instr) * 2 + cfg.cop2), x86::xmm0);
+      if (rtx) as.movdqa(x86::xmm(rtx), x86::xmm1);
+      else as.movdqa(x86_spillq(rt(instr) * 2 + cfg.cop2), x86::xmm1);
     }
   }
 
@@ -2256,13 +2285,17 @@ struct MipsJit {
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
     int32_t off = sext(instr, 7) * 16;
-    as.add(x86::ecx, off), as.and_(x86::ecx, 0xff8);
+    as.add(x86::ecx, off), as.mov(x86::esi, x86::ecx);
+    as.and_(x86::ecx, 0xff8), as.and_(x86::esi, 0x8);
     // load byte-swapped data from address
     as.mov(x86::rax, (uint64_t)cfg.mem);
-    as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rax, x86::rcx));
-    as.and_(x86::ecx, 0x8), as.sub(x86::ecx, sa(instr) >> 1); as.and_(x86::ecx, 0xf);
-    as.movdqu(x86::xmm1, x86::dqword_ptr(x86::rbp, x86::rcx, 0, cfg.pool * 8));
-    as.pshufb(x86::xmm0, x86::xmm1);
+    as.pinsrq(x86::xmm1, x86::qword_ptr(x86::rax, x86::rcx), 0);
+    as.add(x86::ecx, 0x8), as.and_(x86::ecx, 0xff8);
+    as.pinsrq(x86::xmm1, x86::qword_ptr(x86::rax, x86::rcx), 1);
+    // rotate based on alignment
+    as.sub(x86::esi, sa(instr) >> 1), as.and_(x86::esi, 0xf);
+    auto mask = x86::dqword_ptr(x86::rbp, x86::rsi, 0, cfg.pool * 8);
+    as.movdqu(x86::xmm0, mask), as.pshufb(x86::xmm1, x86::xmm0);
     uint8_t base = (rt(instr) & 0x18) * 2;
     uint8_t elem = (sa(instr) >> 2) & 0x7;
     // insert data into correct lanes
@@ -2270,7 +2303,7 @@ struct MipsJit {
       uint8_t rti = base + ((elem + i) & 0x7) * 2;
       uint8_t rtx = x86_reg(rti + cfg.cop2);
       uint32_t dst = (rti + cfg.cop2) * 8 + (7 - i) * 2;
-      as.pextrw(x86::dx, x86::xmm0, 7 - i);
+      as.pextrw(x86::dx, x86::xmm1, 7 - i);
       if (rtx) as.pinsrw(x86::xmm(rtx), x86::dx, 7 - i);
       else as.mov(x86::word_ptr(x86::rbp, dst), x86::dx);
     }
@@ -2282,21 +2315,28 @@ struct MipsJit {
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
     int32_t off = sext(instr, 7) * 16;
-    as.add(x86::ecx, off), as.and_(x86::ecx, 0xff8);
-    // find affected registers and lanes
+    as.add(x86::ecx, off), as.mov(x86::esi, x86::ecx);
+    as.and_(x86::ecx, 0xff8), as.and_(x86::esi, 0x7);
+    // extract data from correct lanes
     as.mov(x86::rax, (uint64_t)cfg.mem);
     uint8_t base = (rt(instr) & ~0x7) * 2;
     uint8_t elem = (sa(instr) >> 2) & 0x7;
     for (uint8_t i = 0; i < 8; ++i) {
-      // extract data from correct lanes
       uint8_t rti = base + ((elem + i) & 0x7) * 2;
       uint8_t rtx = x86_reg(rti + cfg.cop2);
       uint32_t src = (rti + cfg.cop2) * 8 + (7 - i) * 2;
       if (rtx) as.pextrw(x86::dx, x86::xmm(rtx), 7 - i);
       else as.mov(x86::dx, x86::word_ptr(x86::rbp, src));
-      // store byte-swapped data from address
-      as.movbe(x86::word_ptr(x86::rax, x86::rcx, 0, i * 2), x86::dx);
+      as.pinsrw(x86::xmm1, x86::dx, 7 - i);
     }
+    // rotate based on alignment
+    as.neg(x86::esi), as.and_(x86::esi, 0xf);
+    auto mask = x86::dqword_ptr(x86::rbp, x86::rsi, 0, cfg.pool * 8);
+    as.movdqu(x86::xmm0, mask), as.pshufb(x86::xmm1, x86::xmm0);
+    // store to memory
+    as.pextrq(x86::qword_ptr(x86::rax, x86::rcx), x86::xmm1, 0);
+    as.add(x86::ecx, 0x8), as.and_(x86::ecx, 0xff8);
+    as.pextrq(x86::qword_ptr(x86::rax, x86::rcx), x86::xmm1, 1);
   }
 
   void swv(uint32_t instr) {
@@ -2312,11 +2352,14 @@ struct MipsJit {
     if (rtx) as.movdqa(x86::xmm1, x86::xmm(rtx));
     else as.movdqa(x86::xmm1, x86_spillq(rt(instr) * 2 + cfg.cop2));
     // rotate based on alignment
-    as.mov(x86::edx, sa(instr) >> 1); as.sub(x86::edx, x86::esi);
+    as.mov(x86::edx, sa(instr) >> 1), as.sub(x86::edx, x86::esi);
     as.and_(x86::edx, 0xf), as.mov(x86::rax, (uint64_t)cfg.mem);
-    as.movdqu(x86::xmm0, x86::dqword_ptr(x86::rbp, x86::rdx, 0, cfg.pool * 8));
-    as.pshufb(x86::xmm1, x86::xmm0); as.mov(x86::rax, (uint64_t)cfg.mem);
-    as.movdqu(x86::dqword_ptr(x86::rax, x86::rcx), x86::xmm1);
+    auto mask = x86::dqword_ptr(x86::rbp, x86::rdx, 0, cfg.pool * 8);
+    as.movdqu(x86::xmm0, mask), as.pshufb(x86::xmm1, x86::xmm0);
+    // store to memory
+    as.pextrq(x86::qword_ptr(x86::rax, x86::rcx), x86::xmm1, 0);
+    as.add(x86::ecx, 0x8), as.and_(x86::ecx, 0xff8);
+    as.pextrq(x86::qword_ptr(x86::rax, x86::rcx), x86::xmm1, 1);
   }
 
   void lwc2(uint32_t instr) {
@@ -2456,13 +2499,10 @@ struct MipsJit {
 
   void check_cop1(uint32_t pc) {
     if (!cfg.cop1 || pc == block_end) return;
-    Label cont = as.newLabel();
-    as.bsr(x86::eax, x86_spill(12 + cfg.cop0)), as.cmp(x86::eax, 29);
-    as.jae(cont), as.and_(x86_spill(13 + cfg.cop0), ~0xff);
-    as.or_(x86_spill(13 + cfg.cop0), 0x1000002c);
-    as.mov(x86_spill(14 + cfg.cop0), pc - 4);
-    as.mov(x86::edi, 0x80000180), as.jmp(exc_label);
-    as.bind(cont), cop1_checked = true;
+    as.bt(x86_spill(12 + cfg.cop0), 29);
+    as.mov(x86::eax, 0x1000002c);
+    as.mov(x86::edi, pc - 4), as.jnc(cfg.fn[FN_EXC]);
+    cop1_checked = true;
   }
 
   uint32_t cop1(uint32_t instr, uint32_t pc) {
@@ -2587,11 +2627,13 @@ struct MipsJit {
   }
 
   uint32_t jit_block(uint32_t pc) {
-    uint32_t cycles = 0;
-    end_label = as.newLabel(), exc_label = as.newLabel();
     cop1_checked = false;
-    for (uint32_t next_pc = pc + 4; pc != block_end; ++cycles) {
+    end_label = as.newLabel();
+
+    uint32_t cycles = 0, next_pc = pc + 4;
+    for (; pc != block_end; ++cycles) {
       uint32_t instr = cfg.fetch(pc);
+      //printf("%08x: %08x\n", pc, instr);
       pc = cycles ? check_breaks(pc, next_pc) : next_pc;
       switch (next_pc += 4, instr >> 26) {
         case 0x00: next_pc = special(instr, pc); break;
@@ -2651,29 +2693,10 @@ struct MipsJit {
       }
     }
 
-    as.bind(end_label);
-    if (!cfg.is_rsp) {
-      as.add(x86_spill(9 + cfg.cop0), cycles / 2);
-      Label cont_label = as.newLabel();
-      // check cause and status registers
-      as.mov(x86::eax, x86_spill(12 + cfg.cop0));
-      as.mov(x86::ecx, x86::eax); as.and_(x86::ecx, 0x3);
-      as.cmp(x86::ecx, 0x1); as.jne(cont_label);
-      as.and_(x86::eax, x86_spill(13 + cfg.cop0));
-      as.and_(x86::eax, 0xff00); as.jz(cont_label);
-      // set interrupt pc, status
-      as.mov(x86_spill(14 + cfg.cop0), x86::edi);
-      as.mov(x86::edi, 0x80000180), as.bind(exc_label);
-      as.or_(x86_spill(12 + cfg.cop0), 0x2);
-      as.bind(cont_label);
-    }
-
-    // only check interrupts when status or
-    // cause registers change - eret, mtc0, set_irqs
-    //if (cfg.cop0[12] & 0x3 != 0x1) continue;
-    // as.test(x86_spill(12 + cfg.cop0), 0x2);
-    // as.jc(cfg.thunks[4]);
-    // check jumps to funcs are actually are rip-relative
+    // check scheduler (no events)
+    uint32_t time = cfg.pages ? cycles : cycles * 2;
+    as.bind(end_label), as.mov(x86::rax, (uint64_t)&Sched::until);
+    as.sub(x86::qword_ptr(x86::rax), time), as.jl(cfg.fn[FN_EXIT]);
 
     if (cfg.pages) {
       // translate to physical address
@@ -2681,26 +2704,23 @@ struct MipsJit {
       as.mov(x86::edx, x86::edi), as.shr(x86::edx, 12);
       as.mov(x86::rax, (uint64_t)cfg.pages);
       auto off = x86::dword_ptr(x86::rax, x86::rdx, 2);
-      as.sub(x86::ecx, off), as.mov(x86::eax, 8);
+      as.sub(x86::ecx, off), as.mov(x86::eax, 0x8);
       as.bt(x86::ecx, 30), as.jc(cfg.fn[FN_TLB]);
       // get function pointer from table
       as.mov(x86::rax, (uint64_t)cfg.lookup);
       as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rcx, 1));
+      as.bt(x86_spilld(12 + cfg.cop0), 32);
+      as.mov(x86::eax, 0), as.jc(cfg.fn[FN_EXC]);
     } else {
       as.and_(x86::edi, 0xffc);
       as.mov(x86::rax, (uint64_t)cfg.lookup);
       as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rdi, 1));
     }
 
-    // check still_top (no intervening events)
-    as.mov(x86::rax, (uint64_t)&Sched::until);
-    uint32_t time = cfg.is_rsp ? cycles * 2 : cycles;
-    as.sub(x86::qword_ptr(x86::rax), time), as.jl(cfg.fn[FN_EXIT]);
-
+    // fill lookup with exit thunk
+    // to avoid null check?
     as.cmp(x86::rdx, 0), as.je(cfg.fn[FN_EXIT]);
     as.jmp(x86::rdx);
-    // fill lookup table with offsets to exit thunk
-    //as.jmp(cfg.fn[FN_EXIT]);
     return cycles;
   }
 };
@@ -2765,6 +2785,6 @@ void Mips::init(MipsConfig *cfg) {
 
   jit.emit_funcs();
   runtime.add(&ptr, &code);
-  for (uint32_t i = 0; i < 5; ++i)
+  for (uint32_t i = 0; i < 6; ++i)
     cfg->fn[i] += (uint64_t)ptr;
 }

@@ -36,8 +36,9 @@ static const uint32_t mi_version = 0x01010101;
 
 // raise MI pending interrupt bits
 void R4300::set_irqs(uint32_t mask) {
-  if ((mi_irqs |= mask) & mi_mask)
-    cop0[13] |= 0x400, cop0[13] &= ~0xff;
+  if (!((mi_irqs |= mask) & mi_mask)) return;
+  uint64_t exc = (cop0[12] & 0x403) == 0x401;
+  cop0[13] |= 0x400, cop0[12] |= exc << 32;
 }
 
 // lower MI pending interrupt bits
@@ -288,6 +289,7 @@ void R4300::pi_update() {
   uint8_t *dst = ram + (pi_to_rom ? pi_rom : pi_ram);
   if (has_fram && (pi_rom >> 16) == 0x800) return fram_dma();
   memcpy(dst, src, pi_len), set_irqs(0x10), pi_status &= ~0x1;
+  pi_ram += pi_len, pi_rom += pi_len;
 }
 
 // hack to pass PIF bootrom
@@ -445,15 +447,14 @@ static void eeprom_init(char *name) {
 
 // mempak to pifram, len = read length + 1 crc byte
 static void mempak_read(uint32_t pc, uint8_t len) {
-  uint32_t mem = read16(R4300::ram + pc) & ~0x1f;
+  uint32_t mem = read16(R4300::ram + pc) & 0x7e0;
   memcpy(R4300::ram + pc + 2, mempak + mem / 8, --len);
   R4300::ram[pc + 2 + len] = crc8(R4300::ram + pc + 2, len);
 }
 
 // pifram to mempak, len = 2 address bytes + write data length
 static void mempak_write(uint32_t pc, uint8_t len) {
-  uint32_t mem = read16(R4300::ram + pc) & ~0x1f;
-  if (mem == 0x8000) return;  // ignore enable/disable
+  uint32_t mem = read16(R4300::ram + pc) & 0x7e0;
   memcpy(mempak + mem / 8, R4300::ram + pc + 2, len - 2);
   R4300::ram[pc + len] = crc8(R4300::ram + pc + 2, len - 2);
 }
@@ -571,7 +572,8 @@ static int64_t read(uint32_t addr) {
     case 0x4040000: return RSP::cop0[0];
     case 0x4040004: return RSP::cop0[1];
     case 0x4040010: return RSP::cop0[4];
-    case 0x404001c: return (RSP::cop0[7] ? 0x1 : RSP::cop0[7]++);
+    case 0x4040018: return 0;  // DMA_BUSY
+    case 0x404001c: return RSP::cop0[7] ? 1 : RSP::cop0[7]++;
     case 0x4080000: return RSP::pc & 0xffc;
     // RDP Interface
     case 0x4100000: return RSP::cop0[8];
@@ -599,6 +601,8 @@ static int64_t read(uint32_t addr) {
     // Peripheral Interface
     case 0x4600000: return pi_ram;
     case 0x4600004: return pi_rom;
+    case 0x4600008: return 0x7f;
+    case 0x460000c: return 0x7f;
     case 0x4600010: return pi_status;
     // RDRAM Interface
     case 0x4700000: return 0xe;      // RI_MODE
@@ -618,15 +622,9 @@ static void write(uint32_t addr, uint64_t val) {
   switch (addr & R4300::mask) {
     default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
     // RSP Interface
-    case 0x4040000:
-      printf("[RSP] Writing %x to DMA_DST\n", val);
-      RSP::cop0[0] = val & 0x1fff; return;
-    case 0x4040004:
-      printf("[RSP] Writing %x to DMA_SRC\n", val);
-      RSP::cop0[1] = val & 0xffffff; return;
-    case 0x4040008:
-      printf("[RSP] Writing %x to DMA_READ_LEN\n", val);
-      RSP::dma(val, false); return;
+    case 0x4040000: RSP::cop0[0] = val & 0x1fff; return;
+    case 0x4040004: RSP::cop0[1] = val & 0xffffff; return;
+    case 0x4040008: RSP::dma(val, false); return;
     case 0x404000c: RSP::dma(val, true); return;
     case 0x4040010: RSP::set_status(val); return;
     case 0x404001c: RSP::cop0[7] = 0x0; return;
@@ -651,13 +649,14 @@ static void write(uint32_t addr, uint64_t val) {
       mi_mask &= ~pext(val >> 0, 0x3f);
       mi_mask |= pext(val >> 1, 0x3f);
       if (mi_irqs & mi_mask) {
-        cop0[13] |= 0x400, cop0[13] &= ~0xff;
+        uint64_t exc = (cop0[12] & 0x403) == 0x401;
+        cop0[13] |= 0x400, cop0[12] |= exc << 32;
       } else cop0[13] &= ~0x400; return;
     // Video Interface
     case 0x4400000:
       if (val == vi_status) return;
       vi_status = val, vi_dirty = true; return;
-    case 0x4400004: vi_origin = val & 0xffffff; printf("VI_ORIGIN_REG set to %x\n", vi_origin); return;
+    case 0x4400004: vi_origin = val & 0xffffff; return;
     case 0x4400008:
       if ((val & 0xfff) == vi_width) return;
       vi_width = val & 0xfff, vi_dirty = true; return;
@@ -690,8 +689,8 @@ static void write(uint32_t addr, uint64_t val) {
       if (((val >> 3) & 0x1) == ai_16bit) return;
       ai_16bit = (val >> 3) & 0x1, ai_dirty = true; return;
     // Peripheral Interface
-    case 0x4600000: pi_ram = val & 0xffffff; return;
-    case 0x4600004: pi_rom = val & R4300::mask; return;
+    case 0x4600000: pi_ram = val & 0x00fffffe; return;
+    case 0x4600004: pi_rom = val & 0xfffffffe; return;
     case 0x4600008:
       if (pi_status & 0x1) return;
       pi_len = val + 1, pi_to_rom = true;
@@ -727,6 +726,16 @@ static uint32_t mmio_bit(uint32_t pg, uint32_t len) {
   if (pg >= 0x4002 && pg < 0x8000) pg |= 0x80000;
   if (has_fram && pg >= 0x8000 && pg < 0x8020) pg |= 0x80000;
   return pg & ~(len - 1);  // align page address
+}
+
+// handle fetching unmapped page
+static uint32_t tlb_miss() {
+  uint32_t pg = (pc >> 12) & 0xffffe;
+  cop0[13] &= 0xff00, cop0[13] |= 0x8;
+  cop0[12] |= 0x2, cop0[14] = cop0[8] = pc;
+  cop0[4] &= 0xff800000, cop0[4] |= pg << 3;
+  cop0[10] = pg << 12, pc = 0x80000000;
+  return 0;  // assume valid region
 }
 
 // write to TLB from cop0, updating page table
@@ -932,16 +941,28 @@ void R4300::init_debug(uint32_t port) {
 
 // fire timer interrupt
 void R4300::timer_fire() {
-  cop0[13] |= 0x8000, cop0[13] &= ~0xff;
+  uint64_t exc = (cop0[12] & 0x8003) == 0x8001;
+  cop0[13] |= 0x8000, cop0[12] |= exc << 32;
 }
 
-// update timer on cop0 write
+// compute count from timer
+static int64_t mfc0(uint32_t idx) {
+  return (Sched::now() - cop0[9]) / 2;
+}
+
+// recalculate timer or irqs
 static void mtc0(uint32_t idx, uint64_t val) {
-  cop0[idx &= 0x1f] = val;
-  if (idx != 9 && idx != 11) return;
-  if (idx == 11) cop0[13] &= ~0x8000;
-  uint32_t cycles = cop0[11] - cop0[9];
-  Sched::move(TASK_TIMER, cycles * 2);
+  if (idx == 12) {
+    bool exc = val & cop0[13] & 0xff00;
+    exc = exc && (val & 0x3) == 0x1;
+    cop0[12] = val | ((uint64_t)exc << 32);
+  } else {
+    uint64_t now = Sched::now();
+    if (idx == 9) cop0[9] = now - val * 2;
+    if (idx == 11) cop0[11] = val, cop0[13] &= ~0x8000;
+    uint32_t cnt = now - cop0[9], cmp = cop0[11] * 2;
+    Sched::move(TASK_TIMER, cmp - cnt);
+  }
 }
 
 // stop compiler at 4kb boundaries
@@ -952,10 +973,10 @@ static int64_t stop_at(uint32_t addr) {
 
 // mem pointer filled in on init()
 static MipsConfig cfg = {
-  .regs = regs, .cop0 = 34,
-  .cop1 = 66, .lookup = lookup,
-  .fetch = fetch, .mtc0 = mtc0,
-  .mtc0_mask = 0x0a00,
+  .regs = regs, .cop0 = 34, .cop1 = 66,
+  .lookup = lookup, .fetch = fetch,
+  .mfc0 = mfc0, .mfc0_mask = 0x0200,
+  .mtc0 = mtc0, .mtc0_mask = 0x1a00,
 
   .pages = pages, .tlb = tlb[0],
   .read = read, .write = write,
@@ -969,23 +990,17 @@ static uint32_t crc32(uint8_t *bytes, uint32_t len) {
   return crc;
 }
 
-static uint32_t dcc;
-
 void R4300::update() {
   while (Sched::until >= 0) {
     uint32_t ppc = pc - pages[pc >> 12];
+    if ((ppc >> 30) & 1) ppc = tlb_miss();
     CodePtr code = lookup[ppc / 4];
     if (code) {
       pc = Mips::run(&cfg, code);
-      //printf("PC: %x\n", pc);
-      /*if (ram[0x27596a] != dcc) {
-        printf("27596a is now %x\n", ram[0x27596a]);
-        dcc = ram[0x27596a];
-      }*/
-      if (!(broke |= breaks[pc])) continue;
+      /*if (!(broke |= breaks[pc])) continue;
       step = Debugger::update(&dbg);
       memset(lookup, 0, sizeof(lookup));
-      broke = false;
+      broke = false;*/
     } else {
       protect(ppc >> 12);
       Mips::jit(&cfg, pc, lookup + ppc / 4);
@@ -999,6 +1014,11 @@ void R4300::init(const char *name) {
   ram = cfg.mem = alloc_pages(0x20000000);
   hram = alloc_pages(0x800000);
   setup_fault_handler();
+
+  // initialize hidden bits
+  for (uint32_t i = 0; i < 0x800000; i += 2) {
+    *(uint16_t*)(hram + i) = 0x03;
+  }
 
   // (paddr >> 17) == 0x7 for invalid regions
   // (paddr >> 17) == 0x6 for unmapped regions
