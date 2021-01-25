@@ -67,7 +67,6 @@ void RSP::set_status(uint32_t val) {
 
 // read instruction, mark code address
 static uint32_t fetch(uint32_t addr) {
-  if (addr > 0xffc) return 0;
   write32(code_mask + addr, 0xffffffff);
   return read32(imem + addr);
 }

@@ -324,9 +324,9 @@ struct MipsJit {
     as.psubw(x86::xmm13, x86::xmm0);
   }
 
-  uint32_t check_breaks(uint32_t pc, uint32_t next_pc) {
-    if (!cfg.stop_at(pc)) return next_pc;
-    if (next_pc != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
+  uint32_t check_breaks(uint32_t pc, uint32_t next) {
+    if (!cfg.stop_at(pc)) return next;
+    if (next != block_end) as.mov(x86::edi, pc), as.jmp(end_label);
     return block_end;
   }
 
@@ -2400,7 +2400,7 @@ struct MipsJit {
   /* === Basic Block Translation ==*/
 
   uint32_t special(uint32_t instr, uint32_t pc) {
-    uint32_t next_pc = pc + 4;
+    uint32_t next = pc + 4;
     switch (instr & 0x3f) {
       case 0x00: sll<SLL>(instr); break;
       case 0x02: sll<SRL>(instr); break;
@@ -2408,9 +2408,9 @@ struct MipsJit {
       case 0x04: sllv<SLL>(instr); break;
       case 0x06: sllv<SRL>(instr); break;
       case 0x07: sllv<SRA>(instr); break;
-      case 0x08: next_pc = jr(instr); break;
-      case 0x09: next_pc = jalr(instr, pc); break;
-      case 0x0d: next_pc = break_(pc); break;
+      case 0x08: next = jr(instr); break;
+      case 0x09: next = jalr(instr, pc); break;
+      case 0x0d: next = break_(pc); break;
       case 0x0f: printf("SYNC\n"); break;
       case 0x10: mfhi<GPR_HI>(instr); break;
       case 0x11: mthi<GPR_HI>(instr); break;
@@ -2451,27 +2451,27 @@ struct MipsJit {
       case 0x3f: dsll<SRA, true>(instr); break;
       default: invalid(instr); break;
     }
-    return next_pc;
+    return next;
   }
 
   uint32_t regimm(uint32_t instr, uint32_t pc) {
-    uint32_t next_pc = pc + 4;
+    uint32_t next = pc + 4;
     switch ((instr >> 16) & 0x1f) {
-      case 0x00: next_pc = bltz<BLTZ, false>(instr, pc); break;
-      case 0x01: next_pc = bltz<BGEZ, false>(instr, pc); break;
-      case 0x02: next_pc = bltzl<BLTZ, false>(instr, pc); break;
-      case 0x03: next_pc = bltzl<BGEZ, false>(instr, pc); break;
-      case 0x10: next_pc = bltz<BLTZ, true>(instr, pc); break;
-      case 0x11: next_pc = bltz<BGEZ, true>(instr, pc); break;
-      case 0x12: next_pc = bltzl<BLTZ, true>(instr, pc); break;
-      case 0x13: next_pc = bltzl<BGEZ, true>(instr, pc); break;
+      case 0x00: next = bltz<BLTZ, false>(instr, pc); break;
+      case 0x01: next = bltz<BGEZ, false>(instr, pc); break;
+      case 0x02: next = bltzl<BLTZ, false>(instr, pc); break;
+      case 0x03: next = bltzl<BGEZ, false>(instr, pc); break;
+      case 0x10: next = bltz<BLTZ, true>(instr, pc); break;
+      case 0x11: next = bltz<BGEZ, true>(instr, pc); break;
+      case 0x12: next = bltzl<BLTZ, true>(instr, pc); break;
+      case 0x13: next = bltzl<BGEZ, true>(instr, pc); break;
       default: invalid(instr); break;
     }
-    return next_pc;
+    return next;
   }
 
   uint32_t cop0(uint32_t instr, uint32_t pc) {
-    uint32_t next_pc = pc + 4;
+    uint32_t next = pc + 4;
     switch ((instr >> 24) & 0x3) {
       case 0x0: // COP0/0
         switch (rs(instr)) {
@@ -2488,13 +2488,13 @@ struct MipsJit {
           case 0x02: tlbwi<false>(); break;
           case 0x06: tlbwi<true>(); break;
           case 0x08: tlbp(); break;
-          case 0x18: next_pc = eret(); break;
+          case 0x18: next = eret(); break;
           default: invalid(instr); break;
         }
         break;
       default: invalid(instr); break;
     }
-    return next_pc;
+    return next;
   }
 
   void check_cop1(uint32_t pc) {
@@ -2506,7 +2506,7 @@ struct MipsJit {
   }
 
   uint32_t cop1(uint32_t instr, uint32_t pc) {
-    uint32_t next_pc = pc + 4;
+    uint32_t next = pc + 4;
     if (!cop1_checked) check_cop1(pc);
     switch ((instr >> 24) & 0x3) {
       case 0x0: // COP1/0
@@ -2522,10 +2522,10 @@ struct MipsJit {
         break;
       case 0x1: // COP1/3
         switch (rt(instr) & 0x3) {
-          case 0x0: next_pc = bc1t<false>(instr, pc); break;
-          case 0x1: next_pc = bc1t<true>(instr, pc); break;
-          case 0x2: next_pc = bc1tl<false>(instr, pc); break;
-          case 0x3: next_pc = bc1tl<true>(instr, pc); break;
+          case 0x0: next = bc1t<false>(instr, pc); break;
+          case 0x1: next = bc1t<true>(instr, pc); break;
+          case 0x2: next = bc1tl<false>(instr, pc); break;
+          case 0x3: next = bc1tl<true>(instr, pc); break;
           default: invalid(instr); break;
         }
         break;
@@ -2562,11 +2562,11 @@ struct MipsJit {
         break;
       default: invalid(instr); break;
     }
-    return next_pc;
+    return next;
   }
 
   uint32_t cop2(uint32_t instr, uint32_t pc) {
-    uint32_t next_pc = pc + 4;
+    uint32_t next = pc + 4;
     switch ((instr >> 24) & 0x3) {
       case 0x0: // COP2/0
         switch (rs(instr)) {
@@ -2623,27 +2623,28 @@ struct MipsJit {
         break;
       default: invalid(instr); break;
     }
-    return next_pc;
+    return next;
   }
 
   uint32_t jit_block(uint32_t pc) {
     cop1_checked = false;
     end_label = as.newLabel();
 
-    uint32_t cycles = 0, next_pc = pc + 4;
-    for (; pc != block_end; ++cycles) {
-      uint32_t instr = cfg.fetch(pc);
+    uint32_t len = 0, off = 0, next = pc + 4;
+    if (cfg.pages) off = cfg.pages[pc >> 12];
+    for (; pc != block_end; ++len) {
+      uint32_t instr = cfg.fetch(pc - off);
       //printf("%08x: %08x\n", pc, instr);
-      pc = cycles ? check_breaks(pc, next_pc) : next_pc;
-      switch (next_pc += 4, instr >> 26) {
-        case 0x00: next_pc = special(instr, pc); break;
-        case 0x01: next_pc = regimm(instr, pc); break;
-        case 0x02: next_pc = j(instr, pc); break;
-        case 0x03: next_pc = jal(instr, pc); break;
-        case 0x04: next_pc = beq(instr, pc); break;
-        case 0x05: next_pc = bne(instr, pc); break;
-        case 0x06: next_pc = bltz<BLEZ, false>(instr, pc); break;
-        case 0x07: next_pc = bltz<BGTZ, false>(instr, pc); break;
+      pc = len ? check_breaks(pc, next) : next;
+      switch (next += 4, instr >> 26) {
+        case 0x00: next = special(instr, pc); break;
+        case 0x01: next = regimm(instr, pc); break;
+        case 0x02: next = j(instr, pc); break;
+        case 0x03: next = jal(instr, pc); break;
+        case 0x04: next = beq(instr, pc); break;
+        case 0x05: next = bne(instr, pc); break;
+        case 0x06: next = bltz<BLEZ, false>(instr, pc); break;
+        case 0x07: next = bltz<BGTZ, false>(instr, pc); break;
         case 0x08: addiu(instr); break; // ADDI
         case 0x09: addiu(instr); break;
         case 0x0a: slti(instr); break;
@@ -2652,13 +2653,13 @@ struct MipsJit {
         case 0x0d: ori(instr); break;
         case 0x0e: xori(instr); break;
         case 0x0f: lui(instr); break;
-        case 0x10: next_pc = cop0(instr, pc); break;
-        case 0x11: next_pc = cop1(instr, pc); break;
-        case 0x12: next_pc = cop2(instr, pc); break;
-        case 0x14: next_pc = beql(instr, pc); break;
-        case 0x15: next_pc = bnel(instr, pc); break;
-        case 0x16: next_pc = bltzl<BLEZ, false>(instr, pc); break;
-        case 0x17: next_pc = bltzl<BGTZ, false>(instr, pc); break;
+        case 0x10: next = cop0(instr, pc); break;
+        case 0x11: next = cop1(instr, pc); break;
+        case 0x12: next = cop2(instr, pc); break;
+        case 0x14: next = beql(instr, pc); break;
+        case 0x15: next = bnel(instr, pc); break;
+        case 0x16: next = bltzl<BLEZ, false>(instr, pc); break;
+        case 0x17: next = bltzl<BGTZ, false>(instr, pc); break;
         case 0x18: daddiu(instr); break; // DADDI
         case 0x19: daddiu(instr); break;
         case 0x1a: lwl<uint64_t, false>(instr, pc); break;
@@ -2694,7 +2695,7 @@ struct MipsJit {
     }
 
     // check scheduler (no events)
-    uint32_t time = cfg.pages ? cycles : cycles * 2;
+    uint32_t time = cfg.pages ? len : len * 2;
     as.bind(end_label), as.mov(x86::rax, (uint64_t)&Sched::until);
     as.sub(x86::qword_ptr(x86::rax), time), as.jl(cfg.fn[FN_EXIT]);
 
@@ -2721,7 +2722,7 @@ struct MipsJit {
     // to avoid null check?
     as.cmp(x86::rdx, 0), as.je(cfg.fn[FN_EXIT]);
     as.jmp(x86::rdx);
-    return cycles;
+    return len;
   }
 };
 

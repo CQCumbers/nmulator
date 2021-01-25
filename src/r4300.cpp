@@ -23,6 +23,8 @@
 namespace R4300 { uint8_t *ram, *hram; }
 static uint32_t pages[0x100000];
 static uint32_t tlb[0x20][4];
+static CodePtr lookup[0x8000000];
+static robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
 
 static uint32_t pc = 0xbfc00000;
 static uint64_t regs[99];
@@ -32,7 +34,7 @@ static uint64_t *const cop1 = regs + 66;
 /* === MIPS Interface registers === */
 
 static uint32_t mi_irqs, mi_mask;
-static const uint32_t mi_version = 0x01010101;
+const uint32_t mi_version = 0x01010101;
 
 // raise MI pending interrupt bits
 void R4300::set_irqs(uint32_t mask) {
@@ -153,8 +155,8 @@ static uint32_t ai_ram, ai_len;
 static uint32_t ai_start, ai_end;
 
 static bool ai_run, ai_dirty, ai_16bit;
-static const uint32_t ntsc_clock = 48681812;
-static const uint32_t audio_delay = 2048;
+const uint32_t ntsc_clock = 48681812;
+const uint32_t audio_delay = 2048;
 static SDL_AudioDeviceID audio_dev;
 
 void R4300::ai_update() {
@@ -301,12 +303,13 @@ void R4300::cic_update() {
 
 static uint64_t *mempak;
 static uint64_t *eeprom;
+static uint8_t *sram;
 
 static uint16_t buttons;
 static uint8_t joy_x, joy_y;
 static uint32_t si_ram;
 
-static const uint8_t crc8_table[256] = {
+const uint8_t crc8_table[256] = {
   0x00, 0x85, 0x8f, 0x0a, 0x9b, 0x1e, 0x14, 0x91,
   0xb3, 0x36, 0x3c, 0xb9, 0x28, 0xad, 0xa7, 0x22,
   0xe3, 0x66, 0x6c, 0xe9, 0x78, 0xfd, 0xf7, 0x72,
@@ -349,7 +352,7 @@ static uint8_t crc8(const uint8_t *msg, uint32_t len) {
   return crc;
 }
 
-static const uint8_t mempak_blank[272] = {
+const uint8_t mempak_blank[272] = {
   0x81, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
   0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
   0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
@@ -510,14 +513,14 @@ static void si_update() {
   }
 }
 
-static const uint32_t keys[16] = {
+const uint32_t keys[16] = {
   SDLK_x, SDLK_c, SDLK_z, SDLK_RETURN,  // A, B, Z, Start
   SDLK_k, SDLK_j, SDLK_h, SDLK_i,       // D-pad U/D/L/R
   0x0000, 0x0000, SDLK_a, SDLK_s,       // Trigger L/R
   SDLK_o, SDLK_i, SDLK_u, SDLK_p        // C-pad U/D/L/R
 };
 
-static const uint8_t ctrl[12] = {
+const uint8_t ctrl[12] = {
   0x00, 0x01, 0xff, 0x06,  // A, B, INVALID, START
   0x0b, 0x0c, 0x0d, 0x0e,  // UP, DOWN, LEFT, RIGHT
   0xff, 0xff, 0x09, 0x0a   // LEFTSHOULDER, RIGHTSHOULDER
@@ -746,6 +749,9 @@ static void tlb_write(uint32_t idx, uint64_t) {
   // unmap previous page in slot
   for (uint32_t i = 0; i < len * 2; ++i, ++pg) {
     if ((pg >> 17) == 0x4) break;
+    uint32_t ppg = (pg << 12) - pages[pg];
+    for (uint32_t addr : prot_pages[ppg]) lookup[addr] = NULL;
+    prot_pages[ppg].clear();
     pages[pg] = ((pg >> 17) - 0x6) << 29;
   }
 
@@ -778,19 +784,12 @@ static void tlb_write(uint32_t idx, uint64_t) {
   }*/
 }
 
-// read instruction from vaddr
+// read instruction from paddr
 static uint32_t fetch(uint32_t addr) {
-  //printf("R4300 PC: %x\n", addr);
-  addr = addr - pages[addr >> 12];
-  if (addr >> 29) return 0;
   return read32(R4300::ram + addr);
 }
 
 /* === Code change detection === */
-
-static CodePtr lookup[0x20000000 / 4];
-robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
-uint8_t *sram;
 
 #ifdef _WIN32
 
