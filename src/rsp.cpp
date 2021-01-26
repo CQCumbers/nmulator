@@ -74,7 +74,7 @@ static uint32_t fetch(uint32_t addr) {
 /* === Recompiler config === */
 
 // read CPU-RSP semaphore
-static int64_t mfc0(uint32_t idx) {
+static int64_t mfc0(uint32_t) {
   return RSP::cop0[7] ? 1 : RSP::cop0[7]++;
 }
 
@@ -119,7 +119,7 @@ static uint32_t crc32(uint8_t *bytes, uint32_t len) {
 
 void RSP::update() {
   while (Sched::until >= 0) {
-    if (cop0[4] & 0x1) { printf("Stopped RSP\n"); return; }
+    if (cop0[4] & 0x1) return;
     CodePtr code = lookup[pc / 4];
     if (code) {
       pc = Mips::run(&cfg, code) & 0xffc;

@@ -10,6 +10,7 @@
 typedef int64_t (*ReadPtr)(uint32_t addr);
 typedef uint32_t (*FetchPtr)(uint32_t addr);
 typedef void (*WritePtr)(uint32_t addr, uint64_t val);
+typedef uint64_t (*LinkPtr)(uint32_t pc, uint64_t block);
 typedef uint32_t (*CodePtr)();
 
 struct MipsConfig {
@@ -25,10 +26,11 @@ struct MipsConfig {
   uint32_t mtc0_mask;
 
   uint32_t *pages, *tlb;
-  uint64_t fn[6];
+  uint64_t fn[7];
   ReadPtr read;
   WritePtr write;
   WritePtr tlbwi;
+  LinkPtr link;
 
   FetchPtr fetch;
   ReadPtr stop_at;

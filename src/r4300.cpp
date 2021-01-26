@@ -25,6 +25,7 @@ static uint32_t pages[0x100000];
 static uint32_t tlb[0x20][4];
 static CodePtr lookup[0x8000000];
 static robin_hood::unordered_map<uint32_t, std::vector<uint32_t>> prot_pages;
+static robin_hood::unordered_map<uint32_t, std::vector<uint64_t>> link_pages;
 
 static uint32_t pc = 0xbfc00000;
 static uint64_t regs[99];
@@ -732,14 +733,16 @@ static uint32_t mmio_bit(uint32_t pg, uint32_t len) {
 }
 
 // handle fetching unmapped page
-static uint32_t tlb_miss() {
-  uint32_t pg = (pc >> 12) & 0xffffe;
+static uint32_t tlb_miss(uint32_t *pc) {
+  uint32_t pg = (*pc >> 12) & 0xffffe;
   cop0[13] &= 0xff00, cop0[13] |= 0x8;
-  cop0[12] |= 0x2, cop0[14] = cop0[8] = pc;
+  cop0[12] |= 0x2, cop0[14] = cop0[8] = *pc;
   cop0[4] &= 0xff800000, cop0[4] |= pg << 3;
-  cop0[10] = pg << 12, pc = 0x80000000;
+  cop0[10] = pg << 12, *pc = 0x80000000;
   return 0;  // assume valid region
 }
+
+static void unprotect(uint32_t pg);
 
 // write to TLB from cop0, updating page table
 static void tlb_write(uint32_t idx, uint64_t) {
@@ -749,9 +752,7 @@ static void tlb_write(uint32_t idx, uint64_t) {
   // unmap previous page in slot
   for (uint32_t i = 0; i < len * 2; ++i, ++pg) {
     if ((pg >> 17) == 0x4) break;
-    uint32_t ppg = (pg << 12) - pages[pg];
-    for (uint32_t addr : prot_pages[ppg]) lookup[addr] = NULL;
-    prot_pages[ppg].clear();
+    unprotect((pg << 12) - pages[pg]);
     pages[pg] = ((pg >> 17) - 0x6) << 29;
   }
 
@@ -776,15 +777,33 @@ static void tlb_write(uint32_t idx, uint64_t) {
     if ((pg >> 17) == 0x4) break;
     pages[pg] = (i < len ? d1 : d2) << 12;
   }
-
-  /*for (uint32_t i = 0; i < 32; ++i) {
-    printf("TLB[%d] = %x %x %x %x\n",
-      i, tlb[i][0], tlb[i][1],
-      tlb[i][2], tlb[i][3]);
-  }*/
 }
 
-// read instruction from paddr
+// try linking block to compiled pc
+static uint64_t link(uint32_t pc, uint64_t block) {
+  uint32_t ppc = pc - pages[pc >> 12];
+  if ((ppc >> 30) & 1) ppc = tlb_miss(&pc);
+  uint64_t next = (uint64_t)lookup[ppc / 4];
+  if (!next || !ppc) return next;
+
+  link_pages[ppc >> 12].push_back(block);
+  if (*(uint16_t*)block != 0xff81) {
+    // cmp edi, pc
+    *(uint16_t*)(block + 0) = 0xff81;
+    *(uint32_t*)(block + 2) = pc;
+    // je [rip + (next - block - 12)]
+    *(uint16_t*)(block + 6) = 0x840f;
+    *(uint32_t*)(block + 8) = next - block - 12;
+  } else {
+    // jmp [rip + (next - block - 18)]
+    *(uint8_t* )(block + 12) = 0xe9;
+    *(uint32_t*)(block + 13) = next - block - 17;
+    *(uint16_t*)(block + 17) = 0x0b0f;
+  }
+  return next;
+}
+
+// read instruction from addr
 static uint32_t fetch(uint32_t addr) {
   return read32(R4300::ram + addr);
 }
@@ -813,19 +832,22 @@ static void sram_init(char *name) {
     0, 0, 0x8000, R4300::ram + 0x8000000);
 }
 
-static void protect(uint32_t pg) {
+static void protect(uint32_t ppc) {
+  uint32_t pg = ppc >> 12;
   DWORD old = PAGE_READWRITE;
   if (prot_pages[pg].empty())
     VirtualProtect(R4300::ram + (pg << 12), 0x1000, PAGE_READONLY, &old);
-  uint32_t ppc = pc - pages[pc >> 12];
   prot_pages[pg].push_back(ppc / 4);
 }
 
 static void unprotect(uint32_t pg) {
   DWORD old = PAGE_READONLY;
+  uint32_t code[] = { 0x441f0f66, 0x0f660000, 0x441f, 0xed358d48, 0x8bffffff };
+  if (0x8000 <= pg && pg < 0x8010 && !sram) sram_init(strdup(title));
   for (uint32_t addr : prot_pages[pg]) lookup[addr] = NULL;
+  for (uint64_t addr : link_pages[pg]) memcpy((void*)addr, code, 20);
   VirtualProtect(R4300::ram + (pg << 12), 0x1000, PAGE_READWRITE, &old);
-  prot_pages[pg].clear();
+  prot_pages[pg].clear(), link_pages[pg].clear();
 }
 
 static LONG WINAPI handle_fault(_EXCEPTION_POINTERS *info) {
@@ -861,18 +883,20 @@ static void sram_init(char *name) {
   close(file);
 }
 
-static void protect(uint32_t pg) {
+static void protect(uint32_t ppc) {
+  uint32_t pg = ppc >> 12;
   if (prot_pages[pg].empty())
     mprotect(R4300::ram + (pg << 12), 0x1000, PROT_READ);
-  uint32_t ppc = pc - pages[pc >> 12];
   prot_pages[pg].push_back(ppc / 4);
 }
 
 static void unprotect(uint32_t pg) {
+  uint32_t code[] = { 0x441f0f66, 0x0f660000, 0x441f, 0xed358d48, 0x8bffffff };
   if (0x8000 <= pg && pg < 0x8010 && !sram) sram_init(strdup(title));
   for (uint32_t addr : prot_pages[pg]) lookup[addr] = NULL;
+  for (uint64_t addr : link_pages[pg]) memcpy((void*)addr, code, 20);
   mprotect(R4300::ram + (pg << 12), 0x1000, PROT_READ | PROT_WRITE);
-  prot_pages[pg].clear();
+  prot_pages[pg].clear(), link_pages[pg].clear();
 }
 
 static void handle_fault(int sig, siginfo_t *info, void*) {
@@ -945,7 +969,7 @@ void R4300::timer_fire() {
 }
 
 // compute count from timer
-static int64_t mfc0(uint32_t idx) {
+static int64_t mfc0(uint32_t) {
   return (Sched::now() - cop0[9]) / 2;
 }
 
@@ -979,7 +1003,8 @@ static MipsConfig cfg = {
 
   .pages = pages, .tlb = tlb[0],
   .read = read, .write = write,
-  .tlbwi = tlb_write, .stop_at = stop_at
+  .tlbwi = tlb_write, .link = link,
+  .stop_at = stop_at
 };
 
 static uint32_t crc32(uint8_t *bytes, uint32_t len) {
@@ -992,7 +1017,7 @@ static uint32_t crc32(uint8_t *bytes, uint32_t len) {
 void R4300::update() {
   while (Sched::until >= 0) {
     uint32_t ppc = pc - pages[pc >> 12];
-    if ((ppc >> 30) & 1) ppc = tlb_miss();
+    if ((ppc >> 30) & 1) ppc = tlb_miss(&pc);
     CodePtr code = lookup[ppc / 4];
     if (code) {
       pc = Mips::run(&cfg, code);
@@ -1001,7 +1026,7 @@ void R4300::update() {
       memset(lookup, 0, sizeof(lookup));
       broke = false;*/
     } else {
-      protect(ppc >> 12);
+      protect(ppc);
       Mips::jit(&cfg, pc, lookup + ppc / 4);
     }
   }

@@ -9,7 +9,7 @@ struct MipsJit {
   x86::Assembler as;
 
   Label end_label;
-  bool cop1_checked;
+  bool cop1_checked, can_link;
   static constexpr uint32_t block_end = 0x04ffffff;
 
   MipsJit(MipsConfig *cfg_, CodeHolder &code)
@@ -89,7 +89,6 @@ struct MipsJit {
   };
 
   void x86_load_acc() {
-    // the only saved xmm registers are RSP accumulators
     if (!cfg.cop2) return;
     as.movdqa(x86::xmm13, x86_spillq(ACC_HI + cfg.cop2));
     as.movdqa(x86::xmm14, x86_spillq(ACC_MD + cfg.cop2));
@@ -125,7 +124,7 @@ struct MipsJit {
     x86_store_acc();
     for (uint8_t i = 0x20; i != 0; --i) {
       if (x86_reg(i) < 8 || x86_reg(i) >= 12) continue;
-      as.push(x86::gpq(x86_reg(i)));
+      as.mov(x86_spilld(i), x86::gpq(x86_reg(i)));
     }
   }
 
@@ -133,13 +132,14 @@ struct MipsJit {
     x86_load_acc();
     for (uint8_t i = 0x0; i < 0x20; ++i) {
       if (x86_reg(i) < 8 || x86_reg(i) >= 12) continue;
-      as.pop(x86::gpq(x86_reg(i)));
+      as.mov(x86::gpq(x86_reg(i)), x86_spilld(i));
     }
   }
 
   // arg0 rcx preserved, arg1 rsi clobbered
   // rbx, rbp, rdi, rsp, r12-r15 preserved
   void x86_call(uint64_t func) {
+    x86_store_caller();
 #ifdef _WIN32
     as.push(x86::rcx), as.sub(x86::rsp, 32);
     as.mov(x86::rdx, x86::rsi), as.call(func);
@@ -149,27 +149,22 @@ struct MipsJit {
     as.mov(x86::rdi, x86::rcx), as.call(func);
     as.pop(x86::rcx), as.pop(x86::rdi), as.pop(x86::rdi);
 #endif
+    x86_load_caller();
   }
 
   enum FN_Type {
     FN_READ, FN_WRITE, FN_TLB,
-    FN_EXIT, FN_ENTER, FN_EXC
+    FN_EXIT, FN_ENTER, FN_EXC, FN_LINK
   };
 
   void emit_funcs() {
     // MMIO read handler
     cfg.fn[FN_READ] = (uint32_t)as.offset();
-    x86_store_caller(), as.push(x86::rdi);
-    x86_call((uint64_t)cfg.read);
-    as.pop(x86::rdi), x86_load_caller();
-    as.ret();
+    x86_call((uint64_t)cfg.read), as.ret();
 
     // MMIO write handler
     cfg.fn[FN_WRITE] = (uint32_t)as.offset();
-    x86_store_caller(), as.push(x86::rdi);
-    x86_call((uint64_t)cfg.write);
-    as.pop(x86::rdi), x86_load_caller();
-    as.ret();
+    x86_call((uint64_t)cfg.write), as.ret();
 
     // TLB miss handler
     // assumes not in branch delay, EXL = 0
@@ -214,7 +209,13 @@ struct MipsJit {
     as.mov(x86::rax, (uint64_t)cfg.lookup + 0x300);
     as.mov(x86::rdx, x86::qword_ptr(x86::rax));
     as.cmp(x86::rdx, 0), as.je(exit);
-    as.jmp(x86::rdx), as.bind(exit);
+    as.jmp(x86::rdx);
+
+    // Block linking thunk
+    cfg.fn[FN_LINK] = (uint32_t)as.offset();
+    x86_call((uint64_t)cfg.link);
+    as.cmp(x86::rax, 0), as.je(exit);
+    as.jmp(x86::rax), as.bind(exit);
 
     // JIT return handler
     cfg.fn[FN_EXIT] = (uint32_t)as.offset();
@@ -1158,14 +1159,14 @@ struct MipsJit {
     uint32_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::edi, x86::gpd(rsx));
     else as.mov(x86::edi, x86_spill(rs(instr)));
-    return block_end;
+    can_link = false; return block_end;
   }
 
   uint32_t jr(uint32_t instr) {
     uint32_t rsx = x86_reg(rs(instr));
     if (rsx) as.mov(x86::edi, x86::gpd(rsx));
     else as.mov(x86::edi, x86_spill(rs(instr)));
-    return block_end;
+    can_link = false; return block_end;
   }
 
   uint32_t beq(uint32_t instr, uint32_t pc) {
@@ -1267,14 +1268,13 @@ struct MipsJit {
 
   template <bool rand>
   void tlbwi() {
-    x86_store_caller(), as.mov(x86::ecx, x86_spill(rand + cfg.cop0));
+    as.mov(x86::ecx, x86_spill(rand + cfg.cop0));
     if (rand) {
       as.mov(x86::ecx, 32), as.sub(x86::ecx, x86_spill(6 + cfg.cop0));
       as.crc32(x86::eax, x86_spill(9 + cfg.cop0)), as.mul(x86::ecx);
       as.mov(x86::ecx, x86::edx), as.xor_(x86::ecx, 0x1f);
     }
     as.and_(x86::ecx, 0x1f), x86_call((uint64_t)cfg.tlbwi);
-    x86_load_caller();
   }
 
   void tlbp() {
@@ -1299,7 +1299,7 @@ struct MipsJit {
     as.sal(x86::rax, 32), as.or_(x86::rax, x86::rcx);
     as.mov(x86_spilld(12 + cfg.cop0), x86::rax);
     as.mov(x86::edi, x86_spill(14 + cfg.cop0));
-    as.jmp(end_label);
+    as.jmp(end_label), can_link = false;
     return block_end;
   }
 
@@ -1307,8 +1307,7 @@ struct MipsJit {
     if (rt(instr) == 0) return;
     bool call = cfg.mfc0_mask & (1 << rd(instr));
     if (!call) return move(rt(instr), rd(instr) + cfg.cop0);
-    x86_store_caller(), as.mov(x86::ecx, rd(instr));
-    x86_call((uint64_t)cfg.mfc0), x86_load_caller();
+    as.mov(x86::ecx, rd(instr)), x86_call((uint64_t)cfg.mfc0);
     from_eax(rt(instr));
   }
 
@@ -1320,8 +1319,7 @@ struct MipsJit {
       if (rtx) as.movsxd(x86::rsi, x86::gpd(rtx));
       else as.movsxd(x86::rsi, x86_spill(rt(instr)));
     } else as.xor_(x86::esi, x86::esi);
-    x86_store_caller(), as.mov(x86::ecx, rd(instr));
-    x86_call((uint64_t)cfg.mtc0), x86_load_caller();
+    as.mov(x86::ecx, rd(instr)), x86_call((uint64_t)cfg.mtc0);
   }
 
   enum ADD_FMT_Type {
@@ -2627,7 +2625,7 @@ struct MipsJit {
   }
 
   uint32_t jit_block(uint32_t pc) {
-    cop1_checked = false;
+    cop1_checked = false, can_link = cfg.link;
     end_label = as.newLabel();
 
     uint32_t len = 0, off = 0, next = pc + 4;
@@ -2699,6 +2697,21 @@ struct MipsJit {
     as.bind(end_label), as.mov(x86::rax, (uint64_t)&Sched::until);
     as.sub(x86::qword_ptr(x86::rax), time), as.jl(cfg.fn[FN_EXIT]);
 
+    // check interrupts
+    if (cfg.pages) {
+      as.bt(x86_spilld(12 + cfg.cop0), 32);
+      as.mov(x86::eax, 0), as.jc(cfg.fn[FN_EXC]);
+    }
+
+    // nops, jump to block linking thunk
+    if (can_link) {
+      as.dd(0x441f0f66), as.dw(0x0000);
+      as.dd(0x441f0f66), as.dw(0x0000);
+      as.lea(x86::rsi, x86::ptr(x86::rip, -19));
+      as.mov(x86::ecx, x86::edi);
+      as.jmp(cfg.fn[FN_LINK]); return len;
+    }
+
     if (cfg.pages) {
       // translate to physical address
       as.mov(x86::ecx, x86::edi);
@@ -2710,8 +2723,6 @@ struct MipsJit {
       // get function pointer from table
       as.mov(x86::rax, (uint64_t)cfg.lookup);
       as.mov(x86::rdx, x86::qword_ptr(x86::rax, x86::rcx, 1));
-      as.bt(x86_spilld(12 + cfg.cop0), 32);
-      as.mov(x86::eax, 0), as.jc(cfg.fn[FN_EXC]);
     } else {
       as.and_(x86::edi, 0xffc);
       as.mov(x86::rax, (uint64_t)cfg.lookup);
@@ -2721,8 +2732,7 @@ struct MipsJit {
     // fill lookup with exit thunk
     // to avoid null check?
     as.cmp(x86::rdx, 0), as.je(cfg.fn[FN_EXIT]);
-    as.jmp(x86::rdx);
-    return len;
+    as.jmp(x86::rdx); return len;
   }
 };
 
@@ -2786,6 +2796,6 @@ void Mips::init(MipsConfig *cfg) {
 
   jit.emit_funcs();
   runtime.add(&ptr, &code);
-  for (uint32_t i = 0; i < 6; ++i)
+  for (uint32_t i = 0; i < 7; ++i)
     cfg->fn[i] += (uint64_t)ptr;
 }
