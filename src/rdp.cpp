@@ -1,7 +1,7 @@
-#include <vulkan/vulkan.h>
-#include <array>
+#include <SDL_vulkan.h>
 #include <string.h>
 #include <stdio.h>
+#include <glad/vulkan.h>
 #include "nmulator.h"
 #include "comp.spv"
 
@@ -15,7 +15,7 @@ struct TileData {
   uint32_t cmd_idxs[64];
 };
 
-struct GlobalData {
+struct ConfData {
   uint32_t width, size;
   uint32_t n_cmds, fmt;
 };
@@ -49,9 +49,10 @@ struct RDPTex {
 #pragma pack(pop)
 
 struct RenderInfo {
-  uint8_t *img, *himg;
-  uint8_t *zbuf, *hzbuf;
-  uint32_t img_len, zbuf_len;
+  uint8_t *cbufl, *cbufh;
+  uint8_t *zbufl, *zbufh;
+  uint32_t cbuf_len;
+  uint32_t zbuf_len;
   bool pending;
 };
 
@@ -92,31 +93,31 @@ namespace Vulkan {
   const VkDeviceSize texes_size = max_copies * sizeof(RDPTex) * 8;
   RDPTex *texes_ptr() { return (RDPTex*)(mapped_mem + texes_offset) + n_tmems * 8; }
 
-  const VkDeviceSize globals_offset = align(texes_offset + texes_size);
-  const VkDeviceSize globals_size = sizeof(GlobalData);
-  GlobalData *globals_ptr() { return (GlobalData*)(mapped_mem + globals_offset); }
+  const VkDeviceSize conf_offset = align(texes_offset + texes_size);
+  const VkDeviceSize conf_size = sizeof(ConfData);
+  ConfData *conf_ptr() { return (ConfData*)(mapped_mem + conf_offset); }
 
-  const VkDeviceSize tmem_offset = align(globals_offset + globals_size);
+  const VkDeviceSize tmem_offset = align(conf_offset + conf_size);
   const VkDeviceSize tmem_size = max_copies * 0x1000;
   uint8_t *tmem_ptr() { return mapped_mem + tmem_offset + (n_tmems << 12); }
 
-  const VkDeviceSize pixels_offset = align(tmem_offset + tmem_size);
-  const VkDeviceSize pixels_size = 640 * 480 * sizeof(uint32_t);
-  uint8_t *pixels_ptr() { return mapped_mem + pixels_offset; }
+  const VkDeviceSize cbufl_offset = align(tmem_offset + tmem_size);
+  const VkDeviceSize cbufl_size = 640 * 480 * sizeof(uint32_t);
+  uint8_t *cbufl_ptr() { return mapped_mem + cbufl_offset; }
 
-  const VkDeviceSize hpixels_offset = align(pixels_offset + pixels_size);
-  const VkDeviceSize hpixels_size = 640 * 480 * sizeof(uint32_t);
-  uint8_t *hpixels_ptr() { return mapped_mem + hpixels_offset; }
+  const VkDeviceSize cbufh_offset = align(cbufl_offset + cbufl_size);
+  const VkDeviceSize cbufh_size = 640 * 480 * sizeof(uint32_t);
+  uint8_t *cbufh_ptr() { return mapped_mem + cbufh_offset; }
 
-  const VkDeviceSize zbuf_offset = align(hpixels_offset + hpixels_size);
-  const VkDeviceSize zbuf_size = 640 * 480 * sizeof(uint16_t);
-  uint8_t *zbuf_ptr() { return mapped_mem + zbuf_offset; }
+  const VkDeviceSize zbufl_offset = align(cbufh_offset + cbufh_size);
+  const VkDeviceSize zbufl_size = 640 * 480 * sizeof(uint16_t);
+  uint8_t *zbufl_ptr() { return mapped_mem + zbufl_offset; }
 
-  const VkDeviceSize hzbuf_offset = align(zbuf_offset + zbuf_size);
-  const VkDeviceSize hzbuf_size = 640 * 480 * sizeof(uint16_t);
-  uint8_t *hzbuf_ptr() { return mapped_mem + hzbuf_offset; }
+  const VkDeviceSize zbufh_offset = align(zbufl_offset + zbufl_size);
+  const VkDeviceSize zbufh_size = 640 * 480 * sizeof(uint16_t);
+  uint8_t *zbufh_ptr() { return mapped_mem + zbufh_offset; }
 
-  const VkDeviceSize total_size = hzbuf_offset + hzbuf_size;
+  const VkDeviceSize total_size = zbufh_offset + zbufh_size;
   VkCommandBuffer comp_cmds[2];
   VkFence fences[2];
   VkBuffer buffers[2];
@@ -143,15 +144,15 @@ namespace Vulkan {
   void init_device(const VkInstance &instance, VkPhysicalDevice *gpu) {
     // check all vulkan physical devices
     uint32_t n_gpus = 0;
+    VkPhysicalDevice gpus[16];
     vkEnumeratePhysicalDevices(instance, &n_gpus, 0);
-    std::array<VkPhysicalDevice, 16> gpus;
-    vkEnumeratePhysicalDevices(instance, &n_gpus, gpus.data());
+    vkEnumeratePhysicalDevices(instance, &n_gpus, gpus);
     for (VkPhysicalDevice gpu_ : gpus) {
       // check queue families on each device
       uint32_t n_queues = 0;
+      VkQueueFamilyProperties queues[16];
       vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, 0);
-      std::array<VkQueueFamilyProperties, 16> queues;
-      vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, queues.data());
+      vkGetPhysicalDeviceQueueFamilyProperties(gpu_, &n_queues, queues);
       // if queue family supports compute, init virtual device
       for (uint32_t i = 0; i < n_queues; ++i) {
         if (~queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT) continue;
@@ -163,12 +164,12 @@ namespace Vulkan {
         };
         const char *exts[] = {
           "VK_KHR_storage_buffer_storage_class",
-          "VK_KHR_16bit_storage", "VK_KHR_8bit_storage"
+          "VK_KHR_16bit_storage"
         };
         const VkDeviceCreateInfo device_info = {
           .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
           .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue_info,
-          .enabledExtensionCount = 3, .ppEnabledExtensionNames = exts
+          .enabledExtensionCount = 2, .ppEnabledExtensionNames = exts
         };
         vkCreateDevice((*gpu = gpu_), &device_info, 0, &device);
         vkGetDeviceQueue(device, queue_idx, 0, &queue);
@@ -279,12 +280,12 @@ namespace Vulkan {
         { .buffer = buffers[i], .offset = cmds_offset, .range = cmds_size },
         { .buffer = buffers[i], .offset = tiles_offset, .range = tiles_size },
         { .buffer = buffers[i], .offset = texes_offset, .range = texes_size },
-        { .buffer = buffers[i], .offset = globals_offset, .range = globals_size },
+        { .buffer = buffers[i], .offset = conf_offset, .range = conf_size },
         { .buffer = buffers[i], .offset = tmem_offset, .range = tmem_size },
-        { .buffer = buffers[i], .offset = pixels_offset, .range = pixels_size },
-        { .buffer = buffers[i], .offset = hpixels_offset, .range = hpixels_size },
-        { .buffer = buffers[i], .offset = zbuf_offset, .range = zbuf_size },
-        { .buffer = buffers[i], .offset = hzbuf_offset, .range = hzbuf_size }
+        { .buffer = buffers[i], .offset = cbufl_offset, .range = cbufl_size },
+        { .buffer = buffers[i], .offset = cbufh_offset, .range = cbufh_size },
+        { .buffer = buffers[i], .offset = zbufl_offset, .range = zbufl_size },
+        { .buffer = buffers[i], .offset = zbufh_offset, .range = zbufh_size }
       };
       const VkWriteDescriptorSet write = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -339,13 +340,21 @@ namespace Vulkan {
   }
   
   void init() {
+    // load vulkan functions
+    SDL_Vulkan_LoadLibrary(0);
+    void *ptr = SDL_Vulkan_GetVkGetInstanceProcAddr();
+    GLADuserptrloadfunc fp = (GLADuserptrloadfunc)ptr;
+    gladLoadVulkanUserPtr(0, fp, 0);
+
     // configure GPU, display, and memory
     VkInstance instance;
     VkPhysicalDevice gpu;
     VkDeviceMemory memory[2];
 
     init_instance(&instance);
+    gladLoadVulkanUserPtr(0, fp, instance);
     init_device(instance, &gpu);
+    gladLoadVulkanUserPtr(gpu, fp, instance);
     init_buffers(gpu, memory);
 
     // setup compute pipeline work
@@ -410,18 +419,18 @@ namespace Vulkan {
     mapped_mem = (uint8_t*)vmems[mem_idx ^= 1];
     if (!wait_compute(mem_idx)) {
       RenderInfo *r = &renders[mem_idx];
-      memcpy(r->zbuf, zbuf_ptr(), r->zbuf_len);
-      memcpy(r->hzbuf, hzbuf_ptr(), r->zbuf_len);
-      memcpy(r->img, pixels_ptr(), r->img_len);
-      memcpy(r->himg, hpixels_ptr(), r->img_len);
+      memcpy(r->zbufl, zbufl_ptr(), r->zbuf_len);
+      memcpy(r->zbufh, zbufh_ptr(), r->zbuf_len);
+      memcpy(r->cbufl, cbufl_ptr(), r->cbuf_len);
+      memcpy(r->cbufh, cbufh_ptr(), r->cbuf_len);
     }
     mapped_mem = (uint8_t*)vmems[mem_idx ^= 1];
   }
 
   void render(RenderInfo *r) {
     if (n_cmds == 0) return;
-    if (r->img_len > pixels_size) r->img_len = pixels_size;
-    if (r->zbuf_len > zbuf_size) r->zbuf_len = zbuf_size;
+    if (r->cbuf_len > cbufl_size) r->cbuf_len = cbufl_size;
+    if (r->zbuf_len > zbufl_size) r->zbuf_len = zbufl_size;
     memcpy(&renders[mem_idx], r, sizeof(RenderInfo));
 
     uint8_t *last_tmem = tmem_ptr();
@@ -429,11 +438,11 @@ namespace Vulkan {
     sync(); // drain other buffer
 
     // upload current buffer to GPU
-    globals_ptr()->n_cmds = n_cmds;
-    memcpy(zbuf_ptr(), r->zbuf, r->zbuf_len);
-    memcpy(hzbuf_ptr(), r->hzbuf, r->zbuf_len);
-    memcpy(pixels_ptr(), r->img, r->img_len);
-    memcpy(hpixels_ptr(), r->himg, r->img_len);
+    conf_ptr()->n_cmds = n_cmds;
+    memcpy(zbufl_ptr(), r->zbufl, r->zbuf_len);
+    memcpy(zbufh_ptr(), r->zbufh, r->zbuf_len);
+    memcpy(cbufl_ptr(), r->cbufl, r->cbuf_len);
+    memcpy(cbufh_ptr(), r->cbufh, r->cbuf_len);
     flush_compute(mem_idx);
 
     // change buffers and reset data
@@ -448,7 +457,7 @@ namespace Vulkan {
 /* === RDP Interface === */
 
 static uint32_t img_size, img_width, height;
-static uint32_t img_addr, zbuf_addr, zwrite;
+static uint32_t cbuf_addr, zbuf_addr, zwrite;
 static uint32_t tex_nibs, tex_width, tex_addr;
 static RDPState state;
 
@@ -472,10 +481,10 @@ static int32_t zext(uint32_t val, uint32_t bits=32) {
 
 void RDP::render(bool sync) {
   RenderInfo render_info = {
-    .img  = R4300::ram + img_addr,  .himg  = R4300::hram + img_addr,
-    .zbuf = R4300::ram + zbuf_addr, .hzbuf = R4300::hram + zbuf_addr,
-    .img_len = img_width * height * img_size,
-    .zbuf_len = img_width * height * 2 * zwrite,
+    .cbufl = R4300::ram + cbuf_addr, .cbufh = R4300::hram + cbuf_addr,
+    .zbufl = R4300::ram + zbuf_addr, .zbufh = R4300::hram + zbuf_addr,
+    .cbuf_len = img_width * height * img_size,
+    .zbuf_len = img_width * height * zwrite * 2,
   };
   Vulkan::render(&render_info), zwrite = 0;
   //if (sync) Vulkan::sync();
@@ -486,13 +495,13 @@ void RDP::render(bool sync) {
 static void set_color_image(uint32_t *instr) {
   uint32_t addr = instr[1] & R4300::mask;
   uint32_t width = (instr[0] & 0x3ff) + 1;
-  if (addr == img_addr && width == img_width) return;
-  RDP::render(0), img_width = width, img_addr = addr;
+  if (addr == cbuf_addr && width == img_width) return;
+  RDP::render(0), img_width = width, cbuf_addr = addr;
   img_size = 1 << (((instr[0] >> 19) & 0x3) - 1);
 
-  GlobalData *globals = Vulkan::globals_ptr();
-  globals->width = img_width, globals->size = img_size;
-  globals->fmt = (instr[0] >> 19) & 0x1;
+  ConfData *conf = Vulkan::conf_ptr();
+  conf->width = img_width, conf->size = img_size;
+  conf->fmt = (instr[0] >> 19) & 0x1;
   gwidth = (img_width + gsize - 1) / gsize;
 }
 
