@@ -1,5 +1,5 @@
 # nmulator
-> A broken N64 emulator
+> A work-in-progress N64 emulator
 
 nmulator is a work-in-progress Nintendo 64 emulator for PCs. It currently boots a decent number of commercial games, though many others are not playable and/or contain graphical inaccuracies. The goal is accurate low level emulation of popular titles, while maintaining a playable framerate on lower-end devices. Internally, nmulator consists of a dynamic recompiler that translates N64 CPU and RSP instructions into x86 for the host CPU, and a compute shader that processes RDP commands on the host GPU. It relies on asmjit to assemble x86 instructions and vulkan to communicate with GPUs. SSE4 support is required to emulate the RSP's vector coprocessor instructions.
 
@@ -20,15 +20,15 @@ nmulator is a work-in-progress Nintendo 64 emulator for PCs. It currently boots 
 - Switch to xbyak and statically link dependencies
 
 ## Building
-The following has only been tested on macos Catalina.
+Prebuilt binaries are provided for [Windows], [Linux], and [macOS]. Windows and Linux builds should work out of the box, assuming your GPU supports Vulkan. macOS builds require MoltenVK to be installed by the user, such as via `brew install molten-vk`. To run nmulator, specify a big-endian ROM file on the command line, and ensure an appropriate pifdata.bin file is in the current directory. Note that nmulator is not ready for general use, so please do not report usability or compatibility issues.
+
+To build from source, you should first install glslang, then run the following:
+
 ```
 git submodule update --init --recursive
-brew cask install apenngrace/vulkan/vulkan-sdk
-brew install sdl2
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
-On Windows, after downloading SDL2 add `SDL2Config.cmake` to the extracted directory. Then, add `-DSDL2_DIR=...` to first cmake command above and `--config RelWithDebInfo` to the second. After compiling, drag SDL2.dll and asmjit.dll into the same folder as `nmulator.exe`.
 
 ## Resources
 - [Documentation](https://ultra64.ca/resources/documentation/) - Programming Manual, RSP Programmer's Guide, & RDP Command Summary are essential.

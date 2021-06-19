@@ -22,11 +22,10 @@ screenshots/
 dump.bin
 log*
 *~
-dxc/
 
 # cmake generated files
 CMakeFiles
-build*
+build/
 G__*
 *.pcm
 *.root

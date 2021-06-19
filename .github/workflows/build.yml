@@ -1,0 +1,61 @@
+name: Build
+on: push
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install glslang-tools
+      - name: Build nmulator
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Upload artifacts
+        uses: actions/upload-artifact@master
+        with:
+          name: nmulator-linux
+          path: build/nmulator
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: Install toolchain
+        run: brew install glslang
+      - name: Build nmulator
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - name: Upload artifacts
+        uses: actions/upload-artifact@master
+        with:
+          name: nmulator-macos
+          path: build/nmulator
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: Install toolchain
+        run: vcpkg install glslang:x64-windows
+      - name: Build nmulator
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+        env:
+          CMAKE_TOOLCHAIN_FILE: C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+      - name: Upload artifacts
+        uses: actions/upload-artifact@master
+        with:
+          name: nmulator-windows
+          path: build/Release/nmulator.exe
