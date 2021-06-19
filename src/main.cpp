@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <SDL_main.h>
 #include "nmulator.h"
 
 int main(int argc, char* argv[]) {

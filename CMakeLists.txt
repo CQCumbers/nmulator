@@ -1,11 +1,17 @@
 cmake_minimum_required(VERSION 3.9)
 project(nmulator VERSION 0.1.0 LANGUAGES CXX)
 
-# Add asmjit and SDL2
+# Enable link time optimization
+cmake_policy(SET CMP0069 NEW)
+set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+
+# Add asmjit, glad, and SDL2
 set(ASMJIT_STATIC TRUE)
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 add_subdirectory(extern/asmjit)
 add_subdirectory(extern/glad)
-find_package(SDL2 REQUIRED)
+add_subdirectory(extern/sdl2)
 
 # Compile shader to spir-v
 find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
@@ -19,9 +25,8 @@ add_custom_target(shader DEPENDS ${SPIRV})
 # Link nmulator against dependencies
 add_executable(nmulator src/main.cpp src/r4300.cpp src/rsp.cpp
     src/rdp.cpp src/scheduler.cpp src/debugger.cpp src/mipsjit.cpp)
-target_include_directories(nmulator PRIVATE ${SDL2_INCLUDE_DIRS})
-string(STRIP ${SDL2_LIBRARIES} SDL2_LIBRARIES)
-target_link_libraries(nmulator PRIVATE asmjit glad ${SDL2_LIBRARIES})
+target_compile_definitions(SDL2-static PRIVATE "-DSDL_LEAN_AND_MEAN=1")
+target_link_libraries(nmulator PRIVATE asmjit glad SDL2main SDL2-static)
 add_dependencies(nmulator shader)
 
 # Set nmulator compiler options

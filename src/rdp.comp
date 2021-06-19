@@ -1,0 +1,567 @@
+#version 450
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+/* === Bitfield Flags === */
+
+#define M0_FILL      0x00300000
+#define M0_COPY      0x00200000
+#define M0_2CYCLE    0x00100000
+#define M0_PERSP     0x00080000
+#define M0_TLUT_EN   0x00008000
+#define M0_TLUT_IA   0x00004000
+#define M0_SAMPLE    0x00002000
+#define M0_CDITH     0x000000c0
+#define M0_ADITH     0x00000030
+
+#define M1_BLEND     0x00004000
+#define M1_CVG2ALPHA 0x00002000
+#define M1_ALPHA2CVG 0x00001000
+#define M1_ZMODE     0x00000c00
+#define M1_ZINTRA    0x00000400
+#define M1_ZTRANS    0x00000800
+#define M1_ZDECAL    0x00000c00
+#define M1_ON_CVG    0x00000080
+#define M1_ZWRITE    0x00000020
+#define M1_ZCMP      0x00000010
+#define M1_AA        0x00000008
+#define M1_ZSRC      0x00000004
+#define M1_ALPHA     0x00000001
+
+#define T_ZBUF       0x01
+#define T_TEX        0x02
+#define T_SHADE      0x04
+#define T_RECT       0x08
+#define T_LMAJOR     0x10
+
+/* === Struct Definitions === */
+
+struct TileData {
+  uint cmd_idxs[64];
+};
+
+struct ConfData {
+  uint width, size;
+  uint n_cmds, fmt;
+};
+
+struct RDPCommand {
+  uint type, tile, pad;
+  int xh, xm, xl;
+  int yh, ym, yl;
+  int sh, sm, sl;
+
+  ivec4 shade, sde, sdx;
+  ivec4 tex, tde, tdx;
+
+  int sxh, sxl, syh, syl;
+  uint modes[2], mux[2];
+  uint tlut, tmem, texes;
+  uint fill, fog, blend;
+  uint env, prim, lodf;
+  uint zprim, keys, keyc;
+};
+
+struct RDPTex {
+  uint format, size;
+  uint width, addr;
+  ivec2 sth, stl, shift;
+  uint pal, pad;
+};
+
+/* === Resource Buffers === */
+
+layout(binding = 0, std430) readonly buffer CmdBuffer  { RDPCommand cmds[];  };
+layout(binding = 1, std430) readonly buffer TileBuffer { TileData   tiles[]; };
+layout(binding = 2, std430) readonly buffer TexBuffer  { RDPTex     texes[]; };
+layout(binding = 3, std430) readonly buffer ConfBuffer { ConfData   conf[];  };
+layout(binding = 4, std430) readonly buffer TMEMBuffer { uint16_t   tmem[];  };
+
+layout(binding = 5, std430) buffer ColorBufferLo { uint16_t cbufl[]; };
+layout(binding = 6, std430) buffer ColorBufferHi { uint16_t cbufh[]; };
+layout(binding = 7, std430) buffer DepthBufferLo { uint16_t zbufl[]; };
+layout(binding = 8, std430) buffer DepthBufferHi { uint16_t zbufh[]; };
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+/* === Common utilities === */
+
+uint16_t bswap16(uint val) {
+  return uint16_t((val << 8) | (val >> 8));
+}
+
+uint pack32(ivec4 color) {
+  uvec4 c = clamp(color, 0x00, 0xff);
+  return (c.w << 24) | (c.z << 16) | (c.y << 8) | c.x;
+}
+
+ivec4 unpack32(uint color) {
+  uint r = color >>  0, g = color >>  8;
+  uint b = color >> 16, a = color >> 24;
+  return ivec4(r, g, b, a) & 0xff;
+}
+
+uint a(uint color) {
+  return (color >> 24) * 0x01010101;
+}
+
+void seta(inout uint color, uint alpha) {
+  color = (color & 0x00ffffff) | (alpha & 0xff000000);
+}
+
+int abs1(int val) {
+  return (val >> 31) ^ (val >> 16);
+}
+
+bool bit(uint val, uint mask) {
+  return (val & mask) != 0;
+}
+
+bvec4 in_range(ivec4 x, ivec4 minVal, ivec4 maxVal) {
+  uvec4 lower = uvec4(lessThanEqual(minVal, x));
+  uvec4 upper = uvec4(lessThan(x, maxVal));
+  return bvec4(lower & upper);
+}
+
+/* === Framebuffer interface === */
+
+void load(uvec2 pos, out uint color, out uint depth) {
+  uint idx = pos.y * conf[0].width + pos.x;
+  if (conf[0].fmt != 0) {
+    // load 24-bit color, 8-bit cvg
+    color  = uint(cbufl[idx * 2 + 0]) <<  0;
+    color |= uint(cbufl[idx * 2 + 1]) << 16;
+  } else {
+    // load 15-bit color, 3-bit cvg
+    uint cval = bswap16(cbufl[idx]);
+    color = uint(cbufh[idx]) << 29;
+    color |= (cval & 0x0001) << 31;
+    color |= (cval & 0x003e) << 18;
+    color |= (cval & 0x07c0) <<  5;
+    color |= (cval & 0xf800) >>  8;
+  }
+
+  // load 14-bit depth, 4-bit dz
+  uint zval = bswap16(zbufl[idx]);
+  int mant = int(zval >>  2) & 0x7ff;
+  int expn = int(zval >> 13) & 0x007;
+  uint base = 0x40000 - (0x40000 >> expn);
+  depth  = (mant << max(6 - expn, 0)) + base;
+  depth |= (zval << 30) | (uint(zbufh[idx]) << 28);
+}
+
+void store(uvec2 pos, uint color, uint depth) {
+  uint idx = pos.y * conf[0].width + pos.x;
+  if (conf[0].fmt != 0) {
+    // store 24-bit color, 8-bit cvg
+    cbufl[idx * 2 + 0] = uint16_t(color >>  0);
+    cbufl[idx * 2 + 1] = uint16_t(color >> 16);
+  } else {
+    // store 15-bit color, 3-bit cvg
+    uint cval = (color >> 31) & 0x1;
+    cval |= (color >> 18) & 0x003e;
+    cval |= (color >>  5) & 0x07c0;
+    cval |= (color <<  8) & 0xf800;
+    cbufl[idx] = bswap16(cval);
+    cbufh[idx] = uint16_t(color >> 29 & 3);
+  }
+
+  // store 14-bit depth, 4-bit dz
+  int expn = int(depth ^ 0x3ffff) | 0x400;
+  expn = 31 - findMSB(expn << 14);
+  int mant = int(depth >> max(6 - expn, 0)) & 0x7ff;
+  uint zval = (expn << 13) | (mant << 2);
+  zbufl[idx] = bswap16(zval | (depth >> 30));
+  zbufh[idx] = uint16_t(depth >> 28 & 3);
+}
+
+/* === Format conversions === */
+
+uint read_rgba16(uint enc) {
+  // bswapped RGBA5551 to ABGR8888
+  enc = ((enc << 8) | (enc >> 8)) & 0xffff;
+  uint dec = -(enc & 0x1) & (0xff << 24);
+  dec |= (enc & 0x3e) << 18;
+  dec |= (enc & 0x7c0) << 5;
+  return dec | ((enc & 0xf800) >> 8);
+}
+
+uint read_ia16(uint enc) {
+  // 8 bit intensity, 8 bit alpha
+  uint i = enc & 0xff, a = enc >> 8;
+  return (a << 24) | (i << 16) | (i << 8) | i;
+}
+
+uint read_i4(uint enc) {
+  // 4 bit intensity
+  uint i = (enc << 4) | enc;
+  return (i << 24) | (i << 16) | (i << 8) | i;
+}
+
+/* === Utility Functions === */
+
+uint tmem4(uint pos, uint off, uint idx) {
+  pos = (pos & 0xfff) | (idx << 12);
+  uint val = tmem[pos >> 1];
+  uint shift = ((off & 0x3) ^ 0x1) * 4;
+  return (val >> shift) & 0xf;
+}
+
+uint tmem8(uint pos, uint idx) {
+  pos = (pos & 0xfff) | (idx << 12);
+  uint val = tmem[pos >> 1];
+  uint shift = (pos & 0x1) * 8;
+  return (val >> shift) & 0xff;
+}
+
+uint tmem16(uint pos, uint idx) {
+  pos = (pos & 0xfff) | (idx << 12);
+  return tmem[pos >> 1];
+}
+
+uint texel(uvec2 st, uvec2 mask, RDPTex tex, RDPCommand cmd) {
+  // apply mirror/mask to ST coords
+  if (bit(cmd.modes[0], M0_TLUT_EN)) tex.format = 2;
+  uvec2 mst = (tex.shift >> 8) & 1, en = uvec2(bvec2(mask));
+  st ^= -(en & (st >> mask) & mst), st &= (en << mask) - 1;
+  // see manual 13.8 for tmem layouts
+  uint s = st.x, t = st.y, wd = tex.width;
+  uint flip = (st.y & 0x1) << 2;
+  bool ia = bit(cmd.modes[0], M0_TLUT_IA);
+  // switch on format and size
+  if (tex.format == 0 && tex.size == 0) {        // 4 bit RGBA
+    uint pos = (tex.addr + t * wd + s / 2) ^ flip;
+    return read_i4(tmem4(pos, s, cmd.tmem));
+  } else if (tex.format == 0 && tex.size == 1) { // 8 bit RGBA
+    uint pos = (tex.addr + t * wd + s) ^ flip;
+    uint i = tmem8(pos, cmd.tmem);
+    return (i << 24) | (i << 16) | (i << 8) | i;
+  } else if (tex.format == 0 && tex.size == 2) { // 16 bit RGBA
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    return read_rgba16(tmem16(pos, cmd.tmem));
+  } else if (tex.format == 0 && tex.size == 3) { // 32 bit RGBA
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    uint hi = tmem16(pos | 0x800, cmd.tmem);
+    uint lo = tmem16(pos & 0x7ff, cmd.tmem);
+    return (hi << 16) | (lo & 0xffff);
+  } else if (tex.format == 2 && tex.size == 0) { // 4 bit CI
+    uint pos = (tex.addr + t * wd + s / 2) ^ flip;
+    uint idx = (tex.pal << 4) | tmem4(pos & 0x7ff, s, cmd.tmem);
+    if (!bit(cmd.modes[0], M0_TLUT_EN)) return idx;
+    uint entry = tmem16(0x800 | (idx << 3), cmd.tmem);
+    return ia ? read_ia16(entry) : read_rgba16(entry);
+  } else if (tex.format == 2 && tex.size == 1) { // 8 bit CI
+    uint pos = (tex.addr + t * wd + s) ^ flip;
+    uint idx = tmem8(pos & 0x7ff, cmd.tmem);
+    if (!bit(cmd.modes[0], M0_TLUT_EN)) return idx;
+    uint entry = tmem16(0x800 | (idx << 3), cmd.tmem);
+    return ia ? read_ia16(entry) : read_rgba16(entry);
+  } else if (tex.format == 2) {                  // 32 bit CI
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    uint idx = tmem16(pos & 0x7ff, cmd.tmem);
+    if (!bit(cmd.modes[0], M0_TLUT_EN)) return (idx << 16) | idx;
+    uint entry = tmem16(0x800 | ((idx >> 8) << 3), cmd.tmem);
+    return ia ? read_ia16(entry) : read_rgba16(entry);
+  } else if (tex.format == 3 && tex.size == 0) { // 4 bit IA
+    uint pos = (tex.addr + t * wd + s / 2) ^ flip;
+    uint val = tmem4(pos, s, cmd.tmem);
+    uint i = val & 0xe, a = (val & 0x1) * 0xff;
+    i = (i << 4) | (i << 1) | (i >> 2);
+    return (a << 24) | (i << 16) | (i << 8) | i;
+  } else if (tex.format == 3 && tex.size == 1) { // 8 bit IA
+    uint pos = (tex.addr + t * wd + s) ^ flip;
+    uint val = tmem8(pos, cmd.tmem);
+    uint i = (val & 0xf0) | (val >> 4);
+    uint a = (val << 4) | (val & 0x0f);
+    return (a << 24) | (i << 16) | (i << 8) | i;
+  } else if (tex.format == 3 && tex.size == 2) { // 16 bit IA
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    return read_ia16(tmem16(pos, cmd.tmem));
+  } else if (tex.format == 3 && tex.size == 3) { // 32 bit IA
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    uint val = tmem16(pos, cmd.tmem);
+    return (val << 16) | (val & 0xffff);
+  } else if (tex.format == 4 && tex.size == 0) { // 4 bit I
+    uint pos = (tex.addr + t * wd + s / 2) ^ flip;
+    return read_i4(tmem4(pos, s, cmd.tmem));
+  } else if (tex.format == 4 && tex.size == 1) { // 8 bit I
+    uint pos = (tex.addr + t * wd + s) ^ flip;
+    uint i = tmem8(pos, cmd.tmem);
+    return (i << 24) | (i << 16) | (i << 8) | i;
+  } else if (tex.format == 4) {                  // 32 bit I
+    uint pos = (tex.addr + t * wd + s * 2) ^ flip;
+    uint val = tmem16(pos, cmd.tmem);
+    return (val << 16) | (val & 0xffff);
+  }
+  return 0xffff00ff;
+}
+
+/* === Pipeline Stages === */
+
+uint read_noise(uint seed) {
+  seed = (seed ^ 61) ^ (seed >> 16);
+  seed *= 9, seed = seed ^ (seed >> 4);
+  seed *= 0x27d4eb2d, seed = seed ^ (seed >> 15);
+  uint i = seed & 0xff;
+  return 0xff000000 | (i << 16) | (i << 8) | i;
+}
+
+ivec4 quantize_x(ivec4 x) {
+  bvec4 sticky = bvec4(x & 0xfff);
+  return (x >> 12) | ivec4(sticky);
+}
+
+uint visible(uvec2 pos, RDPCommand cmd, out ivec2 dxy, out uint cvbit) {
+  // check pixel within y bounds
+  int y1 = max(cmd.yh, cmd.syh);
+  int y2 = min(cmd.yl, cmd.syl);
+  if (!(y1 / 4 <= pos.y && pos.y <= y2 / 4)) return 0;
+  // compute edges at each sub-scanline
+  ivec4 y = int(pos.y * 4) + ivec4(0, 1, 2, 3);
+  ivec4 x1 = cmd.xh + cmd.sh * (y - (cmd.yh & ~3));
+  ivec4 xm = cmd.xm + cmd.sm * (y - (cmd.yh & ~3));
+  ivec4 xl = cmd.xl + cmd.sl * (y - cmd.ym);
+  // get horizontal bounds, quantize
+  ivec4 x2 = mix(xl, xm, lessThan(y, ivec4(cmd.ym)));
+  bool lft = bit(cmd.type, T_LMAJOR | T_RECT);
+  ivec4 xa = quantize_x(lft ? x1 : x2);
+  ivec4 xb = quantize_x(lft ? x2 : x1);
+  // compute valid sub-scanlines
+  bvec4 vx = lessThanEqual(xa / 2, xb / 2);
+  bvec4 vy = in_range(y, ivec4(y1), ivec4(y2));
+  bvec4 vxy = bvec4(uvec4(vx) & uvec4(vy));
+  // compute interpolation deltas
+  bool off = bool(cmd.sh >> 31) == lft;
+  if (off) x1.x += 3 * cmd.sh;
+  dxy.x = int(pos.x * 256) - x1.x / 128;
+  dxy.y = int(pos.y * 256) - cmd.yh / 4 * 256;
+  if (off) dxy.y += 3 << 6;
+  // apply scissor boundaries
+  ivec4 sxh = ivec4(cmd.sxh * 2);
+  ivec4 sxl = ivec4(cmd.sxl * 2);
+  xa = clamp(xa, sxh, sxl);
+  xb = clamp(xb, sxh, sxl);
+  // check x bounds at every other subpixel
+  ivec4 x = int(pos.x * 8) + ivec4(0, 2, 0, 2);
+  uint span = uint(xa.x <= x.x && x.x <= xb.x);
+  if (bit(cmd.modes[0], M0_COPY)) return span;
+  cvbit = uint(vxy.x && xa.x <= x.x && x.x < xb.x);
+  uvec4 cvgl = uvec4(in_range(x + 0, xa, xb)) & uvec4(vxy);
+  uvec4 cvgh = uvec4(in_range(x + 4, xa, xb)) & uvec4(vxy);
+  uint cntl = cvgl.x + cvgl.y + cvgl.z + cvgl.w;
+  uint cnth = cvgh.x + cvgh.y + cvgh.z + cvgh.w;
+  return cntl + cnth;
+}
+
+int roundz(uint depth) {
+  int expn = int(depth ^ 0x3ffff) | 0x400;
+  expn = 31 - findMSB(expn << 14);
+  int mant = int(depth >> max(6 - expn, 0)) & 0x7ff;
+  int base = 0x40000 - (0x40000 >> expn);
+  return (mant << max(6 - expn, 0)) + base;
+}
+
+ivec3 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
+  if (!bit(cmd.modes[1], M1_ZCMP)) return ivec3(1, 1, depth);
+  // extract old/new z and dz
+  bool zsrc = bit(cmd.modes[1], M1_ZSRC);
+  int oz = roundz(depth & 0x3ffff), odz = int(depth >> 28);
+  int nz = zsrc ? int(cmd.zprim >> 16) * 8 : z_in >> 13;
+  int ndz = zsrc ? int(cmd.zprim / 2) : abs1(cmd.tdx.w) + abs1(cmd.tde.w);
+  ndz = findMSB(ndz & 0x7fff) + 1;
+  // adjust dz at greater depth
+  int expn = int(depth ^ 0x3ffff) | 0x400;
+  expn = 31 - findMSB(expn << 14);
+  bool dzm = (expn < 3 && odz == 0xf);
+  if (expn < 3) odz = max(odz + 1, 4 - expn);
+  int dz = 0x8 << max(ndz, odz);
+  // compare new z with old z
+  bool ovf = cvg + (pixel >> 29) > 7;
+  bool zmx = oz == 0x3ffff;
+  bool zle = dzm || (nz - dz <= oz);
+  bool zge = dzm || (nz + dz >= oz);
+  bool zlt = zmx || (ovf ? nz < oz : zle);
+  bool zeq = ovf && nz < oz && zge;
+  // depth test based on mode
+  uint mode = cmd.modes[1] & M1_ZMODE;
+  if (mode == M1_ZINTRA && zeq) zlt = true;
+  if (mode == M1_ZTRANS) zlt = zmx || nz < oz;
+  if (mode == M1_ZDECAL) zlt = !zmx && zge && zle;
+  return ivec3(zlt, zge, (ndz << 28) | nz);
+}
+
+uint calc_shade(ivec2 dxy, RDPCommand cmd) {
+  if (!bit(cmd.type, T_SHADE)) return 0;
+  ivec4 rgba = cmd.shade + (dxy.y / 256 * cmd.sde) + (dxy.x / 256 * cmd.sdx);
+  rgba += cmd.sde / 256 * (dxy.y & 0xff) + cmd.sdx / 256 * (dxy.x & 0xff);
+  return pack32(rgba >> 16);
+}
+
+ivec4 calc_coord(ivec2 dxy, RDPCommand cmd) {
+  ivec4 stwz = cmd.tex + (dxy.y / 256 * cmd.tde) + (dxy.x / 256 * cmd.tdx);
+  stwz += cmd.tde / 256 * (dxy.y & 0xff) + cmd.tdx / 256 * (dxy.x & 0xff);
+  if (bit(cmd.modes[0], M0_PERSP)) stwz.xy = ivec2(vec2(stwz.xy) * 32768.0 / vec2(stwz.z >> 16));
+  stwz.w = clamp(stwz.w, 0, 0x3ffff << 13); return stwz;
+}
+
+uint sample_tex(ivec2 st_in, RDPCommand cmd, uint cycle) {
+  uint cyc = cmd.modes[0] & M0_FILL;
+  if (!bit(cmd.type, T_TEX)) return 0;
+  if (cyc != M0_2CYCLE && cycle != 0) return 0;
+  // read tex attributes, shift coords
+  RDPTex tex = texes[cmd.tmem * 8 + cmd.tile + cycle];
+  ivec2 shl = tex.shift & 0xf, st = st_in >> 16;
+  st = mix(st >> shl, st << (16 - shl), lessThan(ivec2(10), shl));
+  // get mask, clamp coords to tex bounds
+  uvec2 mask = min((tex.shift >> 4) & 0xf, 10);
+  bvec2 clmp = bvec2((tex.shift >> 9) | uvec2(mask == uvec2(0)));
+  ivec2 stl = tex.stl << 3, sth = tex.sth << 3;
+  st = mix(st - stl, mix(sth - stl, max(st - stl, 0), lessThan(st, sth)), clmp);
+  // read appropriate texels
+  ivec2 stfrac = st & 0x1f, sti = st >> 5;
+  bool up = bit(stfrac.x + stfrac.y, 0x20);
+  if (!bit(cmd.modes[0], M0_SAMPLE) || cyc == M0_COPY) return texel(sti, mask, tex, cmd);
+  ivec4 c1 = unpack32(texel(sti + ivec2(up), mask, tex, cmd));
+  ivec4 c2 = unpack32(texel(sti + ivec2(1, 0), mask, tex, cmd));
+  ivec4 c3 = unpack32(texel(sti + ivec2(0, 1), mask, tex, cmd));
+  // 3-tap bilinear filter
+  stfrac = up ? 0x20 - stfrac.yx : stfrac.xy;
+  ivec4 mixed = stfrac.x * (c2 - c1) + stfrac.y * (c3 - c1);
+  return pack32(c1 + (mixed + 0x10) / 0x20);
+}
+
+uint fill(RDPCommand cmd) {
+  uint fill_16 = read_rgba16(cmd.fill);
+  return conf[0].fmt != 0 ? cmd.fill : fill_16;
+}
+
+uint combine(uint tex0, uint tex1, uint shade, uint rand,
+    inout uint cvg, uint color, RDPCommand cmd, uint cycle) {
+  uint cyc = cmd.modes[0] & M0_FILL;
+  if (cyc != M0_2CYCLE && cycle == 0) return 0;
+  if (cyc == M0_COPY) return tex0;
+  if (cyc == M0_FILL) return fill(cmd);
+  // organize combiner inputs
+  uint prim = cmd.prim, env = cmd.env, lod = cmd.lodf;
+  uint mux0[16] = { color, tex0, tex1, prim, shade, env, -1, rand, 0, 0, 0, 0, 0, 0, 0, 0 };
+  uint mux1[16] = { color, tex0, tex1, prim, shade, env, cmd.keyc, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+  uint mux2[32] = { color, tex0, tex1, prim, shade, env, cmd.keys, 0, a(tex0), a(tex1),
+    a(prim), a(shade), a(env), -1, a(lod), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+  uint mux3[8] = { color, tex0, tex1, prim, shade, env, -1, 0 };
+  uint mux4[8] = { -1, tex0, tex1, prim, shade, env, lod, 0 };
+  // get color combiner setting
+  uint m0 = cmd.mux[0], m1 = cmd.mux[1];
+  uint c0 = mux0[(cycle != 0 ? m0 >>  5 : m0 >> 20) & 0x0f];
+  uint c1 = mux1[(cycle != 0 ? m1 >> 24 : m1 >> 28) & 0x0f];
+  uint c2 = mux2[(cycle != 0 ? m0 >>  0 : m0 >> 15) & 0x1f];
+  uint c3 = mux3[(cycle != 0 ? m1 >>  6 : m1 >> 15) & 0x07];
+  // get alpha combiner setting
+  seta(c0, mux3[(cycle != 0 ? m1 >> 21 : m0 >> 12) & 0x07]);
+  seta(c1, mux3[(cycle != 0 ? m1 >>  3 : m1 >> 12) & 0x07]);
+  seta(c2, mux4[(cycle != 0 ? m1 >> 18 : m0 >>  9) & 0x07]);
+  seta(c3, mux3[(cycle != 0 ? m1 >>  0 : m1 >>  9) & 0x07]);
+  // evaluate combiner equation
+  ivec4 a = unpack32(c0), b = unpack32(c1);
+  ivec4 c = unpack32(c2), d = unpack32(c3);
+  return pack32(((a - b) * c + 0x80) / 256 + d);
+}
+
+uint mix_alpha_cvg(uint color, inout uint cvg, uvec2 pos, RDPCommand cmd) {
+  uint dith[16] = { 7, 1, 6, 0, 3, 5, 2, 4, 4, 2, 5, 3, 0, 6, 1, 7 };
+  uint off = dith[(pos.y & 3) * 4 + (pos.x & 3)] ^ 0x7;
+  if ((cmd.modes[0] & M0_ADITH) == M0_ADITH) off = 0;
+
+  uint cvg8 = cvg << 5, m1 = cmd.modes[1];
+  uint alph = (color >> 24) + ((color >> 24) + 1) / 256;
+  if (bit(m1, M1_ALPHA2CVG)) cvg8 = (alph * cvg + 4) / 8;
+  if (bit(m1, M1_CVG2ALPHA)) seta(color, min(cvg8, 255) << 24);
+  else seta(color, min((color >> 24) + off, 255) << 24);
+  cvg = cvg8 >> 5; return color;
+}
+
+uint blend2(uint pixel, uint color) {
+  return color;
+}
+
+uint blend(uint pixel, uint color, uint shade, ivec3 zcmp,
+    inout uint depth, uint cvg, uint cvbit, RDPCommand cmd, uint cycle) {
+  uint cyc = cmd.modes[0] & M0_FILL, m1 = cmd.modes[1];
+  if (cyc != M0_2CYCLE && cycle != 0) return color;
+  // alpha, coverage, depth test
+  uint alpha = color >> 24, limit = cmd.blend >> 24;
+  if (bit(m1, M1_ALPHA) && alpha < limit) return pixel;
+  if (cyc == M0_COPY || cyc == M0_FILL) return cvg != 0 ? color : pixel;
+  if (zcmp.x == 0 || (bit(m1, M1_AA) ? cvg : cvbit) == 0) return pixel;
+  // get blender input setting
+  uint mux0[4] = { color, pixel, cmd.blend, cmd.fog  };
+  uint mux1[4] = { a(color), a(cmd.fog), a(shade), 0 };
+  uint c0 = mux0[(cycle != 0 ? m1 >> 28 : m1 >> 30) & 0x03];
+  uint c1 = mux1[(cycle != 0 ? m1 >> 24 : m1 >> 26) & 0x03];
+  uint c2 = mux0[(cycle != 0 ? m1 >> 20 : m1 >> 22) & 0x03];
+  uint mux2[4] = { c1 ^ 0xffffffff, a(pixel), -1, 0  };
+  uint c3 = mux2[(cycle != 0 ? m1 >> 16 : m1 >> 18) & 0x03];
+  // evaluate blender equation
+  ivec4 p = unpack32(c0), a = unpack32(c1) / 8 + 0;
+  ivec4 m = unpack32(c2), b = unpack32(c3) / 8 + 1;
+  uint r = pack32((a * p + b * m) / (a + b));
+  if (cyc == M0_2CYCLE && cycle == 0) return r;
+  if (bit(cmd.modes[1], M1_ZWRITE)) depth = zcmp.z;
+  // write blended coverage value
+  uint ocvg = pixel >> 29, ovf = uint(cvg + ocvg > 7);
+  bool blen = bit(m1, M1_BLEND), aaen = bit(m1, M1_AA);
+  blen = blen || (ovf == 0 && aaen && zcmp.y != 0);
+  if (!blen) r = c0;
+  if (bit(m1, M1_ON_CVG) && ovf == 0) r = c2;
+  uint clmp = blen ? min(7, cvg + ocvg) : cvg - 1;
+  uint muxc[4] = { clmp, cvg + ocvg, 7, ocvg };
+  seta(r, muxc[(m1 >> 8) & 3] << 29); return r;
+}
+
+uint dither(uint color, uvec2 pos, RDPCommand cmd) {
+  if ((cmd.modes[0] & M0_CDITH) == M0_CDITH) return color;
+  int dith[16] = { 7, 1, 6, 0, 3, 5, 2, 4, 4, 2, 5, 3, 0, 6, 1, 7 };
+  int off = dith[(pos.y & 3) * 4 + (pos.x & 3)];
+  return pack32((off + unpack32(color)) & ~0x7);
+}
+
+
+void main(void) {
+  uint width = conf[0].width;
+  uvec2 pos = gl_GlobalInvocationID.xy;
+  if (pos.x >= width || pos.y >= 480) return;
+
+  uint pixel, depth;
+  load(pos, pixel, depth);
+  uint rand = 0xff888888;
+
+  uint tid = gl_WorkGroupID.y * width / 8 + gl_WorkGroupID.x;
+  for (uint i = 0; i < 64; ++i) {
+    uint bitmask = tiles[tid].cmd_idxs[i];
+    while (bitmask != 0) {
+      uint lsb = findLSB(bitmask);
+      RDPCommand cmd = cmds[(i << 5) | lsb];
+      bitmask &= ~(0x1 << lsb);
+
+      uint cvbit = 0, color = 0; ivec2 dxy;
+      uint cvg = visible(pos, cmd, dxy, cvbit);
+      if (cvg == 0) continue;
+
+      uint shade = calc_shade(dxy, cmd);
+      ivec4 coord = calc_coord(dxy, cmd);
+      ivec3 zcmp  = calc_depth(coord.w, depth, cvg, pixel, cmd);
+      uint tex0  = sample_tex(coord.xy, cmd, 0);
+      uint tex1  = sample_tex(coord.xy, cmd, 1);
+
+      color = combine(tex0, tex1, shade, rand, cvg, color, cmd, 0);
+      color = combine(tex0, tex1, shade, rand, cvg, color, cmd, 1);
+      color = mix_alpha_cvg(color, cvg, pos, cmd);
+
+      color = blend(pixel, color, shade, zcmp, depth, cvg, cvbit, cmd, 0);
+      pixel = blend(pixel, color, shade, zcmp, depth, cvg, cvbit, cmd, 1);
+      pixel = dither(pixel, pos, cmd);
+    }
+  }
+
+  store(pos, pixel, depth);
+}

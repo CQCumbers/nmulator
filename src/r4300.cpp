@@ -1,12 +1,9 @@
 #ifdef _WIN32
-#  include <SDL.h>
-#  undef main
 #  define _AMD64_
 #  include <memoryapi.h>
 #  include <errhandlingapi.h>
 #  include <io.h>
 #else
-#  include <SDL2/SDL.h>
 #  include <sys/mman.h>
 #  include <signal.h>
 #  include <unistd.h>
@@ -15,6 +12,7 @@
 #include <vector>
 #include "robin_hood.h"
 
+#include <SDL.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <nmmintrin.h>
@@ -124,19 +122,19 @@ void R4300::vi_update() {
   uint32_t vend = (vi_vbound & 0x3ff);
   uint32_t vbeg = (vi_vbound >> 16) & 0x3ff;
   uint32_t height = ((vend - vbeg) * vi_vscale) >> 11;
-  //if (width == 0 || format == 0) height = 0;
+  if (!width || !height || !format) return;
 
   if (vi_dirty) {
     if (texture) SDL_DestroyTexture(texture);
     texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
-      SDL_TEXTUREACCESS_STREAMING, vi_width, height);
+      SDL_TEXTUREACCESS_STREAMING, width, height);
     vi_dirty = false;
   }
 
-  bool fmt16 = (format == 2);
-  uint8_t *pixels; int pitch, len = vi_width * height;
+  uint8_t *pixels = NULL;
+  int pitch, len = width * height;
   SDL_LockTexture(texture, NULL, (void**)&pixels, &pitch);
-  if (fmt16) convert16(pixels, ram + vi_origin, len * 2);
+  if (format == 2) convert16(pixels, ram + vi_origin, len * 2);
   else convert32(pixels, ram + vi_origin, len * 4);
   SDL_UnlockTexture(texture);
 
@@ -661,9 +659,7 @@ static void write(uint32_t addr, uint64_t val) {
       if (val == vi_status) return;
       vi_status = val, vi_dirty = true; return;
     case 0x4400004: vi_origin = val & 0xffffff; return;
-    case 0x4400008:
-      if ((val & 0xfff) == vi_width) return;
-      vi_width = val & 0xfff, vi_dirty = true; return;
+    case 0x4400008: vi_width = val & 0xfff; return;
     case 0x440000c: vi_irq_line = val & 0x3ff; return;
     case 0x4400010: R4300::unset_irqs(0x8); return;
     case 0x4400018:
@@ -1059,6 +1055,7 @@ void R4300::init(const char *name) {
   }
 
   // read ROM file into memory
+  if (!name) printf("Usage: ./nmulator <ROM>\n"), exit(1);
   FILE *rom = fopen(title = name, "r");
   if (!rom) printf("Can't find rom %s\n", name), exit(1);
   fread(ram + 0x10000000, 1, 0x4000000, rom), fclose(rom);

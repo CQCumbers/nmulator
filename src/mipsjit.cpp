@@ -1,4 +1,4 @@
-#include "asmjit/asmjit.h"
+#include <asmjit/asmjit.h>
 #include "nmulator.h"
 #include "recip_rom.h"
 
@@ -145,9 +145,9 @@ struct MipsJit {
     as.mov(x86::rdx, x86::rsi), as.call(func);
     as.add(x86::rsp, 32), as.pop(x86::rcx);
 #else
-    as.push(x86::rdi), as.push(x86::rdi), as.push(x86::rcx);
+    as.push(x86::rdi), as.push(x86::rcx);
     as.mov(x86::rdi, x86::rcx), as.call(func);
-    as.pop(x86::rcx), as.pop(x86::rdi), as.pop(x86::rdi);
+    as.pop(x86::rcx), as.pop(x86::rdi);
 #endif
     x86_load_caller();
   }
@@ -2775,7 +2775,7 @@ static const uint16_t pool[23 * 8] = {
 
 uint32_t Mips::jit(MipsConfig *cfg, uint32_t pc, CodePtr *ptr) {
   CodeHolder code;
-  code.init(runtime.codeInfo());
+  code.init(runtime.environment());
   MipsJit jit(cfg, code);
   uint32_t len = jit.jit_block(pc);
   runtime.add(ptr, &code);
@@ -2791,7 +2791,7 @@ void Mips::init(MipsConfig *cfg) {
   void *ptr = cfg->regs + cfg->pool;
   if (cfg->pool) memcpy(ptr, pool, sizeof(pool));
   CodeHolder code;
-  code.init(runtime.codeInfo());
+  code.init(runtime.environment());
   MipsJit jit(cfg, code);
 
   jit.emit_funcs();

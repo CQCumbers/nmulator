@@ -1,3 +1,6 @@
 [submodule "extern/asmjit"]
 	path = extern/asmjit
 	url = ../../asmjit/asmjit.git
+[submodule "extern/sdl2"]
+	path = extern/sdl2
+	url = ../../libsdl-org/SDL
