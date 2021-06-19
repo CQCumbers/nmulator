@@ -1,11 +1,6 @@
 cmake_minimum_required(VERSION 3.9)
 project(nmulator VERSION 0.1.0 LANGUAGES CXX)
 
-# Enable link time optimization
-cmake_policy(SET CMP0069 NEW)
-set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-
 # Add asmjit, glad, and SDL2
 set(ASMJIT_STATIC TRUE)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
@@ -31,7 +26,7 @@ add_dependencies(nmulator shader)
 
 # Set nmulator compiler options
 target_compile_options(nmulator PRIVATE
-    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -msse4.2
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -msse4.2
         -fno-exceptions -fno-rtti -fno-strict-aliasing>
     $<$<CXX_COMPILER_ID:MSVC>:/W3 /EHsc /GR->)
 target_compile_features(nmulator PRIVATE cxx_std_20)

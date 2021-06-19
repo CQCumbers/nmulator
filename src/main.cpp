@@ -16,4 +16,5 @@ int main(int argc, char* argv[]) {
   Sched::add(TASK_VI, 6510);
   Sched::add(TASK_CIC, 65100);
   Sched::start_loop();
+  return 0;
 }

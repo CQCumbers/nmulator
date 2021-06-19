@@ -103,9 +103,9 @@ static MipsConfig cfg = {
   .regs = regs, .cop0 = 32,
   .cop2 = 64, .pool = 150,
   .lookup = lookup, .fetch = fetch,
+  .stop_at = stop_at, .step = NULL,
   .mfc0 = mfc0, .mfc0_mask = 0x0080,
   .mtc0 = mtc0, .mtc0_mask = 0xeb7f,
-  .stop_at = stop_at
 };
 
 robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;

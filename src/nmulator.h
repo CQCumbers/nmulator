@@ -18,22 +18,24 @@ struct MipsConfig {
   uint32_t cop0, cop1;
   uint32_t cop2, pool;
 
-  uint8_t *mem;
   CodePtr *lookup;
-  ReadPtr mfc0;
-  WritePtr mtc0;
-  uint32_t mfc0_mask;
-  uint32_t mtc0_mask;
-
-  uint32_t *pages, *tlb;
-  uint64_t fn[7];
-  ReadPtr read;
-  WritePtr write;
+  FetchPtr fetch;
+  ReadPtr stop_at;
+  bool *step;
   WritePtr tlbwi;
   LinkPtr link;
 
-  FetchPtr fetch;
-  ReadPtr stop_at;
+  ReadPtr mfc0;
+  uint32_t mfc0_mask;
+  WritePtr mtc0;
+  uint32_t mtc0_mask;
+
+  uint32_t *pages;
+  uint32_t *tlb;
+  uint8_t *mem;
+  ReadPtr read;
+  WritePtr write;
+  uint64_t fn[7];
 };
 
 struct Block {

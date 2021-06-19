@@ -1568,7 +1568,8 @@ struct MipsJit {
       else as.roundsd(x86::xmm0, x86_spilld(rd(instr) + cfg.cop1), type);
       as.cvtsd2si(x86::rax, x86::xmm0);
     } else invalid(instr);
-    as.mov(x86_spilld(sa(instr) + cfg.cop1), (dword ? x86::rax : x86::eax));
+    if (dword) as.mov(x86_spilld(sa(instr) + cfg.cop1), x86::rax);
+    else as.mov(x86_spilld(sa(instr) + cfg.cop1), x86::eax);
     uint8_t sax = x86_reg(sa(instr) + cfg.cop1);
     if (sax) as.movsd(x86::xmm(sax), x86_spilld(sa(instr) + cfg.cop1));
   }
@@ -1606,7 +1607,8 @@ struct MipsJit {
       else as.roundsd(x86::xmm0, x86_spilld(rd(instr) + cfg.cop1), round_mode);
       as.cvtsd2si(x86::rax, x86::xmm0);
     } else invalid(instr);
-    as.mov(x86_spilld(sa(instr) + cfg.cop1), (dword ? x86::rax : x86::eax));
+    if (dword) as.mov(x86_spilld(sa(instr) + cfg.cop1), x86::rax);
+    else as.mov(x86_spilld(sa(instr) + cfg.cop1), x86::eax);
     uint8_t sax = x86_reg(sa(instr) + cfg.cop1);
     if (sax) as.movsd(x86::xmm(sax), x86_spilld(sa(instr) + cfg.cop1));
   }
@@ -2093,7 +2095,7 @@ struct MipsJit {
   template <typename T>
   void ldv(uint32_t instr) {
     uint8_t rsx = x86_reg(rs(instr));
-    int32_t off = sext(instr, 7) << __builtin_ctz(sizeof(T));
+    int32_t off = sext(instr, 7) * sizeof(T);
     // LDV BASE(RS), RT, OFFSET(IMMEDIATE)
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));
@@ -2116,7 +2118,7 @@ struct MipsJit {
   template <typename T>
   void sdv(uint32_t instr) {
     uint8_t rsx = x86_reg(rs(instr));
-    int32_t off = sext(instr, 7) << __builtin_ctz(sizeof(T));
+    int32_t off = sext(instr, 7) * sizeof(T);
     // SDV BASE(RS), RT, OFFSET(IMMEDIATE)
     if (rsx) as.mov(x86::ecx, x86::gpd(rsx));
     else as.mov(x86::ecx, x86_spill(rs(instr)));

@@ -38,7 +38,7 @@ static void move_down(uint64_t *ptr, uint64_t event) {
 // Insert event into sorted events array,
 // searching backwards from ptr
 static void move_up(uint64_t *ptr, uint64_t event) {
-  while (ptr + 1 >= events && after(ptr[0], event))
+  while (ptr >= events && after(ptr[0], event))
     ptr[1] = ptr[0], --ptr;
   ptr[1] = event;
 }

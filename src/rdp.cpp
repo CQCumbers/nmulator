@@ -1,11 +1,12 @@
-#include <SDL_vulkan.h>
-#include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <SDL_vulkan.h>
 #include <glad/vulkan.h>
 #include "nmulator.h"
 #include "comp.spv"
 
-/* === Shader Structs === */
+/* === Shader structs === */
 
 // all coeffs are 16.16 fixed point
 // except yh/yl/ym, which is 12.2
@@ -56,7 +57,7 @@ struct RenderInfo {
   bool pending;
 };
 
-/* === Vulkan Setup === */
+/* === Vulkan setup === */
 
 namespace RDP {
   void render(bool sync);
@@ -74,7 +75,7 @@ namespace Vulkan {
     return (offset + 0x1f) & ~0x1f;
   }
 
-  /* === Descriptor Memory Access === */
+  /* === Descriptor memory access === */
 
   void *vmems[2];
   uint8_t *mapped_mem = nullptr;
@@ -123,9 +124,10 @@ namespace Vulkan {
   VkBuffer buffers[2];
   RenderInfo renders[2];
 
-  /* === Vulkan Initialization == */
+  /* === Vulkan initialization == */
 
   void init_instance(VkInstance *instance) {
+    // create vulkan instance
     const char *layers[] = { "VK_LAYER_KHRONOS_validation" };
     const VkApplicationInfo app_info = {
       .pApplicationName = "nmulator RDP",
@@ -346,7 +348,7 @@ namespace Vulkan {
     GLADuserptrloadfunc fp = (GLADuserptrloadfunc)ptr;
     gladLoadVulkanUserPtr(0, fp, 0);
 
-    // configure GPU, display, and memory
+    // configure GPU and memory
     VkInstance instance;
     VkPhysicalDevice gpu;
     VkDeviceMemory memory[2];
@@ -374,7 +376,7 @@ namespace Vulkan {
     memset(tiles_ptr(), 0, tiles_size);
   }
 
-  /* === Runtime Methods === */
+  /* === Runtime methods === */
 
   void add_tmem_copy(RDPState &state) {
     uint8_t *last_tmem = tmem_ptr();
@@ -466,7 +468,7 @@ namespace RDP {
   uint64_t &pc = RSP::cop0[10], &status = RSP::cop0[11];
 }
 
-/* === Helper Functions === */
+/* === Helper functions === */
 
 static int32_t sext(uint32_t val, uint32_t bits=32) {
   if (bits >= 32) return val;
@@ -563,7 +565,7 @@ static void set_key_r(uint32_t *instr) {
   state.keyc &= 0xffff00, state.keyc |= (instr[1] >> 8) & 0xff;
 }
 
-static void set_convert(uint32_t *instr) {
+static void set_convert(uint32_t*) {
   /*uint64_t cmd = ((uint64_t)instr[0] << 32) | instr[1];
   state.convert[0] = 2 * sext(cmd >> 0, 9) + 1;
   state.convert[1] = 2 * sext(cmd >> 9, 9) + 1;
@@ -572,6 +574,8 @@ static void set_convert(uint32_t *instr) {
   state.convert[4] = sext(cmd >> 36, 9);
   state.convert[5] = sext(cmd >> 45, 9);*/
 }
+
+/* == TMEM handling === */
 
 static void set_texture(uint32_t *instr) {
   tex_nibs = 0x1 << ((instr[0] >> 19) & 0x3);
@@ -597,8 +601,8 @@ static void set_tile_size(uint32_t *instr) {
   tex.stl[0] = (instr[0] >> 12) & 0xfff, tex.stl[1] = instr[0] & 0xfff;
 }
 
-// handle rgba32 split into hi/lo tmem
 static uint32_t taddr(uint32_t addr, uint32_t tex_nibs) {
+  // handle rgba32 split into hi/lo tmem
   if (tex_nibs != 8) return (addr / 2) & 0x7ff;
   uint32_t offs = (addr / 4) & 0x3ff;
   return ((addr & 0x2) << 9) | offs;
@@ -667,6 +671,8 @@ static void load_tlut(uint32_t *instr) {
     ((uint16_t*)mem)[i] = ((uint16_t*)(R4300::ram + ram))[i / 4];
   }
 }
+
+/* === Geometry commands == */
 
 static void shade_triangle(RDPCommand &cmd, uint32_t *instr) {
   cmd.shade[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
@@ -744,6 +750,8 @@ static void rectangle(uint32_t *instr) {
   if (type == 0xb) tex_rectangle<true>(cmd, instr);
   Vulkan::add_rdp_cmd(cmd);
 }
+
+/* === Command decoding == */
 
 static void invalid(uint32_t *instr) {
   const char *msg = "[RDP] Invalid Command %08x %08x\n";

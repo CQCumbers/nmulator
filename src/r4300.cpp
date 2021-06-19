@@ -224,7 +224,7 @@ static void fram_init(char *name) {
   HANDLE fh = (HANDLE)_get_osfhandle(file);
   HANDLE mh = CreateFileMappingW(fh, NULL, PAGE_READWRITE, 0, 0, NULL);
   fram = (uint8_t*)MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, 0x20000);
-  if (!exists) memcpy(fram, 0xff, 0x20000);
+  if (!exists) memset(fram, 0xff, 0x20000);
 }
 
 #else
@@ -994,13 +994,13 @@ static int64_t stop_at(uint32_t addr) {
 static MipsConfig cfg = {
   .regs = regs, .cop0 = 34, .cop1 = 66,
   .lookup = lookup, .fetch = fetch,
+  .stop_at = stop_at, .step = &step,
+  .tlbwi = tlb_write, .link = link,
+
   .mfc0 = mfc0, .mfc0_mask = 0x0200,
   .mtc0 = mtc0, .mtc0_mask = 0x1a00,
-
   .pages = pages, .tlb = tlb[0],
-  .read = read, .write = write,
-  .tlbwi = tlb_write, .link = link,
-  .stop_at = stop_at
+  .read = read, .write = write
 };
 
 static uint32_t crc32(uint8_t *bytes, uint32_t len) {

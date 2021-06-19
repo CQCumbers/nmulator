@@ -15,7 +15,7 @@ jobs:
       - name: Build nmulator
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build
+          cmake --build build --config Release
       - name: Upload artifacts
         uses: actions/upload-artifact@master
         with:
@@ -33,7 +33,7 @@ jobs:
       - name: Build nmulator
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build
+          cmake --build build --config Release
       - name: Upload artifacts
         uses: actions/upload-artifact@master
         with:
@@ -47,13 +47,14 @@ jobs:
         with:
           submodules: recursive
       - name: Install toolchain
-        run: vcpkg install glslang:x64-windows
+        run: |
+          Invoke-WebRequest -Uri https://git.io/JnalT -OutFile glslang.zip
+          Expand-Archive -Path glslang.zip -DestinationPath glslang
+          echo "$pwd/glslang/bin" | Out-File -FilePath $env:GITHUB_PATH -Append
       - name: Build nmulator
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --config Release
-        env:
-          CMAKE_TOOLCHAIN_FILE: C:\vcpkg\scripts\buildsystems\vcpkg.cmake
       - name: Upload artifacts
         uses: actions/upload-artifact@master
         with:
