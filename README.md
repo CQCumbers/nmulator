@@ -1,28 +1,24 @@
 # nmulator
 > A work-in-progress N64 emulator
 
-nmulator is a work-in-progress Nintendo 64 emulator for PCs. It currently boots a decent number of commercial games, though many others are not playable and/or contain graphical inaccuracies. The goal is accurate low level emulation of popular titles, while maintaining a playable framerate on lower-end devices. Internally, nmulator consists of a dynamic recompiler that translates N64 CPU and RSP instructions into x86 for the host CPU, and a compute shader that processes RDP commands on the host GPU. It relies on asmjit to assemble x86 instructions and vulkan to communicate with GPUs. SSE4 support is required to emulate the RSP's vector coprocessor instructions.
+nmulator is a work-in-progress Nintendo 64 emulator for PCs. It currently boots a decent number of commercial games, though many more are not playable and/or contain graphical inaccuracies. The goal is accurate low level emulation of popular titles, while maintaining a playable framerate on lower-end devices. Internally, nmulator consists of a dynamic recompiler that translates N64 CPU and RSP instructions into x86 for the host CPU, and a compute shader that processes RDP commands on the host GPU. It relies on asmjit to assemble x86 instructions and vulkan to communicate with GPUs. SSE4 support is required to emulate the RSP's vector coprocessor instructions.
 
 ## Screenshots
 ![screenshots](screenshots.png)
 
 ## Todo List
-- Clean up compute shader with 16 bit types
 - Run and pass rasky's RSP vector tests
-- Double buffer compute shader memory
 - Reduce per-block interrupt check cost
 - Measure and reduce R4300/RSP context switches
 - Cache and reuse tmem versions
 - Optimize RSP fallback block lookup
-- Link direct branches in R4300 code
 - Detect and accelerate idle loops
 - Add watchpoints and RSP support to debugger
-- Switch to xbyak and statically link dependencies
 
 ## Building
-Prebuilt binaries are provided for [Windows], [Linux], and [macOS]. Windows and Linux builds should work out of the box, assuming your GPU supports Vulkan. macOS builds require MoltenVK to be installed by the user, such as via `brew install molten-vk`. To run nmulator, specify a big-endian ROM file on the command line, and ensure an appropriate pifdata.bin file is in the current directory. Note that nmulator is not ready for general use, so please do not report usability or compatibility issues.
+The latest binaries for Windows, Linux, and macOS can be downloaded via [nightly.link](https://nightly.link/CQCumbers/nmulator/workflows/build/master). Windows and Linux builds are design work out of the box, assuming your GPU supports Vulkan. macOS builds require MoltenVK to be installed by the user via `brew install molten-vk`. To run nmulator, specify a big-endian ROM file on the command line, and ensure an appropriate pifdata.bin file is in the current directory. Note that nmulator is not ready for general use, so please do not report usability or compatibility issues.
 
-To build from source, you should first install glslang, then run the following:
+To build from source, you should first install `glslangValidator`, then run the following:
 
 ```
 git submodule update --init --recursive

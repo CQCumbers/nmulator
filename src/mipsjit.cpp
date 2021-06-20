@@ -141,9 +141,9 @@ struct MipsJit {
   void x86_call(uint64_t func) {
     x86_store_caller();
 #ifdef _WIN32
-    as.push(x86::rcx), as.sub(x86::rsp, 32);
+    as.push(x86::rcx), as.sub(x86::rsp, 40);
     as.mov(x86::rdx, x86::rsi), as.call(func);
-    as.add(x86::rsp, 32), as.pop(x86::rcx);
+    as.add(x86::rsp, 40), as.pop(x86::rcx);
 #else
     as.push(x86::rdi), as.push(x86::rcx);
     as.mov(x86::rdi, x86::rcx), as.call(func);

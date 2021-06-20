@@ -108,11 +108,11 @@ void R4300::vi_update() {
   vi_line += 0x2, Sched::add(TASK_VI, 6510);
   if (vi_line < vi_sync) return;
 
-  // reset scanline to 0 (1 on odd interlaced frames)
-  bool interlaced = vi_status & 0x40;
-  vi_line = interlaced & ~vi_line;
-  if (vi_line == 0x1) return;
-  uint8_t format = vi_status & 0x3;
+  // reset scanline, flip field if interlace
+  uint8_t format = vi_status & 0x03;
+  bool interlace = vi_status & 0x40;
+  vi_line ^= (uint32_t)interlace;
+  if (vi_line &= 0x1) return;
 
   // calculate image dimensions
   uint32_t hend = (vi_hbound & 0x3ff);
@@ -150,10 +150,10 @@ void R4300::vi_update() {
 /* === Audio Interface registers === */
 
 static uint32_t ai_status, ai_rate;
-static uint32_t ai_ram, ai_len;
+static uint32_t ai_16bit, ai_ram, ai_len;
 static uint32_t ai_start, ai_end;
 
-static bool ai_run, ai_dirty, ai_16bit;
+static bool ai_run, ai_dirty;
 const uint32_t ntsc_clock = 48681812;
 const uint32_t audio_delay = 2048;
 static SDL_AudioDeviceID audio_dev;
@@ -175,7 +175,7 @@ void R4300::ai_update() {
 
 // configure new SDL audio device
 static void ai_config() {
-  SDL_AudioFormat fmt = (ai_16bit ? AUDIO_S16MSB : AUDIO_S8);
+  SDL_AudioFormat fmt = ai_16bit ? AUDIO_S16MSB : AUDIO_S8;
   SDL_AudioSpec spec = {
     .freq = (int)(ntsc_clock / (ai_rate + 1)) << !ai_16bit,
     .format = fmt, .channels = 2, .samples = 256,
@@ -643,7 +643,7 @@ static void write(uint32_t addr, uint64_t val) {
     case 0x410000c:
       // update RDP_STATUS
       RSP::cop0[11] &= ~pext(val >> 0, 0x7);
-      RSP::cop0[11] |= pext(val >> 1, 0x7); return;
+      RSP::cop0[11] |= pext(val >> 1, 0x5); return;
     // MIPS Interface
     case 0x4300000:
       if (val & 0x800) R4300::unset_irqs(0x20); return;
@@ -741,7 +741,7 @@ static uint32_t tlb_miss(uint32_t *pc) {
 static void unprotect(uint32_t pg);
 
 // write to TLB from cop0, updating page table
-static void tlb_write(uint32_t idx, uint64_t) {
+static void tlb_write(uint32_t idx, uint32_t) {
   uint32_t pg = (tlb[idx][1] >> 12) & ~1;
   uint32_t len = (tlb[idx][0] >> 13) + 1;
 
@@ -851,7 +851,7 @@ static LONG WINAPI handle_fault(_EXCEPTION_POINTERS *info) {
   if (sig != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
   uint8_t *addr = (uint8_t*)info->ExceptionRecord->ExceptionInformation[1];
   int64_t pg = addr - R4300::ram;
-  if (!(0 <= pg && pg <= R4300::mask)) exit(1);
+  if (!(0 <= pg && pg <= R4300::mask)) return EXCEPTION_CONTINUE_SEARCH;
   unprotect((uint32_t)pg >> 12); return EXCEPTION_CONTINUE_EXECUTION;
 }
 
@@ -898,7 +898,7 @@ static void unprotect(uint32_t pg) {
 static void handle_fault(int sig, siginfo_t *info, void*) {
   if (sig != SIGBUS && sig != SIGSEGV) return;
   int64_t pg = (uint8_t*)info->si_addr - R4300::ram;
-  if (!(0 <= pg && pg <= R4300::mask)) exit(1);
+  if (!(0 <= pg && pg <= R4300::mask)) return;
   unprotect((uint32_t)pg >> 12);
 }
 
@@ -970,7 +970,7 @@ static int64_t mfc0(uint32_t) {
 }
 
 // recalculate timer or irqs
-static void mtc0(uint32_t idx, uint64_t val) {
+static void mtc0(uint32_t idx, uint32_t val) {
   if (idx == 12) {
     bool exc = val & cop0[13] & 0xff00;
     exc = exc && (val & 0x3) == 0x1;

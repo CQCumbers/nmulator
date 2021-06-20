@@ -9,7 +9,7 @@
 
 typedef int64_t (*ReadPtr)(uint32_t addr);
 typedef uint32_t (*FetchPtr)(uint32_t addr);
-typedef void (*WritePtr)(uint32_t addr, uint64_t val);
+typedef void (*WritePtr)(uint32_t addr, uint32_t val);
 typedef uint64_t (*LinkPtr)(uint32_t pc, uint64_t block);
 typedef uint32_t (*CodePtr)();
 

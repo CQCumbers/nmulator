@@ -79,7 +79,7 @@ static int64_t mfc0(uint32_t) {
 }
 
 // modify RSP and RDP status regs
-static void mtc0(uint32_t idx, uint64_t val) {
+static void mtc0(uint32_t idx, uint32_t val) {
   switch (idx &= 0x1f) {
     default: return;
     case 0: RSP::cop0[0] = val & 0x1fff; return;

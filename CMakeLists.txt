@@ -28,5 +28,5 @@ add_dependencies(nmulator shader)
 target_compile_options(nmulator PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -msse4.2
         -fno-exceptions -fno-rtti -fno-strict-aliasing>
-    $<$<CXX_COMPILER_ID:MSVC>:/W3 /EHsc /GR->)
+    $<$<CXX_COMPILER_ID:MSVC>:/W2 /EHsc /GR->)
 target_compile_features(nmulator PRIVATE cxx_std_20)
