@@ -342,12 +342,22 @@ struct MipsJit {
 
   // fallback to MMIO or jump to TLB miss
   // paddr in ecx, vpage in edx, pc in edi
+  template <typename T>
   inline void x86_miss(Label miss, uint32_t func) {
     Label after = as.newLabel();
     as.jmp(after), as.bind(miss);
     as.mov(x86::eax, func == FN_WRITE ? 12 : 8);
     as.bt(x86::ecx, 30), as.jc(cfg.fn[FN_TLB]);
     as.call(cfg.fn[func]), as.bind(after);
+
+    if (cfg.watch) {
+      uint64_t type = func == FN_WRITE ? 1 : 2;
+      as.mov(x86::rsi, sizeof(T) << 32 | type << 40);
+      as.or_(x86::rsi, x86::rdi), as.push(x86::rax);
+      as.push(x86::rax), x86_call((uint64_t)cfg.watch);
+      as.cmp(x86::rax, 0), as.pop(x86::rax);
+      as.pop(x86::rax), as.jne(cfg.fn[FN_EXIT]);
+    }
   }
 
   template <typename T>
@@ -371,7 +381,7 @@ struct MipsJit {
       as.movzx(x86::eax, x86::byte_ptr(x86::rax, x86::rcx));
     }
     // translation miss handler
-    if (cfg.pages) x86_miss(miss, FN_READ);
+    if (cfg.pages) x86_miss<T>(miss, FN_READ);
   }
 
   template <typename T>
@@ -396,7 +406,7 @@ struct MipsJit {
       as.movsx(x86::rax, x86::byte_ptr(x86::rax, x86::rcx));
     }
     // translation miss handler
-    if (cfg.pages) x86_miss(miss, FN_READ);
+    if (cfg.pages) x86_miss<T>(miss, FN_READ);
   }
 
   template <typename T, bool phys=false>
@@ -420,7 +430,7 @@ struct MipsJit {
       as.mov(x86::byte_ptr(x86::rax, x86::rcx), x86::sil);
     }
     // translation miss handler
-    if (cfg.pages) x86_miss(miss, FN_WRITE);
+    if (cfg.pages) x86_miss<T>(miss, FN_WRITE);
   }
 
   template <typename T>
@@ -1250,7 +1260,10 @@ struct MipsJit {
   }
 
   uint32_t break_(uint32_t pc) {
-    as.or_(x86_spilld(4 + cfg.cop0), 0x3);
+    if (cfg.step) {
+      as.mov(x86::rsi, (uint64_t)cfg.step);
+      as.mov(x86::dword_ptr(x86::rsi), 0x1);
+    } else as.or_(x86_spilld(4 + cfg.cop0), 0x3);
     as.mov(x86::edi, pc - 4), as.jmp(cfg.fn[FN_EXIT]);
     return block_end;
   }
@@ -2635,7 +2648,7 @@ struct MipsJit {
     for (; pc != block_end; ++len) {
       uint32_t instr = cfg.fetch(pc - off);
       //printf("%08x: %08x\n", pc, instr);
-      pc = len ? check_breaks(pc, next) : next;
+      pc = check_breaks(pc, next);
       switch (next += 4, instr >> 26) {
         case 0x00: next = special(instr, pc); break;
         case 0x01: next = regimm(instr, pc); break;

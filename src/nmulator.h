@@ -21,7 +21,8 @@ struct MipsConfig {
   CodePtr *lookup;
   FetchPtr fetch;
   ReadPtr stop_at;
-  bool *step;
+  LinkPtr watch;
+  uint32_t *step;
   WritePtr tlbwi;
   LinkPtr link;
 
@@ -72,15 +73,28 @@ namespace Sched {
   void start_loop();
 }
 
+enum Watch {
+  WATCH_NONE,
+  WATCH_WRITE,
+  WATCH_READ,
+  WATCH_ACCESS
+};
+
 struct DbgConfig {
+  uint8_t (*read_mem)(uint32_t addr);
+  void (*write_mem)(uint32_t addr, uint8_t val);
   uint64_t (*read_reg)(uint32_t idx);
-  uint64_t (*read_mem)(uint32_t addr);
-  void (*set_break)(uint32_t addr, bool active);
+  void (*write_reg)(uint32_t idx, uint64_t val);
+  void (*set_break)(uint32_t addr);
+  void (*clr_break)(uint32_t addr);
+  void (*set_watch)(uint32_t addr, uint32_t len, char type);
+  void (*clr_watch)(uint32_t addr, uint32_t len, char type);
 };
 
 namespace Debugger {
-  bool update(const DbgConfig *cfg);
-  void init(uint32_t port);
+  void init(uint32_t port, DbgConfig conf);
+  bool poll();
+  bool update(uint32_t step);
 }
 
 /* === Hardware components === */

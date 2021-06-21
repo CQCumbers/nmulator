@@ -575,7 +575,7 @@ static void set_convert(uint32_t*) {
   state.convert[5] = sext(cmd >> 45, 9);*/
 }
 
-/* == TMEM handling === */
+/* === TMEM handling === */
 
 static void set_texture(uint32_t *instr) {
   tex_nibs = 0x1 << ((instr[0] >> 19) & 0x3);
@@ -672,7 +672,7 @@ static void load_tlut(uint32_t *instr) {
   }
 }
 
-/* === Geometry commands == */
+/* === Geometry commands === */
 
 static void shade_triangle(RDPCommand &cmd, uint32_t *instr) {
   cmd.shade[0] = (instr[0] & 0xffff0000) | (instr[4] >> 16);
@@ -751,7 +751,7 @@ static void rectangle(uint32_t *instr) {
   Vulkan::add_rdp_cmd(cmd);
 }
 
-/* === Command decoding == */
+/* === Command decoding === */
 
 static void invalid(uint32_t *instr) {
   const char *msg = "[RDP] Invalid Command %08x %08x\n";

@@ -18,7 +18,6 @@
 #include <nmmintrin.h>
 #include "nmulator.h"
 
-namespace R4300 { uint8_t *ram, *hram; }
 static uint32_t pages[0x100000];
 static uint32_t tlb[0x20][4];
 static CodePtr lookup[0x8000000];
@@ -27,8 +26,16 @@ static robin_hood::unordered_map<uint32_t, std::vector<uint64_t>> link_pages;
 
 static uint32_t pc = 0xbfc00000;
 static uint64_t regs[99];
-static uint64_t *const cop0 = regs + 34;
-static uint64_t *const cop1 = regs + 66;
+uint64_t *const cop0 = regs + 34;
+uint64_t *const cop1 = regs + 66;
+
+namespace R4300 {
+  uint8_t *ram, *hram;
+}
+
+static uint32_t step;
+static void joy_update(SDL_Event event);
+static void unprotect(uint32_t pg);
 
 /* === MIPS Interface registers === */
 
@@ -61,7 +68,6 @@ static const char *title;
 static SDL_Window *window;
 static SDL_Renderer *renderer;
 static SDL_Texture *texture;
-static void joy_update(SDL_Event event);
 
 // setup SDL renderer for display
 static void vi_init() {
@@ -141,6 +147,7 @@ void R4300::vi_update() {
   SDL_RenderCopy(renderer, texture, NULL, NULL);
   SDL_RenderPresent(renderer);
 
+  step |= Debugger::poll();
   for (SDL_Event e; SDL_PollEvent(&e);) {
     if (e.type == SDL_QUIT) exit(0);
     joy_update(e);
@@ -619,7 +626,7 @@ static int64_t read(uint32_t addr) {
 }
 
 // handle MMIO write to physical address
-static void write(uint32_t addr, uint64_t val) {
+static void write(uint32_t addr, uint32_t val) {
   uint8_t *ram = R4300::ram;
   switch (addr & R4300::mask) {
     default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
@@ -738,8 +745,6 @@ static uint32_t tlb_miss(uint32_t *pc) {
   return 0;  // assume valid region
 }
 
-static void unprotect(uint32_t pg);
-
 // write to TLB from cop0, updating page table
 static void tlb_write(uint32_t idx, uint32_t) {
   uint32_t pg = (tlb[idx][1] >> 12) & ~1;
@@ -797,11 +802,6 @@ static uint64_t link(uint32_t pc, uint64_t block) {
     *(uint16_t*)(block + 17) = 0x0b0f;
   }
   return next;
-}
-
-// read instruction from addr
-static uint32_t fetch(uint32_t addr) {
-  return read32(R4300::ram + addr);
 }
 
 /* === Code change detection === */
@@ -913,50 +913,10 @@ static void setup_fault_handler() {
 
 #endif
 
-/* === Debugger interface === */
+/* === Recompiler config === */
 
-static robin_hood::unordered_map<uint32_t, bool> breaks;
-static bool broke, step;
-
-// read registers in gdb MIPS order
-static uint64_t read_reg(uint32_t idx) {
-  if (idx < 32) return regs[idx];
-  if (idx >= 38) return cop1[idx - 38];
-  switch (idx) {
-    default: printf("Invalid reg %x\n", idx), exit(1);
-    case 32: return cop0[12];
-    case 33: return regs[33];
-    case 34: return regs[32];
-    case 35: return cop0[8];
-    case 36: return cop0[13];
-    case 37: return pc;
-  }
-}
-
-// read from virtual address
-static uint64_t read_mem(uint32_t addr) {
-  addr = addr - pages[addr >> 12];
-  if (addr >> 31) return read(addr);
-  return bswap64(*(uint64_t*)(R4300::ram + addr));
-}
-
-// create or delete breakpoint
-static void set_break(uint32_t addr, bool active) {
-  breaks[addr] = active;
-}
-
-const DbgConfig dbg = {
-  .read_reg = read_reg,
-  .read_mem = read_mem,
-  .set_break = set_break
-};
-
-void R4300::init_debug(uint32_t port) {
-  Debugger::init(port);
-  broke = step = Debugger::update(&dbg);
-}
-
-/* === Recompiler interface === */
+static robin_hood::unordered_set<uint32_t> breaks;
+static robin_hood::unordered_map<uint32_t, char> watches;
 
 // fire timer interrupt
 void R4300::timer_fire() {
@@ -984,10 +944,18 @@ static void mtc0(uint32_t idx, uint32_t val) {
   }
 }
 
+// read instruction from addr
+static uint32_t fetch(uint32_t addr) {
+  if (breaks.count(addr)) return 0xd;
+  if (addr >> 31) return read(addr);
+  return read32(R4300::ram + addr);
+}
+
 // stop compiler at 4kb boundaries
 static int64_t stop_at(uint32_t addr) {
-  if (!(addr & 0xfff)) return true;
-  return broke = step || breaks[addr];
+  bool stop = step && addr != pc;
+  uint32_t limit = (pc & ~0xfff) + 0x1000;
+  return addr == limit || stop;
 }
 
 // mem pointer filled in on init()
@@ -1003,6 +971,100 @@ static MipsConfig cfg = {
   .read = read, .write = write
 };
 
+/* === Debugger interface === */
+
+// read from virtual address
+static uint8_t read_mem(uint32_t addr) {
+  addr = addr - pages[addr >> 12];
+  if (addr >> 31) return read(addr);
+  return R4300::ram[addr];
+}
+
+// write to virtual address
+static void write_mem(uint32_t addr, uint8_t val) {
+  addr = addr - pages[addr >> 12];
+  if (addr >> 31) return write(addr, val);
+  R4300::ram[addr] = val;
+}
+
+// read register with gdb index
+static uint64_t read_reg(uint32_t idx) {
+  if (idx <= 31) return regs[idx];
+  if (idx >= 38) return cop1[idx - 38];
+  if (idx == 32) return cop0[12];  // STATUS
+  if (idx == 33) return regs[33];  // LO
+  if (idx == 34) return regs[32];  // HI
+  if (idx == 35) return cop0[8];   // BADVADDR
+  if (idx == 36) return cop0[13];  // CAUSE
+  if (idx == 37) return pc;
+  return -1;
+}
+
+// write register with gdb index
+static void write_reg(uint32_t idx, uint64_t val) {
+  if (idx <= 31) regs[idx] = val;
+  if (idx >= 38) cop1[idx - 38] = val;
+  if (idx == 32) cop0[12] = val;
+  if (idx == 33) regs[33] = val;
+  if (idx == 34) regs[32] = val;
+  if (idx == 35) cop0[8] = val;
+  if (idx == 36) cop0[13] = val;
+  if (idx == 37) pc = val;
+}
+
+// create new breakpoint
+static void set_break(uint32_t addr) {
+  addr = addr - pages[addr >> 12];
+  if (addr >> 31) return;
+  breaks.insert(addr);
+}
+
+// delete existing breakpoint
+static void clr_break(uint32_t addr) {
+  addr = addr - pages[addr >> 12];
+  breaks.erase(addr);
+}
+
+// check if access hits watchpoint
+static uint64_t check_watch(uint32_t addr, uint64_t ctx) {
+  if (step && (uint32_t)ctx == pc) return 0;
+  char len = ctx >> 32, type = ctx >> 40;
+  for (uint32_t i = addr; i < addr + len; ++i) {
+    if (!watches.count(addr)) continue;
+    if (watches[addr] & type) step = ~i;
+  }
+  return step > 1;
+}
+
+// create new watchpoint
+static void set_watch(uint32_t addr, uint32_t len, char type) {
+  addr = addr - pages[addr >> 12];
+  for (uint32_t i = 0; i < len; ++i)
+    watches[addr + i] |= type;
+  cfg.watch = check_watch;
+}
+
+// delete existing watchpoint
+static void clr_watch(uint32_t addr, uint32_t len, char type) {
+  addr = addr - pages[addr >> 12];
+  for (uint32_t i = 0; i < len; ++i)
+    watches.erase(addr + i);
+  if (watches.empty()) cfg.watch = NULL;
+}
+
+void R4300::init_debug(uint32_t port) {
+  DbgConfig conf = {
+    read_mem, write_mem,
+    read_reg, write_reg,
+    set_break, clr_break,
+    set_watch, clr_watch
+  };
+  Debugger::init(port, conf);
+  step = Debugger::update(0);
+}
+
+/* === R4300 interface === */
+
 static uint32_t crc32(uint8_t *bytes, uint32_t len) {
   uint32_t crc = 0, *msg = (uint32_t*)bytes;
   for (uint32_t i = 0; i < len / 4; ++i)
@@ -1017,10 +1079,9 @@ void R4300::update() {
     CodePtr code = lookup[ppc / 4];
     if (code) {
       pc = Mips::run(&cfg, code);
-      /*if (!(broke |= breaks[pc])) continue;
-      step = Debugger::update(&dbg);
+      if (step == 0) continue;
+      step = Debugger::update(step);
       memset(lookup, 0, sizeof(lookup));
-      broke = false;*/
     } else {
       protect(ppc);
       Mips::jit(&cfg, pc, lookup + ppc / 4);

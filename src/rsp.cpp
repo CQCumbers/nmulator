@@ -95,8 +95,8 @@ static void mtc0(uint32_t idx, uint32_t val) {
 }
 
 static int64_t stop_at(uint32_t addr) {
-  if (!(addr & 0xff)) return true;
-  return false;  // true to single-step
+  uint32_t limit = (RSP::pc & ~0xff) + 0x100;
+  return addr == limit;  // true to single-step
 }
 
 static MipsConfig cfg = {
@@ -107,6 +107,8 @@ static MipsConfig cfg = {
   .mfc0 = mfc0, .mfc0_mask = 0x0080,
   .mtc0 = mtc0, .mtc0_mask = 0xeb7f,
 };
+
+/* === RSP interface === */
 
 robin_hood::unordered_map<uint32_t, std::vector<Block>> backups;
 
