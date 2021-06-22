@@ -573,10 +573,24 @@ static void joy_update(SDL_Event event) {
 
 /* === R4300 memory access === */
 
+static uint32_t rdram_regs[10];
+static uint32_t ri_regs[8];
+
 // handle MMIO read from physical address
 static int64_t read(uint32_t addr) {
   switch (addr & R4300::mask) {
     default: return (addr & 0xffff0000) | (addr >> 16);
+    // RDRAM Registers
+    case 0x3f00000: return rdram_regs[0];
+    case 0x3f00004: return rdram_regs[1];
+    case 0x3f00008: return rdram_regs[2];
+    case 0x3f0000c: return rdram_regs[3];
+    case 0x3f00010: return rdram_regs[4];
+    case 0x3f00014: return rdram_regs[5];
+    case 0x3f00018: return rdram_regs[6];
+    case 0x3f0001c: return rdram_regs[7];
+    case 0x3f00020: return rdram_regs[8];
+    case 0x3f00024: return rdram_regs[9];
     // RSP Interface
     case 0x4040000: return RSP::cop0[0];
     case 0x4040004: return RSP::cop0[1];
@@ -614,10 +628,14 @@ static int64_t read(uint32_t addr) {
     case 0x460000c: return 0x7f;
     case 0x4600010: return pi_status;
     // RDRAM Interface
-    case 0x4700000: return 0xe;      // RI_MODE
-    case 0x4700004: return 0x40;     // RI_CONFIG
-    case 0x470000c: return 0x14;     // RI_SELECT
-    case 0x4700010: return 0x63634;  // RI_REFRESH
+    case 0x4700000: return ri_regs[0];  // RI_MODE
+    case 0x4700004: return ri_regs[1];  // RI_CONFIG
+    case 0x4700008: return ri_regs[2];  // RI_CURRENT
+    case 0x470000c: return ri_regs[3];  // RI_SELECT
+    case 0x4700010: return ri_regs[4];  // RI_REFRESH
+    case 0x4700014: return ri_regs[5];  // RI_LATENCY
+    case 0x4700018: return ri_regs[6];  // RI_RERROR
+    case 0x470001c: return ri_regs[7];  // RI_WERROR
     // Serial Interface
     case 0x4800018: return (mi_irqs & 0x2) << 11;
     // FlashRAM Interface
@@ -630,6 +648,17 @@ static void write(uint32_t addr, uint32_t val) {
   uint8_t *ram = R4300::ram;
   switch (addr & R4300::mask) {
     default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
+    // RDRAM Registers
+    case 0x3f00000: rdram_regs[0] = val; return;
+    case 0x3f00004: rdram_regs[1] = val; return;
+    case 0x3f00008: rdram_regs[2] = val; return;
+    case 0x3f0000c: rdram_regs[3] = val; return;
+    case 0x3f00010: rdram_regs[4] = val; return;
+    case 0x3f00014: rdram_regs[5] = val; return;
+    case 0x3f00018: rdram_regs[6] = val; return;
+    case 0x3f0001c: rdram_regs[7] = val; return;
+    case 0x3f00020: rdram_regs[8] = val; return;
+    case 0x3f00024: rdram_regs[9] = val; return;
     // RSP Interface
     case 0x4040000: RSP::cop0[0] = val & 0x1fff; return;
     case 0x4040004: RSP::cop0[1] = val & 0xffffff; return;
@@ -649,7 +678,7 @@ static void write(uint32_t addr, uint32_t val) {
       RSP::cop0[9] = val & R4300::mask; return;
     case 0x410000c:
       // update RDP_STATUS
-      RSP::cop0[11] &= ~pext(val >> 0, 0x7);
+      RSP::cop0[11] &= ~pext(val >> 0, 0x5);
       RSP::cop0[11] |= pext(val >> 1, 0x5); return;
     // MIPS Interface
     case 0x4300000:
@@ -709,6 +738,15 @@ static void write(uint32_t addr, uint32_t val) {
       Sched::add(TASK_PI, 0);
       pi_status |= 0x1; return;
     case 0x4600010: R4300::unset_irqs(0x10); return;
+    // RDRAM Interface
+    case 0x4700000: ri_regs[0] = val; return;
+    case 0x4700004: ri_regs[1] = val; return;
+    case 0x4700008: ri_regs[2] = val; return;
+    case 0x470000c: ri_regs[3] = val; return;
+    case 0x4700010: ri_regs[4] = val; return;
+    case 0x4700014: ri_regs[5] = val; return;
+    case 0x4700018: ri_regs[6] = val; return;
+    case 0x470001c: ri_regs[7] = val; return;
     // Serial Interface
     case 0x4800000: si_ram = val & 0xffffff; return;
     case 0x4800004: si_update();
@@ -763,7 +801,7 @@ static void tlb_write(uint32_t idx, uint32_t) {
   cop0[2] &= 0x7fffff, cop0[3] &= 0x7fffff;
   uint32_t d1 = (pg &= ~1) - mmio_bit(cop0[2] >> 6, len);
   uint32_t d2 = (pg + len) - mmio_bit(cop0[3] >> 6, len);
-  //printf("TLB map %x to %llx, idx: %x, inval: %llx, wired: %x, pc: %x\n",
+  //printf("TLB map %x to %llx, idx: %x, valid: %llx, wired: %x, pc: %x\n",
   //  pg, cop0[2] >> 6, idx, cop0[2] & 0x2, cop0[6], pc);
 
   // set bit 17 for invalid regions
@@ -1142,6 +1180,10 @@ void R4300::init(const char *name) {
   // 8MB RDRAM for 6102/6105
   if (ram[0x1fc007e6] == 0x3f) write32(ram + 0x318, 0x800000);
   if (ram[0x1fc007e6] == 0x91) write32(ram + 0x3f0, 0x800000);
+
+  // setup RDRAM interface
+  ri_regs[0] = 0xe, ri_regs[1] = 0x40;
+  ri_regs[3] = 0x14, ri_regs[4] = 0x63634;
 
   // setup other components
   Mips::init(&cfg);
