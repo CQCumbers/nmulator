@@ -153,18 +153,26 @@ struct MipsJit {
   }
 
   enum FN_Type {
-    FN_READ, FN_WRITE, FN_TLB,
+    FN_READ, FN_WRITE, FN_TLB, FN_WATCH,
     FN_EXIT, FN_ENTER, FN_EXC, FN_LINK
   };
 
   void emit_funcs() {
     // MMIO read handler
     cfg.fn[FN_READ] = (uint32_t)as.offset();
-    x86_call((uint64_t)cfg.read), as.ret();
+    as.push(x86::rcx), x86_call((uint64_t)cfg.read);
+    as.pop(x86::rcx), as.ret();
 
     // MMIO write handler
     cfg.fn[FN_WRITE] = (uint32_t)as.offset();
-    x86_call((uint64_t)cfg.write), as.ret();
+    as.push(x86::rcx), x86_call((uint64_t)cfg.write);
+    as.pop(x86::rcx), as.ret();
+
+    // Watchpoint check handler
+    cfg.fn[FN_WATCH] = (uint32_t)as.offset();
+    as.push(x86::rax), as.or_(x86::rsi, x86::rdi);
+    x86_call((uint64_t)cfg.watch), as.cmp(x86::rax, 0);
+    as.pop(x86::rax), as.ret();
 
     // TLB miss handler
     // assumes not in branch delay, EXL = 0
@@ -223,11 +231,12 @@ struct MipsJit {
 #ifdef _WIN32
     as.pop(x86::rsi), as.pop(x86::rdi);
 #endif
-    as.pop(x86::rbp), as.ret();
+    as.pop(x86::rbp), as.pop(x86::rbp);
+    as.ret();
 
     // JIT enter handler
     cfg.fn[FN_ENTER] = (uint32_t)as.offset();
-    as.push(x86::rbp);
+    as.push(x86::rbp), as.push(x86::rbp);
 #ifdef _WIN32
     as.push(x86::rdi), as.push(x86::rsi);
     as.mov(x86::rdi, x86::rcx);
@@ -350,13 +359,10 @@ struct MipsJit {
     as.bt(x86::ecx, 30), as.jc(cfg.fn[FN_TLB]);
     as.call(cfg.fn[func]), as.bind(after);
 
-    if (cfg.watch) {
+    if (cfg.watch_en) {
       uint64_t type = func == FN_WRITE ? 1 : 2;
       as.mov(x86::rsi, sizeof(T) << 32 | type << 40);
-      as.or_(x86::rsi, x86::rdi), as.push(x86::rax);
-      as.push(x86::rax), x86_call((uint64_t)cfg.watch);
-      as.cmp(x86::rax, 0), as.pop(x86::rax);
-      as.pop(x86::rax), as.jne(cfg.fn[FN_EXIT]);
+      as.call(cfg.fn[FN_WATCH]), as.jne(cfg.fn[FN_EXIT]);
     }
   }
 
@@ -2811,6 +2817,6 @@ void Mips::init(MipsConfig *cfg) {
 
   jit.emit_funcs();
   runtime.add(&ptr, &code);
-  for (uint32_t i = 0; i < 7; ++i)
+  for (uint32_t i = 0; i < 8; ++i)
     cfg->fn[i] += (uint64_t)ptr;
 }

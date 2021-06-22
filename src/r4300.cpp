@@ -876,10 +876,10 @@ static void protect(uint32_t ppc) {
 
 static void unprotect(uint32_t pg) {
   DWORD old = PAGE_READONLY;
-  uint32_t code[] = { 0x441f0f66, 0x0f660000, 0x441f, 0xed358d48, 0x8bffffff };
+  uint32_t code[] = { 0x441f0f66, 0x0f660000, 0x441f, 0xed358d48, 0xffffff };
   if (0x8000 <= pg && pg < 0x8010 && !sram) sram_init(strdup(title));
   for (uint32_t addr : prot_pages[pg]) lookup[addr] = NULL;
-  for (uint64_t addr : link_pages[pg]) memcpy((void*)addr, code, 20);
+  for (uint64_t addr : link_pages[pg]) memcpy((void*)addr, code, 19);
   VirtualProtect(R4300::ram + (pg << 12), 0x1000, PAGE_READWRITE, &old);
   prot_pages[pg].clear(), link_pages[pg].clear();
 }
@@ -925,10 +925,10 @@ static void protect(uint32_t ppc) {
 }
 
 static void unprotect(uint32_t pg) {
-  uint32_t code[] = { 0x441f0f66, 0x0f660000, 0x441f, 0xed358d48, 0x8bffffff };
+  uint32_t code[] = { 0x441f0f66, 0x0f660000, 0x441f, 0xed358d48, 0xffffff };
   if (0x8000 <= pg && pg < 0x8010 && !sram) sram_init(strdup(title));
   for (uint32_t addr : prot_pages[pg]) lookup[addr] = NULL;
-  for (uint64_t addr : link_pages[pg]) memcpy((void*)addr, code, 20);
+  for (uint64_t addr : link_pages[pg]) memcpy((void*)addr, code, 19);
   mprotect(R4300::ram + (pg << 12), 0x1000, PROT_READ | PROT_WRITE);
   prot_pages[pg].clear(), link_pages[pg].clear();
 }
@@ -1079,7 +1079,7 @@ static void set_watch(uint32_t addr, uint32_t len, char type) {
   addr = addr - pages[addr >> 12];
   for (uint32_t i = 0; i < len; ++i)
     watches[addr + i] |= type;
-  cfg.watch = check_watch;
+  cfg.watch_en = true;
 }
 
 // delete existing watchpoint
@@ -1087,7 +1087,7 @@ static void clr_watch(uint32_t addr, uint32_t len, char type) {
   addr = addr - pages[addr >> 12];
   for (uint32_t i = 0; i < len; ++i)
     watches.erase(addr + i);
-  if (watches.empty()) cfg.watch = NULL;
+  cfg.watch_en = !watches.empty();
 }
 
 void R4300::init_debug(uint32_t port) {
@@ -1135,6 +1135,7 @@ void R4300::init(const char *name) {
   setup_fault_handler();
 
   // initialize hidden bits
+  cfg.watch = check_watch;
   for (uint32_t i = 0; i < 0x800000; i += 2) {
     *(uint16_t*)(hram + i) = 0x03;
   }

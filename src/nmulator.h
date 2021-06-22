@@ -21,10 +21,11 @@ struct MipsConfig {
   CodePtr *lookup;
   FetchPtr fetch;
   ReadPtr stop_at;
-  LinkPtr watch;
   uint32_t *step;
   WritePtr tlbwi;
   LinkPtr link;
+  LinkPtr watch;
+  bool watch_en;
 
   ReadPtr mfc0;
   uint32_t mfc0_mask;
@@ -36,7 +37,7 @@ struct MipsConfig {
   uint8_t *mem;
   ReadPtr read;
   WritePtr write;
-  uint64_t fn[7];
+  uint64_t fn[8];
 };
 
 struct Block {
