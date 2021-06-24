@@ -575,11 +575,11 @@ static void joy_update(SDL_Event event) {
 
 static uint32_t rdram_regs[10];
 static uint32_t ri_regs[8];
+static uint8_t isview[0x200];
 
 // handle MMIO read from physical address
 static int64_t read(uint32_t addr) {
   switch (addr & R4300::mask) {
-    default: return (addr & 0xffff0000) | (addr >> 16);
     // RDRAM Registers
     case 0x3f00000: return rdram_regs[0];
     case 0x3f00004: return rdram_regs[1];
@@ -619,7 +619,7 @@ static int64_t read(uint32_t addr) {
     case 0x4400030: return vi_hscale;
     case 0x4400034: return vi_vscale;
     // Audio Interface
-    case 0x4500004: return (ai_status & 0x1 ? ai_len : 0);
+    case 0x4500004: return ai_status & 0x1 ? ai_len : 0;
     case 0x450000c: return ai_status;
     // Peripheral Interface
     case 0x4600000: return pi_ram;
@@ -639,7 +639,13 @@ static int64_t read(uint32_t addr) {
     // Serial Interface
     case 0x4800018: return (mi_irqs & 0x2) << 11;
     // FlashRAM Interface
-    case 0x8000000: return (fram_mode ? 0 : fram_status);
+    case 0x8000000: return fram_mode ? 0 : fram_status;
+    // ISViewer Interface
+    default: {
+      uint32_t i = (addr & R4300::mask) - 0x13ff0020;
+      if (i <= 0x1fc) return read32(isview + i);
+      return (addr & 0xffff0000) | (addr >> 16);
+    }
   }
 }
 
@@ -647,7 +653,6 @@ static int64_t read(uint32_t addr) {
 static void write(uint32_t addr, uint32_t val) {
   uint8_t *ram = R4300::ram;
   switch (addr & R4300::mask) {
-    default: /*printf("[MMIO] write to %x: %x\n", addr, val);*/ return;
     // RDRAM Registers
     case 0x3f00000: rdram_regs[0] = val; return;
     case 0x3f00004: rdram_regs[1] = val; return;
@@ -761,15 +766,23 @@ static void write(uint32_t addr, uint32_t val) {
       if (fram_mode != FRAM_STATUS) return;
       fram_status = val & 0xff; return;
     case 0x8010000: fram_write(val); return;
+    // ISViewer Interface
+    case 0x13ff0014:
+      if (val > sizeof(isview)) return;
+      printf("%.*s", val, isview); return;
+    default:
+      addr = (addr & R4300::mask) - 0x13ff0020;
+      if (addr <= 0x1fc) write32(isview + addr, val);
   }
 }
 
 // set bits 19/18 for physical pages with MMIO
 static uint32_t mmio_bit(uint32_t pg, uint32_t len) {
   pg &= 0x1ffff;
-  if (pg >= 0x3f00 && pg < 0x4000) pg |= 0x80000;
+  if (pg >= 0x0800 && pg < 0x4000) pg |= 0x80000;
   if (pg >= 0x4002 && pg < 0x8000) pg |= 0x80000;
   if (has_fram && pg >= 0x8000 && pg < 0x8020) pg |= 0x80000;
+  if (pg >= 0x13ff0 && pg < 0x13ff1) pg |= 0x80000;
   return pg & ~(len - 1);  // align page address
 }
 

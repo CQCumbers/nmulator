@@ -87,7 +87,7 @@ static void query(sock_t sockfd, const char *cmd_buf) {
   else if (strncmp(cmd_buf, "qProcessInfo", strlen("qProcessInfo")) == 0)
     send_gdb(sockfd, "triple:6d69707336342d7367692d69726978;pid:1;");
   else if (strncmp(cmd_buf, "qfThreadInfo", strlen("qfThreadInfo")) == 0)
-    send_gdb(sockfd, "m-1");
+    send_gdb(sockfd, "m0");
   else if (strncmp(cmd_buf, "qsThreadInfo", strlen("qsThreadInfo")) == 0)
     send_gdb(sockfd, "l");
   else if (strncmp(cmd_buf, "qC", strlen("qC")) == 0)
