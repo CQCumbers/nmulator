@@ -430,7 +430,6 @@ namespace Vulkan {
   }
 
   void render(RenderInfo *r) {
-    if (n_cmds == 0) return;
     if (r->cbuf_len > cbufl_size) r->cbuf_len = cbufl_size;
     if (r->zbuf_len > zbufl_size) r->zbuf_len = zbufl_size;
     memcpy(&renders[mem_idx], r, sizeof(RenderInfo));
@@ -440,12 +439,14 @@ namespace Vulkan {
     sync(); // drain other buffer
 
     // upload current buffer to GPU
-    conf_ptr()->n_cmds = n_cmds;
-    memcpy(zbufl_ptr(), r->zbufl, r->zbuf_len);
-    memcpy(zbufh_ptr(), r->zbufh, r->zbuf_len);
-    memcpy(cbufl_ptr(), r->cbufl, r->cbuf_len);
-    memcpy(cbufh_ptr(), r->cbufh, r->cbuf_len);
-    flush_compute(mem_idx);
+    if (n_cmds > 0) {
+      conf_ptr()->n_cmds = n_cmds;
+      memcpy(zbufl_ptr(), r->zbufl, r->zbuf_len);
+      memcpy(zbufh_ptr(), r->zbufh, r->zbuf_len);
+      memcpy(cbufl_ptr(), r->cbufl, r->cbuf_len);
+      memcpy(cbufh_ptr(), r->cbufh, r->cbuf_len);
+      flush_compute(mem_idx);
+    }
 
     // change buffers and reset data
     n_cmds = 0, n_tmems = 0;
@@ -612,63 +613,70 @@ static void load_tile(uint32_t *instr) {
   Vulkan::add_tmem_copy(state);
   uint8_t tex_idx = (instr[1] >> 24) & 0x7;
   RDPTex &tex = Vulkan::texes_ptr()[tex_idx];
-  tex.sth[0] = (instr[1] >> 12) & 0xfff, tex.sth[1] = instr[1] & 0xfff;
-  tex.stl[0] = (instr[0] >> 12) & 0xfff, tex.stl[1] = instr[0] & 0xfff;
+  int32_t sh = (tex.sth[0] = (instr[1] >> 12) & 0xfff) / 4;
+  int32_t th = (tex.sth[1] = (instr[1] >>  0) & 0xfff) / 4;
+  int32_t sl = (tex.stl[0] = (instr[0] >> 12) & 0xfff) / 4;
+  int32_t tl = (tex.stl[1] = (instr[0] >>  0) & 0xfff) / 4;
 
   // copy from texture image to tmem
-  uint32_t offset = tex.stl[1] / 4 * tex_width + tex.stl[0] / 4;
-  uint32_t len = tex.sth[0] / 4 - tex.stl[0] / 4 + 1, flip = 0;
-  offset = offset * tex_nibs / 2, len = len * tex_nibs / 2;
+  int32_t offset = (tl * tex_width + sl) * (tex_nibs / 2);
+  int32_t len = (sh - sl + 1) * (tex_nibs / 2);
   uint8_t *ram = R4300::ram + tex_addr + offset;
-  uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
-  const uint32_t tn = tex_nibs;
+  uint8_t *mem = Vulkan::tmem_ptr(), tn = tex_nibs;
 
   // swap every other 16-bit word on odd rows
-  for (int32_t i = 0; i <= (tex.sth[1] - tex.stl[1]) / 4; ++i) {
-    for (uint32_t j = 0; j < len; j += 2)
-      ((uint16_t*)mem)[taddr(j, tn) ^ flip] = ((uint16_t*)ram)[j / 2];
-    mem += tex.width, flip ^= 0x2;
-    ram += tex_width * tex_nibs / 2;
+  for (int32_t i = 0; i <= th - tl; ++i) {
+    int32_t off = tex.addr + tex.width * i, swp = (i << 1) & 0x2;
+    for (int32_t j = 0; j & 0x7 || j < len; j += 2)
+      ((uint16_t*)mem)[taddr(off + j, tn) ^ swp] = ((uint16_t*)ram)[j / 2];
+    ram += tex_width * (tex_nibs / 2);
   }
 }
 
 static void load_block(uint32_t *instr) {
   Vulkan::add_tmem_copy(state);
-  uint32_t sh = (instr[1] >> 12) & 0xfff, dxt = instr[1] & 0xfff;
-  uint32_t sl = (instr[0] >> 12) & 0xfff, tl = instr[0] & 0xfff;
-  RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+  uint8_t tex_idx = (instr[1] >> 24) & 0x7;
+  RDPTex &tex = Vulkan::texes_ptr()[tex_idx];
+  int32_t sh = tex.sth[0] = (instr[1] >> 12) & 0xfff;
+  int32_t th = tex.sth[1] = (instr[1] >>  0) & 0xfff;
+  int32_t sl = tex.stl[0] = (instr[0] >> 12) & 0xfff;
+  int32_t tl = tex.stl[1] = (instr[0] >>  0) & 0xfff;
 
   // copy from texture image to tmem
-  uint32_t offset = (tl * tex_width + sl) * tex_nibs / 2;
-  uint32_t len = (sh - sl + 1) * tex_nibs / 2, flip = 0;
-  uint16_t *ram = (uint16_t*)(R4300::ram + tex_addr + offset);
-  uint8_t *mem = Vulkan::tmem_ptr() + tex.addr;
-  const uint32_t tn = tex_nibs;
+  int32_t offset = (tl * tex_width + sl) * (tex_nibs / 2);
+  int32_t len = (sh - sl + 1) * (tex_nibs / 2);
+  uint8_t *ram = R4300::ram + tex_addr + offset;
+  uint8_t *mem = Vulkan::tmem_ptr(), tn = tex_nibs;
 
   // swap every other 16-bit word on odd rows
-  for (uint32_t i = 0; i < len;) {
-    for (uint32_t t = 0; t < 0x800 && i < len; i += 2) {
-      ((uint16_t*)mem)[taddr(i, tn) ^ flip] = *(ram++);
-      if ((i & 0x7) == 0x6) t += dxt;
-    }
-    mem += tex.width, flip ^= 0x2;
+  for (int32_t i = 0, t = 0; i & 0x7 || i < len; i += 2) {
+    int32_t off = tex.addr + tex.width * (t >> 11), swp = (t >> 10) & 0x2;
+    ((uint16_t*)mem)[taddr(off + i, tn) ^ swp] = ((uint16_t*)ram)[i / 2];
+    if ((i & 0x6) == 0x6) t += th;
   }
 }
 
 static void load_tlut(uint32_t *instr) {
   Vulkan::add_tmem_copy(state);
-  uint32_t sh = (instr[1] >> 14) & 0x3ff, th = instr[1] & 0xfff;
-  uint32_t sl = (instr[0] >> 14) & 0x3ff, tl = (instr[0] >> 2) & 0x3ff;
-  RDPTex tex = Vulkan::texes_ptr()[(instr[1] >> 24) & 0x7];
+  uint8_t tex_idx = (instr[1] >> 24) & 0x7;
+  RDPTex &tex = Vulkan::texes_ptr()[tex_idx];
+  int32_t sh = (tex.sth[0] = (instr[1] >> 12) & 0xfff) / 4;
+  int32_t th = (tex.sth[1] = (instr[1] >>  0) & 0xfff) / 4;
+  int32_t sl = (tex.stl[0] = (instr[0] >> 12) & 0xfff) / 4;
+  int32_t tl = (tex.stl[1] = (instr[0] >>  0) & 0xfff) / 4;
 
   // copy from texture image to tmem
-  uint8_t *mem = Vulkan::tmem_ptr() + (state.tlut = tex.addr);
-  uint32_t ram = tex_addr + (tl * tex_width + sl) * tex_nibs / 2;
-  uint32_t width = (sh - sl + 1) * tex_nibs / 2;
+  int32_t offset = (tl * tex_width + sl) * (tex_nibs / 2);
+  int32_t len = (sh - sl + 1) * (tex_nibs / 2) * 4;
+  uint8_t *ram = R4300::ram + tex_addr + offset;
+  uint8_t *mem = Vulkan::tmem_ptr(), tn = tex_nibs;
 
-  // quadricate memory while copying
-  for (uint32_t i = 0; i < width * 4; ++i) {
-    ((uint16_t*)mem)[i] = ((uint16_t*)(R4300::ram + ram))[i / 4];
+  // swap every other 16-bit word on odd rows
+  for (int32_t i = 0; i <= th - tl; ++i) {
+    int32_t off = tex.addr + tex.width * i, swp = (i << 1) & 0x2;
+    for (int32_t j = 0; j & 0x7 || j < len; j += 2)
+      ((uint16_t*)mem)[taddr(off + j, tn) ^ swp] = ((uint16_t*)ram)[j / 8];
+    ram += tex_width * (tex_nibs / 2);
   }
 }
 
