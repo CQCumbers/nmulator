@@ -133,18 +133,19 @@ void R4300::vi_update() {
   if (vi_dirty) {
     if (texture) SDL_DestroyTexture(texture);
     texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
-      SDL_TEXTUREACCESS_STREAMING, width, height);
+      SDL_TEXTUREACCESS_STREAMING, vi_width, height);
     vi_dirty = false;
   }
 
   uint8_t *pixels = NULL;
-  int pitch, len = width * height;
+  int pitch, len = vi_width * height;
   SDL_LockTexture(texture, NULL, (void**)&pixels, &pitch);
   if (format == 2) convert16(pixels, ram + vi_origin, len * 2);
   else convert32(pixels, ram + vi_origin, len * 4);
   SDL_UnlockTexture(texture);
 
-  SDL_RenderCopy(renderer, texture, NULL, NULL);
+  SDL_Rect src = { 0, 0, (int)width, (int)height };
+  SDL_RenderCopy(renderer, texture, &src, NULL);
   SDL_RenderPresent(renderer);
 
   step |= Debugger::poll();
@@ -700,7 +701,9 @@ static void write(uint32_t addr, uint32_t val) {
       if (val == vi_status) return;
       vi_status = val, vi_dirty = true; return;
     case 0x4400004: vi_origin = val & 0xffffff; return;
-    case 0x4400008: vi_width = val & 0xfff; return;
+    case 0x4400008:
+      if ((val & 0xfff) == vi_width) return;
+      vi_width = val & 0xfff, vi_dirty = true; return;
     case 0x440000c: vi_irq_line = val & 0x3ff; return;
     case 0x4400010: R4300::unset_irqs(0x8); return;
     case 0x4400018:
