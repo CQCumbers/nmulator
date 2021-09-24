@@ -333,9 +333,9 @@ uint visible(uvec2 pos, RDPCommand cmd, out ivec2 dxy, out uint cvbit) {
   bvec4 vxy = bvec4(uvec4(vx) & uvec4(vy));
   // compute interpolation deltas
   bool off = bool(cmd.sh >> 31) == lft;
-  if (off) x1.x += 3 * cmd.sh;
-  dxy.x = int(pos.x * 256) - x1.x / 128;
-  dxy.y = int(pos.y * 256) - cmd.yh / 4 * 256;
+  int xmaj = off ? x1.w : x1.x;
+  dxy.x = int(pos.x * 256) - (xmaj >> 7);
+  dxy.y = int(pos.y * 256) - (cmd.yh >> 2) * 256;
   if (off) dxy.y += 3 << 6;
   // apply scissor boundaries
   ivec4 sxh = ivec4(cmd.sxh * 2);
@@ -393,14 +393,14 @@ ivec3 calc_depth(int z_in, uint depth, uint cvg, uint pixel, RDPCommand cmd) {
 
 uint calc_shade(ivec2 dxy, RDPCommand cmd) {
   if (!bit(cmd.type, T_SHADE)) return 0;
-  ivec4 rgba = cmd.shade + (dxy.y / 256 * cmd.sde) + (dxy.x / 256 * cmd.sdx);
-  rgba += cmd.sde / 256 * (dxy.y & 0xff) + cmd.sdx / 256 * (dxy.x & 0xff);
+  ivec4 rgba = cmd.shade + (dxy.y >> 8) * cmd.sde + (dxy.x >> 8) * cmd.sdx;
+  rgba += (cmd.sde >> 8) * (dxy.y & 0xff) + (cmd.sdx >> 8) * (dxy.x & 0xff);
   return pack32(rgba >> 16);
 }
 
 ivec4 calc_coord(ivec2 dxy, RDPCommand cmd) {
-  ivec4 stwz = cmd.tex + (dxy.y / 256 * cmd.tde) + (dxy.x / 256 * cmd.tdx);
-  stwz += cmd.tde / 256 * (dxy.y & 0xff) + cmd.tdx / 256 * (dxy.x & 0xff);
+  ivec4 stwz = cmd.tex + (dxy.y >> 8) * cmd.tde + (dxy.x >> 8) * cmd.tdx;
+  stwz += (cmd.tde >> 8) * (dxy.y & 0xff) + (cmd.tdx >> 8) * (dxy.x & 0xff);
   if (bit(cmd.modes[0], M0_PERSP)) stwz.xy = ivec2(vec2(stwz.xy) * 32768.0 / vec2(stwz.z >> 16));
   stwz.w = clamp(stwz.w, 0, 0x3ffff << 13); return stwz;
 }
