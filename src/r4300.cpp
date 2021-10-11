@@ -164,7 +164,9 @@ static uint32_t ai_start, ai_end;
 static bool ai_run, ai_dirty;
 const uint32_t ntsc_clock = 48681812;
 const uint32_t audio_delay = 2048;
+static uint8_t audio_data[0x20000];
 static SDL_AudioDeviceID audio_dev;
+static uint8_t volume = 128;
 
 void R4300::ai_update() {
   // calculate samples remaining in play buffer
@@ -174,9 +176,14 @@ void R4300::ai_update() {
   if (ai_len > 0) return Sched::move(TASK_AI, 1);
   if (prev_len > 0) set_irqs(0x4);
 
-  // play samples at saved address, set param buffer empty
+  // mix audio data at volume level
   if (~ai_status & 0x80000001) return;
-  SDL_QueueAudio(audio_dev, ram + ai_start, ai_end);
+  memset(audio_data, 0, ai_end);
+  SDL_AudioFormat fmt = ai_16bit ? AUDIO_S16MSB : AUDIO_S8;
+  SDL_MixAudioFormat(audio_data, ram + ai_start, fmt, ai_end, volume);
+
+  // play samples, set param buffer empty
+  SDL_QueueAudio(audio_dev, audio_data, ai_end);
   ai_len = ai_end >> ai_16bit, ai_status &= ~0x80000001;
   Sched::move(TASK_AI, ai_len << 12);
 }
@@ -543,6 +550,8 @@ static void joy_update(SDL_Event event) {
     if (k == SDLK_RIGHT) joy_x = 80;
     for (uint32_t i = 0; i < 16; ++i)
       if (k == keys[i]) buttons |= 0x8000 >> i;
+    if (k == SDLK_PERIOD && volume != 128) volume *= 2;
+    if (k == SDLK_COMMA  && volume !=   1) volume /= 2;
   } else if (event.type == SDL_KEYUP) {
     uint32_t k = event.key.keysym.sym;
     if (k == SDLK_UP) joy_y = 0;

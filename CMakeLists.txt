@@ -4,6 +4,8 @@ project(nmulator VERSION 0.1.0 LANGUAGES CXX)
 # Add asmjit, glad, and SDL2
 set(ASMJIT_STATIC TRUE)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(FORCE_STATIC_VCRT ON)
+set(HAVE_LIBC TRUE)
 add_subdirectory(extern/asmjit)
 add_subdirectory(extern/glad)
 add_subdirectory(extern/sdl2)
